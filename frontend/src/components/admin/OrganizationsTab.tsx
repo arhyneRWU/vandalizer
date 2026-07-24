@@ -3,6 +3,7 @@ import {
   Users, Building2, Plus, Trash2, Pencil, ChevronRight, Download, AlertCircle, FolderTree, X,
 } from 'lucide-react'
 import { useConfirm } from '../shared/useConfirm'
+import { useToast } from '../../contexts/ToastContext'
 import { adminListAllTeams } from '../../api/admin'
 import type { AdminTeamItem } from '../../api/admin'
 import * as orgApi from '../../api/organizations'
@@ -100,6 +101,7 @@ function OrgNodeRow({
 }
 
 function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose: () => void; onReload: () => void }) {
+  const { toast } = useToast()
   const [members, setMembers] = useState<{ users: OrgMember[]; teams: OrgTeam[] } | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchQ, setSearchQ] = useState('')
@@ -134,20 +136,36 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
   }, [searchQ])
 
   const assignUser = async (userId: string) => {
-    await orgApi.assignUserToOrg(org.uuid, userId)
-    setSearchQ(''); setSearchResults([]); loadMembers(); onReload()
+    try {
+      await orgApi.assignUserToOrg(org.uuid, userId)
+      setSearchQ(''); setSearchResults([]); loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to add user to organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const unassignUser = async (userId: string) => {
-    await orgApi.unassignUserFromOrg(org.uuid, userId)
-    loadMembers(); onReload()
+    try {
+      await orgApi.unassignUserFromOrg(org.uuid, userId)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to remove user from organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const assignTeam = async (teamUuid: string) => {
-    await orgApi.assignTeamToOrg(org.uuid, teamUuid)
-    loadMembers(); onReload()
+    try {
+      await orgApi.assignTeamToOrg(org.uuid, teamUuid)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to add team to organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const unassignTeam = async (teamUuid: string) => {
-    await orgApi.unassignTeamFromOrg(org.uuid, teamUuid)
-    loadMembers(); onReload()
+    try {
+      await orgApi.unassignTeamFromOrg(org.uuid, teamUuid)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to remove team from organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const memberUserIds = new Set(members?.users.map(u => u.user_id) || [])

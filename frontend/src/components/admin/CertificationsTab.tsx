@@ -4,10 +4,12 @@ import {
   getCertificationProgressList, setCertificationUnlock,
   type CertificationProgressItem,
 } from '../../api/admin'
+import { useToast } from '../../contexts/ToastContext'
 import { downloadCSV, formatDate, formatNumber } from './shared/format'
 import { ExportButton, SearchInput, UserAvatar } from './shared/primitives'
 
 export function CertificationsTab() {
+  const { toast } = useToast()
   const [items, setItems] = useState<CertificationProgressItem[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -42,6 +44,8 @@ export function CertificationsTab() {
       setItems(prev => prev.map(p =>
         p.user_id === item.user_id ? { ...p, unlocked: !item.unlocked } : p
       ))
+    } catch (e) {
+      toast(`Failed to ${item.unlocked ? 're-lock' : 'unlock'} certification for ${item.name || item.user_id}: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setBusyUser(null)
     }

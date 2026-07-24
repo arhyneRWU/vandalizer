@@ -7,6 +7,7 @@ import {
 } from 'recharts'
 
 import { useConfirm } from '../shared/useConfirm'
+import { useToast } from '../../contexts/ToastContext'
 import { getTeamMembers } from '../../api/teams'
 import {
   getTeamLeaderboard,
@@ -223,6 +224,7 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
 
 export function TeamsTab() {
   const confirm = useConfirm()
+  const { toast } = useToast()
   const [subTab, setSubTab] = useState<'manage' | 'stats' | 'isolated'>('manage')
 
   // ── Manage sub-tab state ──────────────────────────────────────────────────
@@ -299,6 +301,8 @@ export function TeamsTab() {
       await adminCreateTeam(newTeamName.trim())
       setNewTeamName('')
       refreshAllTeams()
+    } catch (e) {
+      toast(`Failed to create team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setCreating(false)
     }
@@ -310,6 +314,8 @@ export function TeamsTab() {
       await updateSystemConfig({ default_team_id: teamUuid === defaultTeamUuid ? '' : teamUuid })
       setDefaultTeamUuid(teamUuid === defaultTeamUuid ? '' : teamUuid)
       refreshAllTeams()
+    } catch (e) {
+      toast(`Failed to update default team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setSettingDefault(false)
     }
@@ -359,11 +365,15 @@ export function TeamsTab() {
       destructive: true,
     })
     if (!ok) return
-    await adminRemoveUserFromTeam(teamUuid, userId)
-    const members = await getTeamMembers(teamUuid)
-    setTeamMembers(prev => ({ ...prev, [teamUuid]: members }))
-    refreshAllTeams()
-    refreshIsolated()
+    try {
+      await adminRemoveUserFromTeam(teamUuid, userId)
+      const members = await getTeamMembers(teamUuid)
+      setTeamMembers(prev => ({ ...prev, [teamUuid]: members }))
+      refreshAllTeams()
+      refreshIsolated()
+    } catch (e) {
+      toast(`Failed to remove ${userName} from team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const handleAssignIsolated = async (userId: string) => {
@@ -373,8 +383,8 @@ export function TeamsTab() {
     try {
       await adminAddUserToTeam(teamUuid, userId)
       setIsolated(prev => prev.filter(u => u.user_id !== userId))
-    } catch {
-      // assignment failed — leave user in list
+    } catch (e) {
+      toast(`Failed to assign user to team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setAssignLoading(prev => ({ ...prev, [userId]: false }))
     }

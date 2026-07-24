@@ -222,13 +222,39 @@ export function DemoTab() {
   }
 
   async function handleActivate(uuid: string) {
-    await activateDemoUser(uuid)
-    loadData()
+    const ok = await confirm({
+      title: 'Activate this application?',
+      message: 'Activate this pending application now? This creates their account and sends login credentials immediately, skipping the waitlist queue.',
+      confirmLabel: 'Activate',
+    })
+    if (!ok) return
+    setActionLoading(`activate-${uuid}`)
+    try {
+      await activateDemoUser(uuid)
+      loadData()
+    } catch {
+      toast('Failed to activate application', 'error')
+    } finally {
+      setActionLoading(null)
+    }
   }
 
   async function handleRelease(uuid: string) {
-    await releaseDemoUser(uuid)
-    loadData()
+    const ok = await confirm({
+      title: 'Release this user?',
+      message: 'Release this user so they can log in again? This is typically used for expired or completed trials that no longer need admin follow-up.',
+      confirmLabel: 'Release',
+    })
+    if (!ok) return
+    setActionLoading(`release-${uuid}`)
+    try {
+      await releaseDemoUser(uuid)
+      loadData()
+    } catch {
+      toast('Failed to release application', 'error')
+    } finally {
+      setActionLoading(null)
+    }
   }
 
   async function handleRestartTrial(uuid: string) {
@@ -621,25 +647,29 @@ export function DemoTab() {
                           {app.status === 'pending' && (
                             <button
                               onClick={() => handleActivate(app.uuid)}
+                              disabled={actionLoading === `activate-${app.uuid}`}
                               style={{
                                 padding: '4px 12px', borderRadius: 6, border: '1px solid #16a34a',
                                 background: '#f0fdf4', color: '#16a34a', fontSize: 12, fontWeight: 600,
                                 cursor: 'pointer', fontFamily: 'inherit',
+                                opacity: actionLoading === `activate-${app.uuid}` ? 0.5 : 1,
                               }}
                             >
-                              Activate
+                              {actionLoading === `activate-${app.uuid}` ? 'Activating...' : 'Activate'}
                             </button>
                           )}
                           {(app.status === 'expired' || app.status === 'completed') && !app.admin_released && (
                             <button
                               onClick={() => handleRelease(app.uuid)}
+                              disabled={actionLoading === `release-${app.uuid}`}
                               style={{
                                 padding: '4px 12px', borderRadius: 6, border: '1px solid #2563eb',
                                 background: '#eff6ff', color: '#2563eb', fontSize: 12, fontWeight: 600,
                                 cursor: 'pointer', fontFamily: 'inherit',
+                                opacity: actionLoading === `release-${app.uuid}` ? 0.5 : 1,
                               }}
                             >
-                              Release
+                              {actionLoading === `release-${app.uuid}` ? 'Releasing...' : 'Release'}
                             </button>
                           )}
                           {(app.status === 'active' || app.status === 'expired' || app.status === 'completed') && (
@@ -1053,6 +1083,7 @@ function CheckInConversation({ ticketUuid, onUpdate }: { ticketUuid: string; onU
 }
 
 function TrialCheckinsSection() {
+  const { toast } = useToast()
   const [prompts, setPrompts] = useState<PromptOverview[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -1071,8 +1102,12 @@ function TrialCheckinsSection() {
   useEffect(() => { loadPrompts() }, [loadPrompts])
 
   async function toggleEnabled(slug: string, enabled: boolean) {
-    await adminUpdatePrompt(slug, { enabled })
-    loadPrompts()
+    try {
+      await adminUpdatePrompt(slug, { enabled })
+      loadPrompts()
+    } catch (e) {
+      toast(`Failed to ${enabled ? 'enable' : 'disable'} check-in prompt: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const stageColors: Record<string, { bg: string; text: string }> = {

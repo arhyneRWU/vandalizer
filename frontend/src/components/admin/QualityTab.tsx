@@ -13,11 +13,13 @@ import {
   type QualityAlert, type QualityItem, type QualityItemDetail, type QualitySummary,
   type QualityTimelinePoint, type RegressionResult, type SystemConfigData,
 } from '../../api/admin'
+import { useToast } from '../../contexts/ToastContext'
 import { relativeTime } from '../../utils/time'
 import { downloadCSV } from './shared/format'
 import { ExportButton, KpiCard, SortableHeader } from './shared/primitives'
 
 export function QualityTab() {
+  const { toast } = useToast()
   const [summary, setSummary] = useState<QualitySummary | null>(null)
   const [timeline, setTimeline] = useState<QualityTimelinePoint[]>([])
   const [days, setDays] = useState(90)
@@ -60,14 +62,20 @@ export function QualityTab() {
     try {
       const result = await runRegressionSuite(regressionModel || undefined)
       setRegressionResult(result)
+    } catch (e) {
+      toast(`Failed to run regression suite: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setRegressionRunning(false)
     }
   }
 
   const handleAcknowledgeAlert = async (uuid: string) => {
-    await acknowledgeAlert(uuid)
-    setAlerts(prev => prev.filter(a => a.uuid !== uuid))
+    try {
+      await acknowledgeAlert(uuid)
+      setAlerts(prev => prev.filter(a => a.uuid !== uuid))
+    } catch (e) {
+      toast(`Failed to acknowledge alert: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const handleExpandItem = async (kind: string, id: string) => {
