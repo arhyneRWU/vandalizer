@@ -14,42 +14,10 @@ import type {
 } from '../../api/admin'
 import * as auditApi from '../../api/audit'
 import { useAuth } from '../../hooks/useAuth'
-import { formatNumber, formatDuration } from './shared/format'
+import { downloadCSV, formatDate, formatDateTime, formatDuration, formatNumber } from './shared/format'
 import {
   StatusBadge, RoleBadge, KpiCard, UserAvatar, SortableHeader, SearchInput, ExportButton, TimeRangeSelector, type DayOption,
 } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function formatDateTime(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 type UserSortKey = 'tokens_total' | 'workflows_run' | 'conversations' | 'last_active' | 'name'
 
