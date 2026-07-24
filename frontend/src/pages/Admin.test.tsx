@@ -175,4 +175,14 @@ describe('Admin — tab visibility truth table', () => {
     expect(await screen.findByText('Access Denied')).toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: 'Admin sections' })).not.toBeInTheDocument()
   })
+
+  it('7. ?tab=config as team admin does not render ConfigTab, and does not leave a blank pane', async () => {
+    mockUser = { is_admin: false, is_staff: false }
+    mockCurrentTeam = { role: 'owner' }
+    window.history.pushState({}, '', '/admin?tab=config')
+    render(<Admin />)
+    // A usable tab (the default, Usage) renders instead of a blank pane.
+    expect(await screen.findByText('UsageTab Stub')).toBeInTheDocument()
+    expect(screen.queryByText('ConfigTab Stub')).not.toBeInTheDocument()
+  })
 })

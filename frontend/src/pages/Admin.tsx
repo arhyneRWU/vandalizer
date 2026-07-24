@@ -89,14 +89,6 @@ export default function Admin() {
     getFeatureFlags().then(f => setTelemetryCollector(!!f.telemetry_collector_enabled)).catch(() => {})
   }, [])
 
-  // Honor ?tab=<key> deep links (e.g. the catalog-update notification).
-  useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get('tab')
-    if (requested && TABS.some(t => t.key === requested)) {
-      setActiveTab(requested as Tab)
-    }
-  }, [])
-
   const isGlobalAdmin = !!user?.is_admin
   const isStaff = !!user?.is_staff
   const isTeamAdmin = currentTeam?.role === 'owner' || currentTeam?.role === 'admin'
@@ -122,6 +114,26 @@ export default function Admin() {
   // O(1) lookup so render guards can apply `canSee` to a specific tab by key
   // without re-scanning TABS on every render.
   const tabByKey = Object.fromEntries(TABS.map(t => [t.key, t])) as Record<Tab, TabDef>
+
+  // Honor ?tab=<key> deep links (e.g. the catalog-update notification). Only a
+  // tab the current user can actually see is honored — an unreachable request
+  // (e.g. ?tab=config for a team admin) leaves activeTab at its default
+  // instead of landing on a tab whose content is fully gated (a blank pane).
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('tab')
+    if (requested && visibleTabs.some(t => t.key === requested)) {
+      setActiveTab(requested as Tab)
+    }
+  }, [visibleTabs])
+
+  // If the active tab is ever not visible (e.g. feature flags resolve after
+  // mount and hide it), fall back to the first visible tab for rendering
+  // purposes only — a derived value, not stored state, so there is no setState
+  // loop. Clicking a sidebar entry still sets `activeTab` directly since only
+  // visible tabs are ever rendered as clickable.
+  const effectiveActiveTab: Tab = visibleTabs.some(t => t.key === activeTab)
+    ? activeTab
+    : (visibleTabs[0]?.key ?? activeTab)
 
   if (!hasAccess) {
     return (
@@ -157,7 +169,7 @@ export default function Admin() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 8px' }}>
             {visibleTabs.map(tab => {
               const Icon = tab.icon
-              const isActive = activeTab === tab.key
+              const isActive = effectiveActiveTab === tab.key
               return (
                 <button
                   key={tab.key}
@@ -190,22 +202,22 @@ export default function Admin() {
           {isGlobalAdmin && <CatalogUpdateBanner onView={() => setActiveTab('catalog')} />}
           {isGlobalAdmin && <TelemetryOptInBanner />}
           <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading...</div>}>
-            {activeTab === 'usage' && canSee(tabByKey.usage) && <UsageTab />}
-            {activeTab === 'users' && canSee(tabByKey.users) && <UsersTab />}
-            {activeTab === 'teams' && canSee(tabByKey.teams) && <TeamsTab />}
-            {activeTab === 'organizations' && canSee(tabByKey.organizations) && <OrganizationsTab />}
-            {activeTab === 'workflows' && canSee(tabByKey.workflows) && <WorkflowsTab />}
-            {activeTab === 'quality' && canSee(tabByKey.quality) && <QualityTab />}
-            {activeTab === 'knowledgebases' && canSee(tabByKey.knowledgebases) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
-            {activeTab === 'compliance' && canSee(tabByKey.compliance) && <ComplianceTab />}
-            {activeTab === 'audit' && canSee(tabByKey.audit) && <AuditTab />}
-            {activeTab === 'demo' && canSee(tabByKey.demo) && <DemoTab />}
-            {activeTab === 'email' && canSee(tabByKey.email) && <EmailAnalyticsTab />}
-            {activeTab === 'certifications' && canSee(tabByKey.certifications) && <CertificationsTab />}
-            {activeTab === 'apikeys' && canSee(tabByKey.apikeys) && <ApiKeysTab />}
-            {activeTab === 'catalog' && canSee(tabByKey.catalog) && <CatalogTab />}
-            {activeTab === 'telemetry' && canSee(tabByKey.telemetry) && <TelemetryTab />}
-            {activeTab === 'config' && canSee(tabByKey.config) && <ConfigTab />}
+            {effectiveActiveTab === 'usage' && canSee(tabByKey.usage) && <UsageTab />}
+            {effectiveActiveTab === 'users' && canSee(tabByKey.users) && <UsersTab />}
+            {effectiveActiveTab === 'teams' && canSee(tabByKey.teams) && <TeamsTab />}
+            {effectiveActiveTab === 'organizations' && canSee(tabByKey.organizations) && <OrganizationsTab />}
+            {effectiveActiveTab === 'workflows' && canSee(tabByKey.workflows) && <WorkflowsTab />}
+            {effectiveActiveTab === 'quality' && canSee(tabByKey.quality) && <QualityTab />}
+            {effectiveActiveTab === 'knowledgebases' && canSee(tabByKey.knowledgebases) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
+            {effectiveActiveTab === 'compliance' && canSee(tabByKey.compliance) && <ComplianceTab />}
+            {effectiveActiveTab === 'audit' && canSee(tabByKey.audit) && <AuditTab />}
+            {effectiveActiveTab === 'demo' && canSee(tabByKey.demo) && <DemoTab />}
+            {effectiveActiveTab === 'email' && canSee(tabByKey.email) && <EmailAnalyticsTab />}
+            {effectiveActiveTab === 'certifications' && canSee(tabByKey.certifications) && <CertificationsTab />}
+            {effectiveActiveTab === 'apikeys' && canSee(tabByKey.apikeys) && <ApiKeysTab />}
+            {effectiveActiveTab === 'catalog' && canSee(tabByKey.catalog) && <CatalogTab />}
+            {effectiveActiveTab === 'telemetry' && canSee(tabByKey.telemetry) && <TelemetryTab />}
+            {effectiveActiveTab === 'config' && canSee(tabByKey.config) && <ConfigTab />}
           </Suspense>
         </div>
       </div>
