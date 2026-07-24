@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import {
   Shield, ShieldCheck, BarChart3, Users, Building2, Workflow, Settings,
   Lock, Globe, Zap,
@@ -12,24 +12,29 @@ import { useTeams } from '../hooks/useTeams'
 import { getAuthConfig } from '../api/auth'
 import { UpdateBanner } from '../components/admin/UpdateBanner'
 import { CatalogUpdateBanner } from '../components/admin/CatalogUpdateBanner'
-import { CatalogTab } from '../components/admin/CatalogTab'
-import { ApiKeysTab } from '../components/admin/ApiKeysTab'
-import { ComplianceTab } from '../components/admin/ComplianceTab'
-import { TeamsTab } from '../components/admin/TeamsTab'
-import { KnowledgeBasesTab } from '../components/admin/KnowledgeBasesTab'
-import { AuditTab } from '../components/admin/AuditTab'
-import { UsersTab } from '../components/admin/UsersTab'
 import { UsageTab } from '../components/admin/UsageTab'
-import { WorkflowsTab } from '../components/admin/WorkflowsTab'
-import { OrganizationsTab } from '../components/admin/OrganizationsTab'
-import { QualityTab } from '../components/admin/QualityTab'
-import { CertificationsTab } from '../components/admin/CertificationsTab'
-import { EmailAnalyticsTab } from '../components/admin/EmailAnalyticsTab'
-import { DemoTab } from '../components/admin/DemoTab'
-import { TelemetryTab } from '../components/admin/TelemetryTab'
 import { TelemetryOptInBanner } from '../components/admin/TelemetryOptInBanner'
-import { ConfigTab } from '../components/admin/ConfigTab'
 import { getFeatureFlags } from '../api/config'
+
+// UsageTab is the default `activeTab` (see useState<Tab>('usage') below), so it
+// stays a static import to avoid an extra network round-trip before the admin
+// landing view paints. Every other tab is lazy-loaded — most admins only ever
+// see a handful of these, and the rest (e.g. ConfigTab, DemoTab) are large.
+const CatalogTab = lazy(() => import('../components/admin/CatalogTab').then(m => ({ default: m.CatalogTab })))
+const ApiKeysTab = lazy(() => import('../components/admin/ApiKeysTab').then(m => ({ default: m.ApiKeysTab })))
+const ComplianceTab = lazy(() => import('../components/admin/ComplianceTab').then(m => ({ default: m.ComplianceTab })))
+const TeamsTab = lazy(() => import('../components/admin/TeamsTab').then(m => ({ default: m.TeamsTab })))
+const KnowledgeBasesTab = lazy(() => import('../components/admin/KnowledgeBasesTab').then(m => ({ default: m.KnowledgeBasesTab })))
+const AuditTab = lazy(() => import('../components/admin/AuditTab').then(m => ({ default: m.AuditTab })))
+const UsersTab = lazy(() => import('../components/admin/UsersTab').then(m => ({ default: m.UsersTab })))
+const WorkflowsTab = lazy(() => import('../components/admin/WorkflowsTab').then(m => ({ default: m.WorkflowsTab })))
+const OrganizationsTab = lazy(() => import('../components/admin/OrganizationsTab').then(m => ({ default: m.OrganizationsTab })))
+const QualityTab = lazy(() => import('../components/admin/QualityTab').then(m => ({ default: m.QualityTab })))
+const CertificationsTab = lazy(() => import('../components/admin/CertificationsTab').then(m => ({ default: m.CertificationsTab })))
+const EmailAnalyticsTab = lazy(() => import('../components/admin/EmailAnalyticsTab').then(m => ({ default: m.EmailAnalyticsTab })))
+const DemoTab = lazy(() => import('../components/admin/DemoTab').then(m => ({ default: m.DemoTab })))
+const TelemetryTab = lazy(() => import('../components/admin/TelemetryTab').then(m => ({ default: m.TelemetryTab })))
+const ConfigTab = lazy(() => import('../components/admin/ConfigTab').then(m => ({ default: m.ConfigTab })))
 
 type Tab = 'usage' | 'users' | 'teams' | 'organizations' | 'workflows' | 'quality' | 'knowledgebases' | 'compliance' | 'audit' | 'demo' | 'email' | 'certifications' | 'apikeys' | 'catalog' | 'telemetry' | 'config'
 
@@ -170,22 +175,24 @@ export default function Admin() {
           <UpdateBanner />
           {isGlobalAdmin && <CatalogUpdateBanner onView={() => setActiveTab('catalog')} />}
           {isGlobalAdmin && <TelemetryOptInBanner />}
-          {activeTab === 'usage' && <UsageTab />}
-          {activeTab === 'users' && <UsersTab />}
-          {activeTab === 'teams' && <TeamsTab />}
-          {activeTab === 'organizations' && (isGlobalAdmin || isStaff) && <OrganizationsTab />}
-          {activeTab === 'workflows' && <WorkflowsTab />}
-          {activeTab === 'quality' && <QualityTab />}
-          {activeTab === 'knowledgebases' && (isGlobalAdmin || isStaff) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
-          {activeTab === 'compliance' && (isGlobalAdmin || isStaff) && <ComplianceTab />}
-          {activeTab === 'audit' && (isGlobalAdmin || isStaff) && <AuditTab />}
-          {activeTab === 'demo' && (isGlobalAdmin || isStaff) && <DemoTab />}
-          {activeTab === 'email' && (isGlobalAdmin || isStaff) && <EmailAnalyticsTab />}
-          {activeTab === 'certifications' && (isGlobalAdmin || isStaff) && <CertificationsTab />}
-          {activeTab === 'apikeys' && (isGlobalAdmin || isStaff) && <ApiKeysTab />}
-          {activeTab === 'catalog' && isGlobalAdmin && <CatalogTab />}
-          {activeTab === 'telemetry' && isGlobalAdmin && telemetryCollector && <TelemetryTab />}
-          {activeTab === 'config' && isGlobalAdmin && <ConfigTab />}
+          <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading...</div>}>
+            {activeTab === 'usage' && <UsageTab />}
+            {activeTab === 'users' && <UsersTab />}
+            {activeTab === 'teams' && <TeamsTab />}
+            {activeTab === 'organizations' && (isGlobalAdmin || isStaff) && <OrganizationsTab />}
+            {activeTab === 'workflows' && <WorkflowsTab />}
+            {activeTab === 'quality' && <QualityTab />}
+            {activeTab === 'knowledgebases' && (isGlobalAdmin || isStaff) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
+            {activeTab === 'compliance' && (isGlobalAdmin || isStaff) && <ComplianceTab />}
+            {activeTab === 'audit' && (isGlobalAdmin || isStaff) && <AuditTab />}
+            {activeTab === 'demo' && (isGlobalAdmin || isStaff) && <DemoTab />}
+            {activeTab === 'email' && (isGlobalAdmin || isStaff) && <EmailAnalyticsTab />}
+            {activeTab === 'certifications' && (isGlobalAdmin || isStaff) && <CertificationsTab />}
+            {activeTab === 'apikeys' && (isGlobalAdmin || isStaff) && <ApiKeysTab />}
+            {activeTab === 'catalog' && isGlobalAdmin && <CatalogTab />}
+            {activeTab === 'telemetry' && isGlobalAdmin && telemetryCollector && <TelemetryTab />}
+            {activeTab === 'config' && isGlobalAdmin && <ConfigTab />}
+          </Suspense>
         </div>
       </div>
     </PageLayout>
