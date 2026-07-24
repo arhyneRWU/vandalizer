@@ -2,18 +2,22 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Navigate, useNavigate, useSearch } from '@tanstack/react-router'
 import {
   ArrowLeft, Check, MessageSquare, Send, Plus, Paperclip, Pencil, X, Loader2, Link2, Tag,
-  Eye, UserPlus, Search, Flag, Lock, Layers,
+  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles,
 } from 'lucide-react'
 import { PageLayout } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
 import { useToast } from '../contexts/ToastContext'
 import { useConfirm } from '../components/shared/useConfirm'
 import * as supportApi from '../api/support'
+import {
+  listPositiveFeedback, getPositiveFeedbackStats,
+  type PositiveFeedbackItem, type PositiveFeedbackStats,
+} from '../api/feedback'
 import type {
   SupportTicket, SupportTicketSummary, SupportAttachment,
 } from '../types/support'
 
-type View = 'list' | 'new' | 'chat'
+type View = 'list' | 'new' | 'chat' | 'whats_working'
 type StatusFilter = 'all' | 'open' | 'in_progress' | 'closed'
 type PriorityFilter = 'all' | 'low' | 'normal' | 'high'
 type ClassificationFilter = 'all' | 'bug' | 'enhancement' | 'feature_request'
@@ -51,6 +55,11 @@ const CLASSIFICATION_LABELS: Record<string, string> = {
 }
 
 type Stats = { total: number; open: number; in_progress: number; closed: number }
+
+const statCardStyle = (color: string): React.CSSProperties => ({
+  flex: 1, padding: '16px 20px', background: '#fff', borderRadius: 'var(--ui-radius, 12px)',
+  border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
+})
 
 export default function SupportCenter() {
   const { user } = useAuth()
@@ -158,7 +167,11 @@ export default function SupportCenter() {
           currentUserId={user.user_id}
           onNew={() => setView('new')}
           onSelect={openTicket}
+          onWhatsWorking={() => setView('whats_working')}
         />
+      )}
+      {view === 'whats_working' && (
+        <WhatsWorkingView onBack={() => setView('list')} />
       )}
       {view === 'new' && (
         <NewTicketView
@@ -181,6 +194,142 @@ export default function SupportCenter() {
 }
 
 // ---------------------------------------------------------------------------
+// What's Working — the read home for positive signal (chat thumbs-up with a
+// comment, high extraction star ratings, and off-ticket ProductFeedback). The
+// mirror of the ticket queue: these never needed triage, they just never had a
+// place anyone looked.
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_SOURCE_META: Record<string, { label: string; color: string }> = {
+  chat: { label: 'Chat', color: '#3b82f6' },
+  extraction: { label: 'Extraction', color: '#8b5cf6' },
+  product: { label: 'Shared', color: '#ec4899' },
+}
+
+function WhatsWorkingView({ onBack }: { onBack: () => void }) {
+  const { toast } = useToast()
+  const [items, setItems] = useState<PositiveFeedbackItem[]>([])
+  const [stats, setStats] = useState<PositiveFeedbackStats | null>(null)
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'chat' | 'extraction' | 'product'>('all')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    const src = sourceFilter === 'all' ? undefined : sourceFilter
+    Promise.all([listPositiveFeedback(src, 100), getPositiveFeedbackStats()])
+      .then(([feed, s]) => {
+        if (cancelled) return
+        setItems(feed.items)
+        setStats(s)
+      })
+      .catch(() => { if (!cancelled) toast('Failed to load feedback', 'error') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [sourceFilter, toast])
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button type="button" onClick={onBack} aria-label="Back to tickets"
+          style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4, color: '#6b7280' }}>
+          <ArrowLeft size={20} />
+        </button>
+        <Heart size={20} color="#ec4899" />
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>What&rsquo;s Working</h1>
+          <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>
+            The positive signal users leave — praise, high ratings, and ideas.
+          </p>
+        </div>
+      </div>
+
+      {/* Stats cards */}
+      {stats && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <div style={statCardStyle('#ec4899')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#ec4899' }}>{stats.positive_last_7_days}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Positive · last 7 days</div>
+          </div>
+          <div style={statCardStyle('#22c55e')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#22c55e' }}>
+              {stats.thumbs_up_rate == null ? '—' : `${Math.round(stats.thumbs_up_rate * 100)}%`}
+            </div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Chat thumbs-up rate</div>
+          </div>
+          <div style={statCardStyle('#3b82f6')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{stats.by_source.chat}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Chat up-votes</div>
+          </div>
+          <div style={statCardStyle('#8b5cf6')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#8b5cf6' }}>{stats.by_source.extraction}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Great extractions</div>
+          </div>
+        </div>
+      )}
+
+      {/* Source filter */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {(['all', 'chat', 'extraction', 'product'] as const).map((s) => {
+          const active = sourceFilter === s
+          const label = s === 'all' ? 'All' : FEEDBACK_SOURCE_META[s].label
+          return (
+            <button key={s} type="button" onClick={() => setSourceFilter(s)}
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 13, fontWeight: 600,
+                cursor: 'pointer', border: `1px solid ${active ? '#ec4899' : '#e5e7eb'}`,
+                background: active ? '#fdf2f8' : '#fff', color: active ? '#be185d' : '#6b7280',
+              }}>
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Feed */}
+      <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', overflow: 'hidden' }}>
+        {loading ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
+            <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : items.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af', fontSize: 14 }}>
+            <Sparkles size={24} style={{ margin: '0 auto 8px', display: 'block', opacity: 0.5 }} />
+            No positive feedback yet. As users leave praise and high ratings, it lands here.
+          </div>
+        ) : (
+          items.map((it, i) => {
+            const meta = FEEDBACK_SOURCE_META[it.source] ?? { label: it.source, color: '#6b7280' }
+            return (
+              <div key={i} style={{
+                padding: '14px 20px', borderBottom: i < items.length - 1 ? '1px solid #f3f4f6' : 'none',
+                display: 'flex', gap: 12, alignItems: 'flex-start',
+              }}>
+                <span style={{
+                  flexShrink: 0, marginTop: 2, padding: '2px 8px', borderRadius: 999, fontSize: 11,
+                  fontWeight: 600, background: `${meta.color}18`, color: meta.color,
+                }}>
+                  {it.sentiment === 'idea' ? 'Idea' : meta.label}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, color: '#111827', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {it.message}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
+                    {timeAgo(it.created_at)}
+                  </div>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // List view — full queue with stats, status filter, and requester-aware rows
 // ---------------------------------------------------------------------------
 
@@ -190,7 +339,7 @@ function ListView({
   classificationFilter, onClassificationFilterChange,
   tagFilter, onTagFilterChange, allTags,
   searchInput, onSearchInputChange, activeSearch,
-  currentUserId, onNew, onSelect,
+  currentUserId, onNew, onSelect, onWhatsWorking,
 }: {
   tickets: SupportTicketSummary[]
   stats: Stats | null
@@ -210,6 +359,7 @@ function ListView({
   currentUserId: string
   onNew: () => void
   onSelect: (uuid: string) => void
+  onWhatsWorking: () => void
 }) {
   const hasFilters =
     statusFilter !== 'open' || priorityFilter !== 'all' ||
@@ -221,10 +371,6 @@ function ListView({
     onTagFilterChange('')
     onSearchInputChange('')
   }
-  const statCardStyle = (color: string): React.CSSProperties => ({
-    flex: 1, padding: '16px 20px', background: '#fff', borderRadius: 'var(--ui-radius, 12px)',
-    border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
-  })
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -239,16 +385,29 @@ function ListView({
             </p>
           </div>
         </div>
-        <button
-          onClick={onNew}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)', border: 'none',
-            background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          }}
-        >
-          <Plus size={16} /> New Ticket
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={onWhatsWorking}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)',
+              border: '1px solid #e5e7eb', background: '#fff',
+              color: '#374151', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            <Heart size={16} color="#ec4899" /> What&rsquo;s Working
+          </button>
+          <button
+            onClick={onNew}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)', border: 'none',
+              background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            <Plus size={16} /> New Ticket
+          </button>
+        </div>
       </div>
 
       {/* Stats cards */}

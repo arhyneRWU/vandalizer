@@ -114,16 +114,18 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
         rating,
       })
     } catch { /* ignore */ }
-    if (rating === 'down') setShowComment(true)
+    // Invite a comment for BOTH sentiments — positive feedback is worth capturing,
+    // not just complaints. The prompt copy flips with the rating below.
+    if (!commentSent) setShowComment(true)
   }
 
   const handleSubmitComment = async () => {
-    if (!comment.trim()) return
+    if (!comment.trim() || !feedback) return
     try {
       await submitChatFeedback({
         conversation_uuid: conversationUuid,
         message_index: messageIndex,
-        rating: 'down',
+        rating: feedback,
         comment: comment.trim(),
       })
       setCommentSent(true)
@@ -332,7 +334,7 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
             </button>
           </div>}
 
-          {/* Comment form for negative feedback */}
+          {/* Comment form — shown after either thumbs-up or thumbs-down */}
           {!isStreamingProp && showComment && !commentSent && (
             <div style={{
               marginTop: 8, display: 'flex', gap: 8, alignItems: 'flex-start',
@@ -342,8 +344,8 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                 value={comment}
                 onChange={e => setComment(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') handleSubmitComment() }}
-                placeholder="What went wrong? (optional)"
-                aria-label="What went wrong? (optional)"
+                placeholder={feedback === 'up' ? 'What worked well? (optional)' : 'What went wrong? (optional)'}
+                aria-label={feedback === 'up' ? 'What worked well? (optional)' : 'What went wrong? (optional)'}
                 style={{
                   flex: 1, padding: '6px 10px', borderRadius: 6,
                   border: '1px solid #d1d5db', fontSize: 13,
