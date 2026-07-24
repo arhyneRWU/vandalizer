@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import {
-  ChevronRight, RefreshCw, MessageSquare, Download, ChevronDown,
+  AlertCircle, ChevronRight, RefreshCw, MessageSquare, Download, ChevronDown,
   Mail, Send, Link, UserPlus, Award,
 } from 'lucide-react'
 import { useConfirm } from '../shared/useConfirm'
@@ -110,10 +110,12 @@ export function DemoTab() {
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [expandedUuid, setExpandedUuid] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
     setLoading(true)
+    setLoadError(null)
     try {
       const [s, a] = await Promise.all([
         getDemoStats(),
@@ -121,8 +123,8 @@ export function DemoTab() {
       ])
       setStats(s)
       setApps(a)
-    } catch {
-      // ignore
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : 'Failed to load demo applications')
     } finally {
       setLoading(false)
     }
@@ -578,8 +580,22 @@ export function DemoTab() {
       {/* Applications table */}
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>Loading...</div>
+      ) : loadError && apps.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>
+          <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 14, color: '#374151' }}>{loadError}</div>
+        </div>
       ) : (
         <div style={{ borderRadius: 12, border: '1px solid #e5e7eb', overflow: 'hidden', background: '#fff' }}>
+          {loadError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+              color: '#991b1b', fontSize: 13,
+            }}>
+              <AlertCircle size={14} /> {loadError}
+            </div>
+          )}
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
             <thead>
               <tr style={{ background: '#f9fafb' }}>

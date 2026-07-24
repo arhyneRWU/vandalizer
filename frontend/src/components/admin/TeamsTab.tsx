@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeft, Building2, CheckCircle2, ChevronDown, ChevronUp, Cpu, FileText, MessageSquare, Plus, Users, XCircle,
+  AlertCircle, ArrowLeft, Building2, CheckCircle2, ChevronDown, ChevronUp, Cpu, FileText, MessageSquare, Plus, Users, XCircle,
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -230,6 +230,7 @@ export function TeamsTab() {
   // ── Manage sub-tab state ──────────────────────────────────────────────────
   const [allTeams, setAllTeams] = useState<AdminTeamItem[]>([])
   const [loadingAll, setLoadingAll] = useState(true)
+  const [allTeamsError, setAllTeamsError] = useState<string | null>(null)
   const [newTeamName, setNewTeamName] = useState('')
   const [creating, setCreating] = useState(false)
   const [expandedTeamUuid, setExpandedTeamUuid] = useState<string | null>(null)
@@ -242,6 +243,7 @@ export function TeamsTab() {
   // ── Stats sub-tab state ───────────────────────────────────────────────────
   const [statsTeams, setStatsTeams] = useState<TeamLeaderboardItem[]>([])
   const [loadingStats, setLoadingStats] = useState(false)
+  const [statsError, setStatsError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: TeamSortKey; dir: 'asc' | 'desc' }>({ key: 'tokens_total', dir: 'desc' })
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null)
@@ -251,6 +253,7 @@ export function TeamsTab() {
   const [isolated, setIsolated] = useState<IsolatedUserItem[]>([])
   const [isolatedLoaded, setIsolatedLoaded] = useState(false)
   const [loadingIsolated, setLoadingIsolated] = useState(false)
+  const [isolatedError, setIsolatedError] = useState<string | null>(null)
   const [assignTargets, setAssignTargets] = useState<Record<string, string>>({})
   const [assignLoading, setAssignLoading] = useState<Record<string, boolean>>({})
 
@@ -259,19 +262,22 @@ export function TeamsTab() {
 
   const refreshAllTeams = useCallback(() => {
     setLoadingAll(true)
+    setAllTeamsError(null)
     adminListAllTeams().then(t => {
       setAllTeams(t)
       const def = t.find(x => x.is_default)
       if (def) setDefaultTeamUuid(def.uuid)
-    }).catch(() => setAllTeams([])).finally(() => setLoadingAll(false))
+    }).catch(e => setAllTeamsError(e?.message || 'Failed to load teams')).finally(() => setLoadingAll(false))
   }, [])
 
   const refreshIsolated = useCallback(() => {
     setLoadingIsolated(true)
+    setIsolatedError(null)
     getIsolatedUsers().then(users => {
       setIsolated(users)
       setIsolatedLoaded(true)
-    }).catch(() => setIsolatedLoaded(true)).finally(() => setLoadingIsolated(false))
+    }).catch(e => { setIsolatedError(e?.message || 'Failed to load isolated users'); setIsolatedLoaded(true) })
+      .finally(() => setLoadingIsolated(false))
   }, [])
 
   useEffect(() => {
@@ -284,8 +290,9 @@ export function TeamsTab() {
 
   const refreshStats = useCallback(() => {
     setLoadingStats(true)
+    setStatsError(null)
     const arg = typeof statsDays === 'number' ? statsDays : undefined
-    getTeamLeaderboard(arg).then(setStatsTeams).catch(() => setStatsTeams([])).finally(() => setLoadingStats(false))
+    getTeamLeaderboard(arg).then(setStatsTeams).catch(e => setStatsError(e?.message || 'Failed to load team stats')).finally(() => setLoadingStats(false))
   }, [statsDays])
 
   useEffect(() => {
@@ -494,10 +501,19 @@ export function TeamsTab() {
                 Click a team to manage its members. Star to set as the default for new users.
               </span>
             </div>
+            {allTeamsError && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                color: '#991b1b', fontSize: 13,
+              }}>
+                <AlertCircle size={14} /> {allTeamsError}
+              </div>
+            )}
             {loadingAll ? (
               <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>Loading...</div>
             ) : allTeams.length === 0 ? (
-              <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>No teams yet.</div>
+              !allTeamsError && <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>No teams yet.</div>
             ) : allTeams.map(team => (
               <div key={team.uuid} style={{ borderBottom: '1px solid #f3f4f6' }}>
                 {/* Team row */}
@@ -638,10 +654,19 @@ export function TeamsTab() {
             <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
               Team Leaderboard ({filteredStats.length}) {statsDays !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {statsDays} days</span>}
             </div>
+            {statsError && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                color: '#991b1b', fontSize: 13,
+              }}>
+                <AlertCircle size={14} /> {statsError}
+              </div>
+            )}
             {loadingStats ? (
               <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading...</div>
             ) : filteredStats.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No teams found.</div>
+              !statsError && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No teams found.</div>
             ) : (
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
@@ -692,12 +717,23 @@ export function TeamsTab() {
           <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 14, fontWeight: 600 }}>
             Isolated Users (only on their personal team) ({isolated.length})
           </div>
+          {isolatedError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+              color: '#991b1b', fontSize: 13,
+            }}>
+              <AlertCircle size={14} /> {isolatedError}
+            </div>
+          )}
           {loadingIsolated && !isolatedLoaded ? (
             <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>Loading...</div>
           ) : isolated.length === 0 ? (
-            <div style={{ padding: 32, textAlign: 'center', color: '#6b7280' }}>
-              No isolated users. Everyone is on at least one shared team.
-            </div>
+            !isolatedError && (
+              <div style={{ padding: 32, textAlign: 'center', color: '#6b7280' }}>
+                No isolated users. Everyone is on at least one shared team.
+              </div>
+            )
           ) : isolated.map(u => (
             <div key={u.user_id} style={{ padding: '12px 20px', borderBottom: '1px solid #f3f4f6', display: 'flex', alignItems: 'center', gap: 12 }}>
               <div style={{ flex: 1 }}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Award, Lock, RefreshCw, Unlock } from 'lucide-react'
+import { AlertCircle, Award, Lock, RefreshCw, Unlock } from 'lucide-react'
 import {
   getCertificationProgressList, setCertificationUnlock,
   type CertificationProgressItem,
@@ -12,14 +12,18 @@ export function CertificationsTab() {
   const { toast } = useToast()
   const [items, setItems] = useState<CertificationProgressItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busyUser, setBusyUser] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const data = await getCertificationProgressList()
       setItems(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load certification progress')
     } finally {
       setLoading(false)
     }
@@ -94,8 +98,17 @@ export function CertificationsTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           Certification Progress ({filtered.length})
         </div>
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+            color: '#991b1b', fontSize: 13,
+          }}>
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
         {filtered.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users have started the certification yet.</div>
+          !error && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users have started the certification yet.</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>

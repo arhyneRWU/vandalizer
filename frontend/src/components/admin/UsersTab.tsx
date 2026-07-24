@@ -397,6 +397,7 @@ function UserActivityHistory({ userId, email }: { userId: string; email: string 
 export function UsersTab() {
   const [users, setUsers] = useState<UserLeaderboardItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: UserSortKey; dir: 'asc' | 'desc' }>({ key: 'tokens_total', dir: 'desc' })
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
@@ -404,8 +405,9 @@ export function UsersTab() {
 
   const load = useCallback(() => {
     setLoading(true)
+    setError(null)
     const arg = typeof days === 'number' ? days : undefined
-    getUserLeaderboard(arg).then(setUsers).catch(() => setUsers([])).finally(() => setLoading(false))
+    getUserLeaderboard(arg).then(setUsers).catch(e => setError(e?.message || 'Failed to load users')).finally(() => setLoading(false))
   }, [days])
 
   useEffect(() => { load() }, [load])
@@ -473,8 +475,17 @@ export function UsersTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           User Leaderboard ({filtered.length}) {days !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {days} days</span>}
         </div>
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+            color: '#991b1b', fontSize: 13,
+          }}>
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
         {filtered.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users found.</div>
+          !error && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users found.</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
