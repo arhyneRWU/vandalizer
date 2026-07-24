@@ -38,23 +38,38 @@ const ConfigTab = lazy(() => import('../components/admin/ConfigTab').then(m => (
 
 type Tab = 'usage' | 'users' | 'teams' | 'organizations' | 'workflows' | 'quality' | 'knowledgebases' | 'compliance' | 'audit' | 'demo' | 'email' | 'certifications' | 'apikeys' | 'catalog' | 'telemetry' | 'config'
 
-const TABS: { key: Tab; label: string; icon: typeof BarChart3 }[] = [
-  { key: 'usage', label: 'Usage', icon: BarChart3 },
-  { key: 'users', label: 'Users', icon: Users },
-  { key: 'teams', label: 'Teams', icon: Building2 },
-  { key: 'organizations', label: 'Organizations', icon: FolderTree },
-  { key: 'workflows', label: 'Workflows', icon: Workflow },
-  { key: 'quality', label: 'Quality', icon: ShieldCheck },
-  { key: 'knowledgebases', label: 'Knowledge Bases', icon: BookOpen },
-  { key: 'compliance', label: 'Compliance', icon: Lock },
-  { key: 'audit', label: 'Audit Log', icon: FileText },
-  { key: 'demo', label: 'Demo', icon: Zap },
-  { key: 'email', label: 'Email', icon: Mail },
-  { key: 'certifications', label: 'Certifications', icon: Award },
-  { key: 'apikeys', label: 'API Keys', icon: KeyRound },
-  { key: 'catalog', label: 'Catalog', icon: PackageOpen },
-  { key: 'telemetry', label: 'Telemetry', icon: Globe },
-  { key: 'config', label: 'Config', icon: Settings },
+// Minimum role that may see a tab: 'admin' satisfies everything, 'staff'
+// satisfies 'staff' and 'teamAdmin', 'teamAdmin' satisfies only 'teamAdmin'.
+// See AUTHORIZATION_MATRIX.md for the server-side model this mirrors — this
+// list is a UX affordance, never the enforcement boundary; every admin route
+// fails closed independently regardless of what this predicate decides.
+type MinRole = 'teamAdmin' | 'staff' | 'admin'
+
+interface TabDef {
+  key: Tab
+  label: string
+  icon: typeof BarChart3
+  minRole: MinRole
+  requires?: 'trial' | 'telemetryCollector'
+}
+
+const TABS: TabDef[] = [
+  { key: 'usage', label: 'Usage', icon: BarChart3, minRole: 'teamAdmin' },
+  { key: 'users', label: 'Users', icon: Users, minRole: 'teamAdmin' },
+  { key: 'teams', label: 'Teams', icon: Building2, minRole: 'staff' },
+  { key: 'organizations', label: 'Organizations', icon: FolderTree, minRole: 'staff' },
+  { key: 'workflows', label: 'Workflows', icon: Workflow, minRole: 'teamAdmin' },
+  { key: 'quality', label: 'Quality', icon: ShieldCheck, minRole: 'staff' },
+  { key: 'knowledgebases', label: 'Knowledge Bases', icon: BookOpen, minRole: 'staff' },
+  { key: 'compliance', label: 'Compliance', icon: Lock, minRole: 'staff' },
+  { key: 'audit', label: 'Audit Log', icon: FileText, minRole: 'staff' },
+  { key: 'demo', label: 'Demo', icon: Zap, minRole: 'staff', requires: 'trial' },
+  { key: 'email', label: 'Email', icon: Mail, minRole: 'staff' },
+  { key: 'certifications', label: 'Certifications', icon: Award, minRole: 'staff' },
+  { key: 'apikeys', label: 'API Keys', icon: KeyRound, minRole: 'staff' },
+  { key: 'catalog', label: 'Catalog', icon: PackageOpen, minRole: 'admin' },
+  { key: 'telemetry', label: 'Telemetry', icon: Globe, minRole: 'staff', requires: 'telemetryCollector' },
+  { key: 'config', label: 'Config', icon: Settings, minRole: 'admin' },
 ]
 
 // ──────────────────────────────────────────
@@ -90,24 +105,23 @@ export default function Admin() {
   // only hit 403s here. Their workspace is the Verification queue (/verification).
   const hasAccess = isGlobalAdmin || isStaff || isTeamAdmin
 
-  // Staff see everything except config; team admins see only team-scoped tabs whose
-  // endpoints accept a team scope. Tabs whose backends require admin/staff (email,
-  // plus everything in hiddenForNonAdmin) stay hidden so we never render a tab that
-  // can only 403.
-  const hiddenForNonAdmin = ['config', 'catalog', 'quality', 'knowledgebases', 'compliance', 'demo', 'organizations', 'approvals', 'audit', 'certifications', 'apikeys', 'email', 'teams', 'telemetry']
-  let visibleTabs = isGlobalAdmin
-    ? TABS
-    : isStaff
-      ? TABS.filter(t => t.key !== 'config' && t.key !== 'catalog')
-      : TABS.filter(t => !hiddenForNonAdmin.includes(t.key))
+  // Single source of truth for tab visibility: role satisfies the tab's
+  // minRole, and any feature-flag requirement is met. Used for both the
+  // sidebar filter and the render guards below so the two cannot disagree.
+  const canSee = (t: TabDef): boolean => {
+    const roleOk = isGlobalAdmin
+      || (isStaff && (t.minRole === 'staff' || t.minRole === 'teamAdmin'))
+      || (isTeamAdmin && t.minRole === 'teamAdmin')
+    if (!roleOk) return false
+    if (t.requires === 'trial' && !trialEnabled) return false
+    if (t.requires === 'telemetryCollector' && !telemetryCollector) return false
+    return true
+  }
 
-  if (!trialEnabled) {
-    visibleTabs = visibleTabs.filter(t => t.key !== 'demo')
-  }
-  // The Telemetry tab exists only on the collector instance.
-  if (!telemetryCollector) {
-    visibleTabs = visibleTabs.filter(t => t.key !== 'telemetry')
-  }
+  const visibleTabs = TABS.filter(canSee)
+  // O(1) lookup so render guards can apply `canSee` to a specific tab by key
+  // without re-scanning TABS on every render.
+  const tabByKey = Object.fromEntries(TABS.map(t => [t.key, t])) as Record<Tab, TabDef>
 
   if (!hasAccess) {
     return (
@@ -176,22 +190,22 @@ export default function Admin() {
           {isGlobalAdmin && <CatalogUpdateBanner onView={() => setActiveTab('catalog')} />}
           {isGlobalAdmin && <TelemetryOptInBanner />}
           <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading...</div>}>
-            {activeTab === 'usage' && <UsageTab />}
-            {activeTab === 'users' && <UsersTab />}
-            {activeTab === 'teams' && <TeamsTab />}
-            {activeTab === 'organizations' && (isGlobalAdmin || isStaff) && <OrganizationsTab />}
-            {activeTab === 'workflows' && <WorkflowsTab />}
-            {activeTab === 'quality' && <QualityTab />}
-            {activeTab === 'knowledgebases' && (isGlobalAdmin || isStaff) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
-            {activeTab === 'compliance' && (isGlobalAdmin || isStaff) && <ComplianceTab />}
-            {activeTab === 'audit' && (isGlobalAdmin || isStaff) && <AuditTab />}
-            {activeTab === 'demo' && (isGlobalAdmin || isStaff) && <DemoTab />}
-            {activeTab === 'email' && (isGlobalAdmin || isStaff) && <EmailAnalyticsTab />}
-            {activeTab === 'certifications' && (isGlobalAdmin || isStaff) && <CertificationsTab />}
-            {activeTab === 'apikeys' && (isGlobalAdmin || isStaff) && <ApiKeysTab />}
-            {activeTab === 'catalog' && isGlobalAdmin && <CatalogTab />}
-            {activeTab === 'telemetry' && isGlobalAdmin && telemetryCollector && <TelemetryTab />}
-            {activeTab === 'config' && isGlobalAdmin && <ConfigTab />}
+            {activeTab === 'usage' && canSee(tabByKey.usage) && <UsageTab />}
+            {activeTab === 'users' && canSee(tabByKey.users) && <UsersTab />}
+            {activeTab === 'teams' && canSee(tabByKey.teams) && <TeamsTab />}
+            {activeTab === 'organizations' && canSee(tabByKey.organizations) && <OrganizationsTab />}
+            {activeTab === 'workflows' && canSee(tabByKey.workflows) && <WorkflowsTab />}
+            {activeTab === 'quality' && canSee(tabByKey.quality) && <QualityTab />}
+            {activeTab === 'knowledgebases' && canSee(tabByKey.knowledgebases) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
+            {activeTab === 'compliance' && canSee(tabByKey.compliance) && <ComplianceTab />}
+            {activeTab === 'audit' && canSee(tabByKey.audit) && <AuditTab />}
+            {activeTab === 'demo' && canSee(tabByKey.demo) && <DemoTab />}
+            {activeTab === 'email' && canSee(tabByKey.email) && <EmailAnalyticsTab />}
+            {activeTab === 'certifications' && canSee(tabByKey.certifications) && <CertificationsTab />}
+            {activeTab === 'apikeys' && canSee(tabByKey.apikeys) && <ApiKeysTab />}
+            {activeTab === 'catalog' && canSee(tabByKey.catalog) && <CatalogTab />}
+            {activeTab === 'telemetry' && canSee(tabByKey.telemetry) && <TelemetryTab />}
+            {activeTab === 'config' && canSee(tabByKey.config) && <ConfigTab />}
           </Suspense>
         </div>
       </div>
