@@ -321,7 +321,68 @@ export function parseCSV(text: string): { name: string; parent_name: string; org
     const autoType = DEPTH_TYPE_DEFAULTS[Math.min(myDepth, DEPTH_TYPE_DEFAULTS.length - 1)]
     rows.push({ name: r.name, parent_name: r.parent_name, org_type: autoType })
   }
-  return rows
+  return topoSortRows(rows)
+}
+
+/**
+ * Reorder rows so that every row's parent (matched by name, when that name
+ * appears elsewhere in the file) comes before it — the order the backend
+ * importer requires (see bulk_import_organizations in
+ * organization_service.py, which walks `nodes` in order and raises if a
+ * child's parent hasn't been created yet).
+ *
+ * Fast path: if the input is already parent-before-child (using each name's
+ * first occurrence as "when it becomes available"), it is returned
+ * untouched — this guarantees byte-for-byte stability for already-correct
+ * files rather than merely an equivalent reordering.
+ *
+ * Slow path: a stable-as-possible Kahn's-style topological sort. Each pass
+ * scans rows in their original order and emits any row whose parent (if it
+ * has one present in the file) has already been emitted; repeated passes
+ * let a row whose parent appears later in the file "catch up" once that
+ * parent is emitted. A row with no parent, or whose parent name never
+ * appears in the file (a dangling reference — it may already exist
+ * server-side), is emitted on the first pass. The pass loop is bounded by
+ * "no progress made", so a cycle (A -> B -> A) cannot loop forever: once no
+ * row can be emitted, whatever remains (the cycle members) is appended in
+ * original relative order so no row is ever dropped.
+ */
+function topoSortRows<T extends { name: string; parent_name: string }>(rows: T[]): T[] {
+  const n = rows.length
+  const nameFirstIndex = new Map<string, number>()
+  for (let i = 0; i < n; i++) if (!nameFirstIndex.has(rows[i].name)) nameFirstIndex.set(rows[i].name, i)
+
+  const isAlreadyOrdered = rows.every((r, i) => {
+    if (!r.parent_name) return true
+    const parentIdx = nameFirstIndex.get(r.parent_name)
+    return parentIdx === undefined || parentIdx < i
+  })
+  if (isAlreadyOrdered) return rows
+
+  const emitted = new Array(n).fill(false)
+  const emittedNames = new Set<string>()
+  const result: T[] = []
+  let remaining = n
+  while (remaining > 0) {
+    let progressed = false
+    for (let i = 0; i < n; i++) {
+      if (emitted[i]) continue
+      const parent = rows[i].parent_name
+      const needsParent = !!parent && nameFirstIndex.has(parent)
+      if (!needsParent || emittedNames.has(parent)) {
+        emitted[i] = true
+        emittedNames.add(rows[i].name)
+        result.push(rows[i])
+        remaining--
+        progressed = true
+      }
+    }
+    if (!progressed) break
+  }
+  if (remaining > 0) {
+    for (let i = 0; i < n; i++) if (!emitted[i]) result.push(rows[i])
+  }
+  return result
 }
 
 function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
