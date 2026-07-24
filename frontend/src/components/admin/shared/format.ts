@@ -37,7 +37,10 @@ export function formatDateTime(d: string | null): string {
 export function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
   const escape = (v: string | number | null) => {
     if (v === null || v === undefined) return ''
-    const s = String(v)
+    let s = String(v)
+    // Guard against formula injection: a leading =, +, -, @, tab, or CR can be
+    // interpreted as a formula by spreadsheet apps opening the exported CSV.
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
   }
   const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
