@@ -68,32 +68,8 @@
         {
           "source_type": "url",
           "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-744",
-          "content_file": "content/ecfr-title15-part744-1.txt",
-          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED (1 of 5)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-744/#2",
-          "content_file": "content/ecfr-title15-part744-2.txt",
-          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED (2 of 5)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-744/#3",
-          "content_file": "content/ecfr-title15-part744-3.txt",
-          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED (3 of 5)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-744/#4",
-          "content_file": "content/ecfr-title15-part744-4.txt",
-          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED (4 of 5)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-744/#5",
-          "content_file": "content/ecfr-title15-part744-5.txt",
-          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED (5 of 5)"
+          "content_file": "content/ecfr-title15-part744.txt",
+          "url_title": "PART 744\u2014CONTROL POLICY: END-USER AND END-USE BASED"
         },
         {
           "source_type": "url",
@@ -182,26 +158,8 @@
         {
           "source_type": "url",
           "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-774",
-          "content_file": "content/ecfr-title15-part774-1.txt",
-          "url_title": "PART 774\u2014THE COMMERCE CONTROL LIST (1 of 4)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-774/#2",
-          "content_file": "content/ecfr-title15-part774-2.txt",
-          "url_title": "PART 774\u2014THE COMMERCE CONTROL LIST (2 of 4)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-774/#3",
-          "content_file": "content/ecfr-title15-part774-3.txt",
-          "url_title": "PART 774\u2014THE COMMERCE CONTROL LIST (3 of 4)"
-        },
-        {
-          "source_type": "url",
-          "url": "https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-774/#4",
-          "content_file": "content/ecfr-title15-part774-4.txt",
-          "url_title": "PART 774\u2014THE COMMERCE CONTROL LIST (4 of 4)"
+          "content_file": "content/ecfr-title15-part774.txt",
+          "url_title": "PART 774\u2014THE COMMERCE CONTROL LIST"
         }
       ]
     }

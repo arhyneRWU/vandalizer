@@ -66,6 +66,27 @@ SEED_ECFR_SOURCES: list[dict] = [
         "title": 42, "part": 93, "select": "part",
         "file": "ecfr-title42-part93.txt",
     },
+    # --- catalog v1.3.0: Common Rule, FCOI, Export Control (EAR) ---
+    {
+        "url": "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-A/part-46",
+        "title": 45, "part": 46, "select": "part",
+        "file": "ecfr-title45-part46.txt",
+    },
+    {
+        "url": "https://www.ecfr.gov/current/title-42/chapter-I/subchapter-D/part-50/subpart-F",
+        "title": 42, "part": 50, "select": "subpart-F",
+        "file": "ecfr-title42-part50-subpart-f.txt",
+    },
+    # Export Administration Regulations — 15 CFR Chapter VII, Subchapter C.
+    *[
+        {
+            "url": f"https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-{p}",
+            "title": 15, "part": p, "select": "part",
+            "file": f"ecfr-title15-part{p}.txt",
+        }
+        for p in (730, 732, 734, 736, 738, 740, 742, 743, 744, 745, 746, 748,
+                  750, 754, 756, 758, 760, 762, 764, 766, 768, 770, 772, 774)
+    ],
 ]
 
 DEFAULT_OUT_DIR = (
