@@ -699,14 +699,14 @@ export const MODULES: ModuleDefinition[] = [
     subtitle: 'Share and Standardize',
     description: 'The final module before your Vandal Workflow Architect certification. Demonstrate that you can organize, verify, and share production-ready workflows across your team. Complete this and you earn your VWA credential.',
     objectives: [
-      'Mark a workflow as verified in the workflow settings',
+      'Submit a workflow for verification',
       'Use workflows across personal and team contexts',
       'No new documents needed - uses workflows you have already built',
     ],
     tips: [
       'Switch into a shared team if you want to practice collaboration flows',
       'Export workflows as .vandalizer.json files to share with teammates',
-      'Verified workflows signal to your team that a workflow is production-ready',
+      'Submitting is what completes the module — examiner approval earns extra stars later',
     ],
     lessons: [
       {
@@ -718,14 +718,14 @@ export const MODULES: ModuleDefinition[] = [
       {
         title: 'The verification workflow',
         objective: 'After this lesson, you\'ll understand what "verified" communicates to your team and how to use it as a governance tool.',
-        content: 'Marking a workflow as "verified" is a governance practice. It signals to your team that:\n\n1. The workflow has been tested on representative documents.\n2. A validation plan exists and passes consistently.\n3. The output format meets the team\'s requirements.\n4. The workflow is ready for production use.\n\nVerification isn\'t a technical gate \u2014 it\'s a team communication tool.',
+        content: 'Verification is a governance practice with two halves. You submit a workflow to the verification queue; an examiner reviews it and marks it verified. The "verified" badge signals to your team that:\n\n1. The workflow has been tested on representative documents.\n2. A validation plan exists and passes consistently.\n3. The output format meets the team\'s requirements.\n4. The workflow is ready for production use.\n\nSubmitting is the part you control, and it\'s what completes this module. Examiner review happens on its own schedule \u2014 you\'ll get a notification when the decision lands.',
         variant: 'concept',
         knowledgeCheck: {
           question: 'What does marking a workflow as "verified" communicate to your team?',
           options: [
             { text: 'The workflow is locked and cannot be edited by other team members', correct: false, explanation: 'Verified is not a lock. It\'s a signal about quality, not a permission restriction.' },
             { text: 'The workflow has been tested, validated, and is approved for production use', correct: true, explanation: 'Correct! Verified is a team communication tool. It says: this workflow has been through quality checks and is ready to rely on.' },
-            { text: 'The workflow was created or approved by an admin-level user', correct: false, explanation: 'Any team member can mark a workflow verified. It\'s about the workflow\'s quality, not the creator\'s role.' },
+            { text: 'The workflow was created by an admin-level user', correct: false, explanation: 'Any team member can submit a workflow for verification. An examiner approves it based on the workflow\'s quality, not the creator\'s role.' },
             { text: 'The workflow only uses LLM models approved by your institution', correct: false, explanation: 'Model approval is a separate concern. Verified is about whether the workflow\'s output meets your team\'s quality bar.' },
           ],
         },
@@ -737,7 +737,7 @@ export const MODULES: ModuleDefinition[] = [
       },
       {
         title: 'Establish your workflow governance',
-        content: '1. Pick a workflow that is ready to share beyond your personal work.\n2. Build or duplicate that workflow into the team context where others should reuse it.\n3. Make sure your workflow has a clear description.\n4. If you completed Module 8, ensure your validation plan passes.\n5. Mark the workflow as verified in the workflow settings.\n6. Try exporting and importing the workflow.\n7. You now have a verified, portable, well-documented workflow.',
+        content: '1. Pick a workflow that is ready to share beyond your personal work.\n2. Build or duplicate that workflow into the team context where others should reuse it.\n3. Make sure your workflow has a clear description.\n4. If you completed Module 8, ensure your validation plan passes.\n5. Submit the workflow for verification. That completes this module — an examiner reviews it on their own schedule, and your certification does not wait on them.\n6. Try exporting and importing the workflow.\n7. You now have a submitted, portable, well-documented workflow.',
         variant: 'walkthrough',
       },
       {
@@ -756,7 +756,7 @@ export const MODULES: ModuleDefinition[] = [
       },
       {
         title: 'Glossary & Review',
-        content: 'Personal work \u2014 Workflows and resources that only you can see and edit. The right place for experiments, drafts, and one-off variations. Graduate your best work to the team context when it\'s ready to share.\n\nVerified \u2014 A governance flag that communicates quality. You\'ve now marked a workflow verified \u2014 that signal tells your team the workflow has been tested, validated, and approved for production use. It\'s a team communication tool, not a technical lock.\n\nExport (.vandalizer.json) \u2014 A portable file containing your workflow\'s complete definition: steps, tasks, field configurations, prompts. It can be imported into any Vandalizer instance and is the standard format for cross-team sharing.\n\nTeam \u2014 A group of users who share access to team workflows, libraries, and folders. Members have roles: owner, admin, or member. Verified workflows in the team context become the standards your whole team builds on.',
+        content: 'Personal work \u2014 Workflows and resources that only you can see and edit. The right place for experiments, drafts, and one-off variations. Graduate your best work to the team context when it\'s ready to share.\n\nVerified \u2014 A governance flag that communicates quality. You\'ve now submitted a workflow to the verification queue; once an examiner approves it, that badge tells your team the workflow has been tested, validated, and approved for production use. It\'s a team communication tool, not a technical lock.\n\nExport (.vandalizer.json) \u2014 A portable file containing your workflow\'s complete definition: steps, tasks, field configurations, prompts. It can be imported into any Vandalizer instance and is the standard format for cross-team sharing.\n\nTeam \u2014 A group of users who share access to team workflows, libraries, and folders. Members have roles: owner, admin, or member. Verified workflows in the team context become the standards your whole team builds on.',
         variant: 'key-terms',
       },
     ],

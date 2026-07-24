@@ -235,16 +235,16 @@
       "If you don't already have multiple spaces, create a second space from the **Spaces** page.",
       "Build or duplicate a workflow in your second space.",
       "Ensure your workflow has a clear description explaining what it does.",
-      "Mark the workflow as **verified** in the workflow settings.",
+      "**Submit the workflow for verification** — this completes the module. An examiner reviews it later; you don't wait on that to finish your certification.",
       "Try exporting the workflow as a `.vandalizer.json` file and importing it into another space.",
-      "You now have a verified, portable, well-documented workflow."
+      "You now have a submitted, portable, well-documented workflow."
     ],
     "expected_fields": [],
     "expected_values": {},
     "star_criteria": {
-      "1": "Mark a workflow as verified and use workflows across 2+ spaces",
-      "2": "Have 2+ verified workflows",
-      "3": "Have 3+ verified workflows across 3+ spaces"
+      "1": "Submit a workflow for verification",
+      "2": "Have 1+ workflow approved by an examiner",
+      "3": "Have 2+ workflows approved by an examiner"
     }
   }
 }

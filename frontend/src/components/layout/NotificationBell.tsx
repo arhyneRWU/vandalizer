@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bell, CheckCheck, Headphones, MessageSquare, ShieldCheck, ShieldX, RotateCcw, Eye, Share2 } from 'lucide-react'
+import { Bell, CheckCheck, Headphones, Inbox, MessageSquare, ShieldCheck, ShieldX, RotateCcw, Eye, Share2 } from 'lucide-react'
 import { useNavigate } from '@tanstack/react-router'
 import { listNotifications, markRead, markAllRead, getUnreadCount } from '../../api/notifications'
 import type { Notification } from '../../api/notifications'
@@ -7,6 +7,7 @@ import { relativeTime } from '../../utils/time'
 import { openSupportPanel } from '../../utils/supportPanel'
 
 const kindIcons: Record<string, typeof ShieldCheck> = {
+  verification_submitted: Inbox,
   verification_approved: ShieldCheck,
   verification_rejected: ShieldX,
   verification_returned: RotateCcw,
@@ -19,6 +20,7 @@ const kindIcons: Record<string, typeof ShieldCheck> = {
 }
 
 const kindColors: Record<string, string> = {
+  verification_submitted: '#f1b300',
   verification_approved: '#15803d',
   verification_rejected: '#dc2626',
   verification_returned: '#d97706',

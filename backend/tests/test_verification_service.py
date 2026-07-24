@@ -1222,3 +1222,67 @@ async def test_notify_submitter_unknown_status_no_op(mock_name):
         await _notify_submitter(req, "some_unknown_status", None)
 
         mock_create.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _notify_examiners — reviewers hear about new submissions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@patch(f"{MODULE}.User")
+@patch(f"{MODULE}._get_item_name", new_callable=AsyncMock, return_value="Test Item")
+async def test_notify_examiners_notifies_admins_and_examiners(mock_name, mock_user_cls):
+    from app.services.verification_service import _notify_examiners
+
+    req = _make_verification_request(submitter_user_id="alice")
+    mock_user_cls.find_one = AsyncMock(return_value=_make_user(user_id="alice"))
+    reviewers = [
+        _make_user(user_id="admin", name="Admin", email="admin@example.com", is_admin=True),
+        _make_user(user_id="exam", name="Exam", email=None, is_examiner=True),
+    ]
+    chain = MagicMock()
+    chain.to_list = AsyncMock(return_value=reviewers)
+    mock_user_cls.find.return_value = chain
+
+    with patch("app.services.notification_service.create_notification", new_callable=AsyncMock) as mock_create, \
+         patch("app.services.email_service.send_email", new_callable=AsyncMock) as mock_email:
+        await _notify_examiners(req)
+
+    assert [c[1]["user_id"] for c in mock_create.call_args_list] == ["admin", "exam"]
+    assert mock_create.call_args_list[0][1]["kind"] == "verification_submitted"
+    assert mock_create.call_args_list[0][1]["link"] == "/verification"
+    # Only the reviewer with an email address gets mail
+    mock_email.assert_awaited_once()
+    assert mock_email.call_args[0][0] == "admin@example.com"
+
+
+@pytest.mark.asyncio
+@patch(f"{MODULE}.User")
+@patch(f"{MODULE}._get_item_name", new_callable=AsyncMock, return_value="Test Item")
+async def test_notify_examiners_skips_self_submission(mock_name, mock_user_cls):
+    from app.services.verification_service import _notify_examiners
+
+    req = _make_verification_request(submitter_user_id="admin")
+    mock_user_cls.find_one = AsyncMock(return_value=_make_user(user_id="admin"))
+    chain = MagicMock()
+    chain.to_list = AsyncMock(return_value=[_make_user(user_id="admin", is_admin=True)])
+    mock_user_cls.find.return_value = chain
+
+    with patch("app.services.notification_service.create_notification", new_callable=AsyncMock) as mock_create, \
+         patch("app.services.email_service.send_email", new_callable=AsyncMock):
+        await _notify_examiners(req)
+
+    mock_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch(f"{MODULE}.User")
+@patch(f"{MODULE}._get_item_name", new_callable=AsyncMock, return_value="Test Item")
+async def test_notify_examiners_swallows_errors(mock_name, mock_user_cls):
+    """A notification failure must never fail the submission itself."""
+    from app.services.verification_service import _notify_examiners
+
+    mock_user_cls.find_one = AsyncMock(side_effect=RuntimeError("db down"))
+
+    await _notify_examiners(_make_verification_request())

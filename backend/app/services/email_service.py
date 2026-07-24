@@ -398,6 +398,37 @@ def team_invite_email(
 # ---------------------------------------------------------------------------
 
 
+def verification_submitted_email(
+    reviewer_name: str,
+    submitter_name: str,
+    item_kind: str,
+    item_name: str,
+    summary: str | None,
+    frontend_url: str,
+) -> tuple[str, str]:
+    """Returns (subject, html_body) telling a reviewer a new submission is queued."""
+    kind_label = item_kind.replace("_", " ")
+    subject = f'New verification submission: "{item_name}"'
+
+    summary_block = ""
+    if summary:
+        summary_block = f"""
+      <div style="margin:16px 0;padding:12px 16px;background:rgba(255,255,255,0.05);border-left:3px solid #f1b300;border-radius:4px;">
+        <p style="margin:0;font-size:14px;color:#d1d5db;"><strong style="color:#fff;">Summary:</strong><br/>{summary}</p>
+      </div>"""
+
+    html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
+    <div class="container"><div class="card">
+      <div class="logo">Vandalizer</div>
+      <h1>New submission awaiting review</h1>
+      <p>Hi {reviewer_name}, <strong style="color:#fff">{submitter_name}</strong> submitted the {kind_label} <span class="highlight">{item_name}</span> for verification.</p>
+      {summary_block}
+      <p style="margin-top:24px"><a class="btn" href="{frontend_url}/verification">Open Queue</a></p>
+      <div class="footer">Vandalizer</div>
+    </div></div></body></html>"""
+    return subject, html
+
+
 def verification_status_email(
     submitter_name: str,
     item_name: str,

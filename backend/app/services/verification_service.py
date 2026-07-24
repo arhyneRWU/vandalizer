@@ -229,6 +229,7 @@ async def submit_for_verification(
         validation_origin=validation_origin,
     )
     await req.insert()
+    await _notify_examiners(req)
     submitter_ref = await resolve_author(user_id)
     return await _request_to_dict(req, submitter_ref=submitter_ref)
 
@@ -1562,6 +1563,58 @@ def _collection_to_dict(col: VerifiedCollection) -> dict:
         "created_at": col.created_at.isoformat() if col.created_at else None,
         "updated_at": col.updated_at.isoformat() if col.updated_at else None,
     }
+
+
+async def _notify_examiners(req: VerificationRequest) -> None:
+    """Tell admins and examiners that a new submission is waiting in the queue.
+
+    Best-effort: a notification or mail failure must never fail the submission
+    itself. Without this, submissions landed silently and sat unreviewed until
+    someone happened to open the queue.
+    """
+    try:
+        from app.services import notification_service
+
+        item_name = await _get_item_name(req.item_kind, req.item_id)
+        submitter = await User.find_one(User.user_id == req.submitter_user_id)
+        submitter_display = req.submitter_name or (submitter.name if submitter else None) or req.submitter_user_id
+
+        reviewers = await User.find(
+            {"$or": [{"is_admin": True}, {"is_examiner": True}]}
+        ).to_list()
+
+        for reviewer in reviewers:
+            if reviewer.user_id == req.submitter_user_id:
+                continue  # don't notify a reviewer about their own submission
+            await notification_service.create_notification(
+                user_id=reviewer.user_id,
+                kind="verification_submitted",
+                title=f'New submission: "{item_name}"',
+                body=f"{submitter_display} submitted a {req.item_kind.replace('_', ' ')} for verification.",
+                link="/verification",
+                item_kind=req.item_kind,
+                item_id=str(req.item_id),
+                item_name=item_name,
+                request_uuid=req.uuid,
+            )
+
+            if not reviewer.email:
+                continue
+            from app.config import Settings
+            from app.services.email_service import send_email, verification_submitted_email
+
+            settings = Settings()
+            subject, html = verification_submitted_email(
+                reviewer_name=reviewer.name or reviewer.user_id,
+                submitter_name=submitter_display,
+                item_kind=req.item_kind,
+                item_name=item_name,
+                summary=req.summary,
+                frontend_url=settings.frontend_url,
+            )
+            await send_email(reviewer.email, subject, html, settings, email_type="verification_submitted")
+    except Exception:
+        logger.exception("Failed to notify examiners of verification request %s", req.uuid)
 
 
 async def _notify_submitter(
