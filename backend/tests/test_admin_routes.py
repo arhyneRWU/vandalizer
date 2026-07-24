@@ -638,3 +638,100 @@ class TestOcrConnectivityTest:
             )
 
         assert resp.status_code == 400
+
+
+class TestUpdateAuthMethods:
+    """PUT /api/admin/config/auth/methods must never persist an empty list —
+    that disables every login path with no recovery except direct DB access.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_methods_rejected_and_config_unchanged(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        cfg = SimpleNamespace(auth_methods=["password"], save=AsyncMock())
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.put(
+                "/api/admin/config/auth/methods",
+                json={"methods": []},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 400
+        assert cfg.auth_methods == ["password"]
+        cfg.save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_methods_persisted(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        cfg = SimpleNamespace(auth_methods=["password", "oauth"], save=AsyncMock())
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.put(
+                "/api/admin/config/auth/methods",
+                json={"methods": ["password"]},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["auth_methods"] == ["password"]
+        assert cfg.auth_methods == ["password"]
+        cfg.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_method_rejected(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            resp = await client.put(
+                "/api/admin/config/auth/methods",
+                json={"methods": ["telepathy"]},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert 400 <= resp.status_code < 500
+
+    @pytest.mark.asyncio
+    async def test_non_superadmin_rejected_before_empty_check(self, client):
+        """A non-superadmin sending an empty list must still get 403, not 400 —
+        proving `_require_superadmin` runs before the new empty-list guard."""
+        staffer = _make_user("staffer", is_admin=False)
+        cookies, headers = _auth("staffer")
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "staffer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=staffer)
+            resp = await client.put(
+                "/api/admin/config/auth/methods",
+                json={"methods": []},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 403

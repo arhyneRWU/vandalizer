@@ -4,7 +4,7 @@ import datetime
 import logging
 import math
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from bson import ObjectId as BsonObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -309,7 +309,13 @@ class OAuthProviderRequest(BaseModel):
 
 
 class AuthMethodsRequest(BaseModel):
-    methods: list[str]
+    # Constrained to known auth methods so an unrecognized value can't slip
+    # into storage. Emptiness is *not* enforced here (an empty list is
+    # vacuously valid against this element constraint) — it is rejected
+    # explicitly in the route below, which is the real security boundary:
+    # it must run after `_require_superadmin`, not as a body-parsing error
+    # that would short-circuit before the auth check.
+    methods: list[Literal["password", "oauth"]]
 
 
 class TimeseriesDayItem(BaseModel):
@@ -1840,6 +1846,12 @@ async def update_auth_methods(
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
+
+    if not body.methods:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one auth method must remain enabled.",
+        )
 
     cfg = await SystemConfig.get_config()
     cfg.auth_methods = body.methods

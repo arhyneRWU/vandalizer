@@ -949,9 +949,12 @@ export function ConfigTab() {
 
   const handleSaveAuthMethods = async () => {
     setAuthSaving(true)
+    setError(null)
     try {
       await updateAuthMethods(authMethods)
       void refreshReadiness()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update auth methods')
     } finally {
       setAuthSaving(false)
     }
@@ -1711,20 +1714,32 @@ ${playgroundResult.request.user_prompt}`}
           <div style={{ marginBottom: 20 }}>
             <label style={labelStyle}>Auth Methods</label>
             <div style={{ display: 'flex', gap: 16 }}>
-              {['password', 'oauth'].map(m => (
-                <label key={m} style={{ display: 'flex', alignItems: 'center', fontSize: 14, cursor: 'pointer', textTransform: 'capitalize' }}>
-                  <input
-                    type="checkbox"
-                    checked={authMethods.includes(m)}
-                    onChange={e => {
-                      if (e.target.checked) setAuthMethods(prev => [...prev, m])
-                      else setAuthMethods(prev => prev.filter(x => x !== m))
-                    }}
-                    style={checkStyle}
-                  />
-                  {m === 'oauth' ? 'OAuth / SAML' : m}
-                </label>
-              ))}
+              {['password', 'oauth'].map(m => {
+                // Disable unchecking the last remaining method — an empty
+                // auth_methods list disables every login path with no
+                // in-app recovery. The server also rejects this, but the
+                // UI should never let an admin walk into that footgun.
+                const isLastMethod = authMethods.length === 1 && authMethods.includes(m)
+                return (
+                  <label
+                    key={m}
+                    style={{ display: 'flex', alignItems: 'center', fontSize: 14, cursor: isLastMethod ? 'not-allowed' : 'pointer', textTransform: 'capitalize' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={authMethods.includes(m)}
+                      disabled={isLastMethod}
+                      title={isLastMethod ? 'At least one auth method must remain enabled' : undefined}
+                      onChange={e => {
+                        if (e.target.checked) setAuthMethods(prev => [...prev, m])
+                        else setAuthMethods(prev => prev.filter(x => x !== m))
+                      }}
+                      style={checkStyle}
+                    />
+                    {m === 'oauth' ? 'OAuth / SAML' : m}
+                  </label>
+                )
+              })}
             </div>
             <button
               onClick={handleSaveAuthMethods}
