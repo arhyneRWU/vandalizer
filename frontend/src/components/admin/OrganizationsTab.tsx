@@ -121,7 +121,7 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
 
   // Load all teams for the dropdown
   useEffect(() => {
-    adminListAllTeams().then(data => setTeams(data.map((t: AdminTeamItem) => ({ uuid: t.uuid, name: t.name }))))
+    adminListAllTeams().then(data => setTeams(data.items.map((t: AdminTeamItem) => ({ uuid: t.uuid, name: t.name }))))
       .catch(() => {})
   }, [])
 

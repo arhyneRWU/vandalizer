@@ -170,9 +170,17 @@ export interface UserLeaderboardItem {
   last_active: string | null
 }
 
-export function getUserLeaderboard(days?: number) {
-  const url = days ? `/api/admin/users?days=${days}` : '/api/admin/users'
-  return apiFetch<UserLeaderboardItem[]>(url)
+export interface UserLeaderboardResponse {
+  items: UserLeaderboardItem[]
+  total: number
+  capped: boolean
+}
+
+export function getUserLeaderboard(days?: number, limit: number = 500) {
+  const params = new URLSearchParams()
+  if (days) params.set('days', String(days))
+  params.set('limit', String(limit))
+  return apiFetch<UserLeaderboardResponse>(`/api/admin/users?${params.toString()}`)
 }
 
 // Teams
@@ -188,9 +196,17 @@ export interface TeamLeaderboardItem {
   avg_latency_ms: number | null
 }
 
-export function getTeamLeaderboard(days?: number) {
-  const url = days ? `/api/admin/teams?days=${days}` : '/api/admin/teams'
-  return apiFetch<TeamLeaderboardItem[]>(url)
+export interface TeamLeaderboardResponse {
+  items: TeamLeaderboardItem[]
+  total: number
+  capped: boolean
+}
+
+export function getTeamLeaderboard(days?: number, limit: number = 500) {
+  const params = new URLSearchParams()
+  if (days) params.set('days', String(days))
+  params.set('limit', String(limit))
+  return apiFetch<TeamLeaderboardResponse>(`/api/admin/teams?${params.toString()}`)
 }
 
 // Team Detail
@@ -379,14 +395,26 @@ export interface AdminTeamItem {
   is_default: boolean
 }
 
+export interface AdminTeamListResponse {
+  items: AdminTeamItem[]
+  total: number
+  capped: boolean
+}
+
 export interface IsolatedUserItem {
   user_id: string
   name: string | null
   email: string | null
 }
 
-export function adminListAllTeams() {
-  return apiFetch<AdminTeamItem[]>('/api/admin/teams/all')
+export interface IsolatedUsersResponse {
+  items: IsolatedUserItem[]
+  total: number
+  capped: boolean
+}
+
+export function adminListAllTeams(limit: number = 500) {
+  return apiFetch<AdminTeamListResponse>(`/api/admin/teams/all?limit=${limit}`)
 }
 
 export function adminCreateTeam(name: string) {
@@ -404,8 +432,8 @@ export function adminRemoveUserFromTeam(teamUuid: string, userId: string) {
   return apiFetch<{ ok: boolean }>(`/api/admin/teams/${teamUuid}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' })
 }
 
-export function getIsolatedUsers() {
-  return apiFetch<IsolatedUserItem[]>('/api/admin/users/isolated')
+export function getIsolatedUsers(limit: number = 500) {
+  return apiFetch<IsolatedUsersResponse>(`/api/admin/users/isolated?limit=${limit}`)
 }
 
 export function updateUserRoles(userId: string, roles: { is_admin?: boolean; is_staff?: boolean; is_examiner?: boolean }) {
@@ -771,8 +799,14 @@ export interface CertificationProgressDetail extends CertificationProgressItem {
   }>
 }
 
-export function getCertificationProgressList() {
-  return apiFetch<CertificationProgressItem[]>('/api/admin/certifications')
+export interface CertificationProgressListResponse {
+  items: CertificationProgressItem[]
+  total: number
+  capped: boolean
+}
+
+export function getCertificationProgressList(limit: number = 500) {
+  return apiFetch<CertificationProgressListResponse>(`/api/admin/certifications?limit=${limit}`)
 }
 
 export function getCertificationProgressDetail(userId: string) {

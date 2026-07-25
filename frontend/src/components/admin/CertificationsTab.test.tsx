@@ -33,7 +33,7 @@ const item: CertificationProgressItem = {
 }
 
 beforeEach(() => {
-  mockGetCertificationProgressList.mockReset().mockResolvedValue([item])
+  mockGetCertificationProgressList.mockReset().mockResolvedValue({ items: [item], total: 1, capped: false })
   mockSetCertificationUnlock.mockReset()
   mockToast.mockReset()
 })
@@ -69,5 +69,21 @@ describe('CertificationsTab — unlock toggle', () => {
     // Row must still read "Unlock" (not flipped to "Unlocked") since the write failed.
     expect(screen.getByRole('button', { name: 'Unlock' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Unlocked' })).not.toBeInTheDocument()
+  })
+})
+
+describe('CertificationsTab — truncation notice (plan 012)', () => {
+  it('renders a truncation notice when the API reports capped: true', async () => {
+    mockGetCertificationProgressList.mockResolvedValue({ items: [item], total: 5000, capped: true })
+    render(<CertificationsTab />)
+    await waitFor(() => expect(screen.getByText('Target User')).toBeInTheDocument())
+    expect(screen.getByText(/this list is truncated/i)).toBeInTheDocument()
+  })
+
+  it('does not render a truncation notice when the API reports capped: false', async () => {
+    mockGetCertificationProgressList.mockResolvedValue({ items: [item], total: 1, capped: false })
+    render(<CertificationsTab />)
+    await waitFor(() => expect(screen.getByText('Target User')).toBeInTheDocument())
+    expect(screen.queryByText(/this list is truncated/i)).not.toBeInTheDocument()
   })
 })

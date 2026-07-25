@@ -234,6 +234,7 @@ export function TeamsTab() {
 
   // ── Manage sub-tab state ──────────────────────────────────────────────────
   const [allTeams, setAllTeams] = useState<AdminTeamItem[]>([])
+  const [allTeamsCapped, setAllTeamsCapped] = useState(false)
   const [loadingAll, setLoadingAll] = useState(true)
   const [allTeamsError, setAllTeamsError] = useState<string | null>(null)
   const [newTeamName, setNewTeamName] = useState('')
@@ -247,6 +248,7 @@ export function TeamsTab() {
 
   // ── Stats sub-tab state ───────────────────────────────────────────────────
   const [statsTeams, setStatsTeams] = useState<TeamLeaderboardItem[]>([])
+  const [statsCapped, setStatsCapped] = useState(false)
   const [loadingStats, setLoadingStats] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -256,6 +258,7 @@ export function TeamsTab() {
 
   // ── Isolated sub-tab state ───────────────────────────────────────────────
   const [isolated, setIsolated] = useState<IsolatedUserItem[]>([])
+  const [isolatedCapped, setIsolatedCapped] = useState(false)
   const [isolatedLoaded, setIsolatedLoaded] = useState(false)
   const [loadingIsolated, setLoadingIsolated] = useState(false)
   const [isolatedError, setIsolatedError] = useState<string | null>(null)
@@ -269,10 +272,11 @@ export function TeamsTab() {
     let cancelled = false
     setLoadingAll(true)
     setAllTeamsError(null)
-    adminListAllTeams().then(t => {
+    adminListAllTeams().then(res => {
       if (cancelled) return
-      setAllTeams(t)
-      const def = t.find(x => x.is_default)
+      setAllTeams(res.items)
+      setAllTeamsCapped(res.capped)
+      const def = res.items.find(x => x.is_default)
       if (def) setDefaultTeamUuid(def.uuid)
     }).catch(e => { if (!cancelled) setAllTeamsError(e?.message || 'Failed to load teams') })
       .finally(() => { if (!cancelled) setLoadingAll(false) })
@@ -283,9 +287,10 @@ export function TeamsTab() {
     let cancelled = false
     setLoadingIsolated(true)
     setIsolatedError(null)
-    getIsolatedUsers().then(users => {
+    getIsolatedUsers().then(res => {
       if (cancelled) return
-      setIsolated(users)
+      setIsolated(res.items)
+      setIsolatedCapped(res.capped)
       setIsolatedLoaded(true)
     }).catch(e => {
       if (cancelled) return
@@ -316,7 +321,7 @@ export function TeamsTab() {
     setStatsError(null)
     const arg = typeof statsDays === 'number' ? statsDays : undefined
     getTeamLeaderboard(arg)
-      .then(res => { if (!cancelled) setStatsTeams(res) })
+      .then(res => { if (!cancelled) { setStatsTeams(res.items); setStatsCapped(res.capped) } })
       .catch(e => { if (!cancelled) setStatsError(e?.message || 'Failed to load team stats') })
       .finally(() => { if (!cancelled) setLoadingStats(false) })
     return () => { cancelled = true }
@@ -528,6 +533,11 @@ export function TeamsTab() {
                 Click a team to manage its members. Star to set as the default for new users.
               </span>
             </div>
+            {allTeamsCapped && (
+              <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertCircle size={14} /> Showing the first {allTeams.length} teams only — there are more teams than fit here, and this view has no way to reach them yet.
+              </div>
+            )}
             {allTeamsError && (
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -681,6 +691,11 @@ export function TeamsTab() {
             <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
               Team Leaderboard ({filteredStats.length}) {statsDays !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {statsDays} days</span>}
             </div>
+            {statsCapped && (
+              <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertCircle size={14} /> Showing the top {statsTeams.length} teams by token usage — this list is truncated. Sorting and export cover only these loaded rows, not every team.
+              </div>
+            )}
             {statsError && (
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -744,6 +759,11 @@ export function TeamsTab() {
           <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 14, fontWeight: 600 }}>
             Isolated Users (only on their personal team) ({isolated.length})
           </div>
+          {isolatedCapped && (
+            <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <AlertCircle size={14} /> Showing the first {isolated.length} isolated users only — there are more than fit here.
+            </div>
+          )}
           {isolatedError && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8,
