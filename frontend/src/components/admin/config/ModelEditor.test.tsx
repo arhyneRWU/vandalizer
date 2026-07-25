@@ -146,6 +146,78 @@ describe('ModelEditor — save path', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Wrong-record race: delete + edit are both reachable at once. Editing a
+// model must never resolve to whatever record now happens to occupy that
+// row's old position after another delete reshuffles the list — it must
+// track the model actually being edited, by id, or refuse the save.
+// ---------------------------------------------------------------------------
+
+describe('ModelEditor — edit survives a concurrent delete (wrong-record race)', () => {
+  const THREE: ModelList = [
+    { id: 'model-alpha', name: 'gpt-4o', tag: 'openai', external: true, thinking: false, api_protocol: 'openai', endpoint: 'https://api.openai.com/v1', context_window: 128000 },
+    { id: 'model-beta', name: 'llama3.1', tag: 'ollama', external: false, thinking: false, api_protocol: 'ollama', endpoint: 'http://localhost:11434/v1', context_window: 32768 },
+    { id: 'model-gamma', name: 'qwen3', tag: 'vllm', external: false, thinking: false, api_protocol: 'vllm', endpoint: 'http://localhost:8000/v1', context_window: 32768 },
+  ]
+
+  it('reshuffle: still updates the originally-edited model, never the one that slid into its old slot', async () => {
+    mockUpdateModel.mockResolvedValue({ status: 'ok', models: [THREE[1], THREE[2]] })
+
+    const { rerender } = renderPanel(THREE)
+
+    // Open the edit form on row 1 — model-beta ("llama3.1").
+    fireEvent.click(screen.getAllByTitle('Edit model')[1])
+    expect(screen.getByLabelText('Model name')).toHaveValue('llama3.1')
+
+    // Another admin deletes row 0 (model-alpha) while this form is still
+    // open. Row 1 in the new list is now model-gamma ("qwen3") — an
+    // index-based lookup at save time would silently target that instead.
+    rerender(
+      <ModelEditor
+        models={[THREE[1], THREE[2]]}
+        defaultModel="gpt-4o"
+        onConfigPatch={onConfigPatch}
+        onReadinessChange={onReadinessChange}
+        error={null}
+        onError={onError}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(mockUpdateModel).toHaveBeenCalledTimes(1))
+    // Must be the model the admin actually opened — never the one that
+    // reshuffled into its old list position.
+    expect(mockUpdateModel.mock.calls[0][0]).toBe('model-beta')
+    expect(mockUpdateModel.mock.calls[0][0]).not.toBe('model-gamma')
+  })
+
+  it('deletion of the edited model itself: refuses the save instead of guessing', async () => {
+    const { rerender } = renderPanel(THREE)
+
+    // Open the edit form on row 1 — model-beta.
+    fireEvent.click(screen.getAllByTitle('Edit model')[1])
+    expect(screen.getByLabelText('Model name')).toHaveValue('llama3.1')
+
+    // model-beta itself gets deleted by someone else while the form is open.
+    rerender(
+      <ModelEditor
+        models={[THREE[0], THREE[2]]}
+        defaultModel="gpt-4o"
+        onConfigPatch={onConfigPatch}
+        onReadinessChange={onReadinessChange}
+        error={null}
+        onError={onError}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith('Could not find the model to update — refresh and try again.'))
+    expect(mockUpdateModel).not.toHaveBeenCalled()
+  })
+})
+
 describe('ModelEditor — delete and default', () => {
   it('deletes by id and hands the parent the remaining list', async () => {
     renderPanel()

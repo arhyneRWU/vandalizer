@@ -287,7 +287,11 @@ export function ModelEditor({
 
   // Add/edit model form
   const [showModelForm, setShowModelForm] = useState(false)
-  const [editingModelIndex, setEditingModelIndex] = useState<number | null>(null)
+  // Holds the id of the model being edited (never a list index/position) —
+  // delete and edit are both reachable at once, so resolving "which model is
+  // this form for" from a position would drift the moment another delete
+  // reshuffles the list out from under an open form. See handleSaveModel.
+  const [editingModelId, setEditingModelId] = useState<string | null>(null)
   const [savingModel, setSavingModel] = useState(false)
   const [newModel, setNewModel] = useState<ModelDraft>({ ...EMPTY_MODEL_DRAFT })
   const [probingContext, setProbingContext] = useState(false)
@@ -302,9 +306,7 @@ export function ModelEditor({
     setProbingContext(true)
     setProbeResult(null)
     try {
-      const existingModelId = editingModelIndex !== null
-        ? models[editingModelIndex]?.id ?? null
-        : null
+      const existingModelId = editingModelId
       const result = await probeModel({
         name: newModel.name,
         endpoint: newModel.endpoint,
@@ -332,7 +334,7 @@ export function ModelEditor({
     setModelTest(null)
     setWizardProviderId(null)
     setWizardStep(1)
-    setEditingModelIndex(null)
+    setEditingModelId(null)
     onError(null)
     setShowModelForm(true)
   }
@@ -351,7 +353,7 @@ export function ModelEditor({
     setWizardProviderId(null)
     setWizardStep(1)
     setShowModelForm(false)
-    setEditingModelIndex(null)
+    setEditingModelId(null)
     onError(null)
   }
 
@@ -382,37 +384,54 @@ export function ModelEditor({
     setModelTest(null)
     try {
       let res
-      let savedIndex: number
-      if (editingModelIndex !== null) {
-        const modelId = models[editingModelIndex]?.id
-        if (!modelId) {
+      // Snapshot which ids exist *before* the write, so a newly-added model
+      // can be identified by set difference afterward — never by assuming
+      // the backend appends it at the end of the response's list.
+      const priorIds = new Set(models.map(m => m.id))
+      if (editingModelId !== null) {
+        const modelId = editingModelId
+        // The held id may no longer be in the list — e.g. another admin (or
+        // this admin, in another tab) deleted it while this form was open.
+        // Refuse rather than silently resolving to whatever now sits at some
+        // stale position.
+        if (!models.some(m => m.id === modelId)) {
           onError('Could not find the model to update — refresh and try again.')
           setSavingModel(false)
           return
         }
         res = await updateModel(modelId, newModel)
-        savedIndex = editingModelIndex
       } else {
         res = await addModel(newModel)
-        savedIndex = res.models.length - 1
       }
       const resDefault = (res as { default_model?: string }).default_model
       onConfigPatch({
         available_models: res.models,
         ...(resDefault !== undefined ? { default_model: resDefault } : {}),
       })
-      // The model is now saved — subsequent edits/tests target its index.
-      setEditingModelIndex(savedIndex)
+
+      // Resolve which model we just saved, by id — for an edit we already
+      // hold that id; for a new model, it's whichever id in the response
+      // wasn't present before the call.
+      const savedModelId = editingModelId !== null
+        ? editingModelId
+        : res.models.find(m => !priorIds.has(m.id))?.id
+
+      if (!savedModelId) {
+        const count = res.models.length
+        onError(`Model saved, but the response didn't let us identify which one to test (received ${count} model${count === 1 ? '' : 's'}, none new). Refresh and test it from the list.`)
+        setEditingModelId(null)
+        onReadinessChange()
+        return
+      }
+
+      // The model is now saved — subsequent edits/tests target its id.
+      setEditingModelId(savedModelId)
       onReadinessChange()
       // Auto-run a connection test so the admin gets a clear pass/fail without
-      // having to know where the test button lives. Resolve the id from the
-      // just-returned list — the test-model route is id-addressed.
-      const savedModelId = res.models[savedIndex]?.id
+      // having to know where the test button lives. The test-model route is
+      // id-addressed.
       setWizardTesting(true)
       try {
-        if (!savedModelId) {
-          throw new Error('Saved model is missing an id')
-        }
         const t = await testModel(savedModelId)
         setModelTest(t)
       } catch (e) {
@@ -457,7 +476,7 @@ export function ModelEditor({
     setModelTest(null)
     setWizardProviderId(inferProviderId(m))
     setWizardStep(2)          // edit skips the provider picker
-    setEditingModelIndex(index)
+    setEditingModelId(m.id)
     setShowModelForm(true)
   }
 
@@ -674,7 +693,7 @@ export function ModelEditor({
 
         {showModelForm && (() => {
           const prov = MODEL_PROVIDERS.find(p => p.id === wizardProviderId) ?? null
-          const isEditing = editingModelIndex !== null
+          const isEditing = editingModelId !== null
           const needsKey = prov?.needsKey ?? true
           const needsEndpoint = prov?.needsEndpoint ?? false
           const secondaryBtn = {

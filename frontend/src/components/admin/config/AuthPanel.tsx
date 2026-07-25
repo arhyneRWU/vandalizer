@@ -40,7 +40,11 @@ export function AuthPanel({
   // Add/edit provider form
   const [showAddProvider, setShowAddProvider] = useState(false)
   const [newProvider, setNewProvider] = useState({ provider: 'oauth', display_name: '', client_id: '', client_secret: '', redirect_uri: '', tenant_id: '', idp_entity_id: '', idp_sso_url: '', idp_x509_cert: '' })
-  const [editingProviderIndex, setEditingProviderIndex] = useState<number | null>(null)
+  // Holds the id of the provider being edited (never a list index/position)
+  // — delete and edit are both reachable at once, so a position could drift
+  // out from under an open form the moment another delete reshuffles the
+  // list. See handleUpdateProvider.
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null)
   const [editingProvider, setEditingProvider] = useState({ provider: 'oauth', display_name: '', client_id: '', client_secret: '', redirect_uri: '', tenant_id: '', idp_entity_id: '', idp_sso_url: '', idp_x509_cert: '' })
   const [samlMeta, setSamlMeta] = useState('')
   const [samlMetaBusy, setSamlMetaBusy] = useState(false)
@@ -137,8 +141,13 @@ export function AuthPanel({
   const handleEditProvider = (index: number) => {
     const p = providers[index] as Record<string, unknown> | undefined
     if (!p) return
+    const providerId = p.id as string | undefined
+    if (!providerId) {
+      onError('Could not find the provider to edit — refresh and try again.')
+      return
+    }
     setProviderError('')
-    setEditingProviderIndex(index)
+    setEditingProviderId(providerId)
     setEditingProvider({
       provider: (p.provider as string) || 'oauth',
       display_name: (p.display_name as string) || '',
@@ -154,20 +163,23 @@ export function AuthPanel({
   }
 
   const handleUpdateProvider = async () => {
-    if (editingProviderIndex === null) return
+    if (editingProviderId === null) return
     const validationError = providerValidationError(editingProvider)
     if (validationError) { setProviderError(validationError); return }
-    const providerId = (providers[editingProviderIndex] as Record<string, unknown> | undefined)?.id as string | undefined
-    if (!providerId) {
+    // The held id may no longer be in the list — e.g. another delete while
+    // this form was open. Refuse rather than resolving to whatever now sits
+    // at some stale position.
+    const stillExists = providers.some(pr => (pr as Record<string, unknown>).id === editingProviderId)
+    if (!stillExists) {
       setProviderError('Could not find the provider to update — refresh and try again.')
       return
     }
     setProviderError('')
     try {
-      await updateOAuthProvider(providerId, editingProvider as unknown as Record<string, string>)
+      await updateOAuthProvider(editingProviderId, editingProvider as unknown as Record<string, string>)
       const c = await getSystemConfig()
       onConfigReplace(c)
-      setEditingProviderIndex(null)
+      setEditingProviderId(null)
     } catch (e) {
       setProviderError(e instanceof Error ? e.message : 'Failed to update provider')
     }
@@ -239,7 +251,10 @@ export function AuthPanel({
 
           {providers && providers.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {providers.map((p, i) => (
+              {providers.map((p, i) => {
+                const providerId = (p as Record<string, unknown>).id as string | undefined
+                const isEditingThisRow = providerId !== undefined && editingProviderId === providerId
+                return (
                 <div key={i}>
                   <div style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -259,7 +274,7 @@ export function AuthPanel({
                       <button
                         type="button"
                         aria-label="Edit provider"
-                        onClick={() => editingProviderIndex === i ? setEditingProviderIndex(null) : handleEditProvider(i)}
+                        onClick={() => isEditingThisRow ? setEditingProviderId(null) : handleEditProvider(i)}
                         style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', padding: 4 }}
                       >
                         <Pencil size={16} aria-hidden="true" />
@@ -274,7 +289,7 @@ export function AuthPanel({
                       </button>
                     </div>
                   </div>
-                  {editingProviderIndex === i && (
+                  {isEditingThisRow && (
                     <div style={{ marginTop: 8, padding: 16, background: '#f9fafb', borderRadius: 'var(--ui-radius, 12px)', border: '1px solid #e5e7eb' }}>
                       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Edit Provider</div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -350,7 +365,7 @@ export function AuthPanel({
                           Save Changes
                         </button>
                         <button
-                          onClick={() => setEditingProviderIndex(null)}
+                          onClick={() => setEditingProviderId(null)}
                           style={{
                             padding: '8px 16px', borderRadius: 'var(--ui-radius, 12px)', border: '1px solid #d1d5db',
                             background: '#fff', fontSize: 13, cursor: 'pointer',
@@ -362,7 +377,8 @@ export function AuthPanel({
                     </div>
                   )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <div style={{ fontSize: 13, color: '#9ca3af', padding: '8px 0' }}>No providers configured.</div>

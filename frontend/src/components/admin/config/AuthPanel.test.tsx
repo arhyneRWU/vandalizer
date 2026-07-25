@@ -211,6 +211,100 @@ describe('AuthPanel — add and delete', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Wrong-record race: delete + edit are both reachable at once. Editing a
+// provider must never resolve to whatever record now happens to occupy that
+// row's old position after another delete reshuffles the list — it must
+// track the provider actually being edited, by id, or refuse the save.
+// ---------------------------------------------------------------------------
+
+describe('AuthPanel — edit survives a concurrent delete (wrong-record race)', () => {
+  const THREE: SystemConfigData['oauth_providers'] = [
+    { id: 'prov-1', provider: 'azure', display_name: 'Campus Azure', client_id: 'client-abc', tenant_id: 'tenant-1', redirect_uri: '' },
+    { id: 'prov-2', provider: 'oauth', display_name: 'Campus Google', client_id: 'client-def', redirect_uri: '' },
+    { id: 'prov-3', provider: 'oauth', display_name: 'Campus GitHub', client_id: 'client-ghi', redirect_uri: '' },
+  ]
+
+  it('reshuffle: still updates the originally-edited provider, never the one that slid into its old slot', async () => {
+    mockUpdateOAuthProvider.mockResolvedValue({ status: 'ok' })
+
+    const { rerender } = render(
+      <AuthPanel
+        providers={THREE}
+        initialAuthMethods={['password', 'oauth']}
+        onConfigReplace={onConfigReplace}
+        onReadinessChange={onReadinessChange}
+        onError={onError}
+      />,
+    )
+
+    // Open the edit form on row 1 — prov-2 ("Campus Google").
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit provider' })[1])
+    expect(await screen.findByDisplayValue('Campus Google')).toBeInTheDocument()
+
+    // Another admin deletes row 0 (prov-1) while this form is still open.
+    // Row 1 in the new list is now prov-3 ("Campus GitHub") — an
+    // index-based lookup at save time would silently target that instead.
+    rerender(
+      <AuthPanel
+        providers={[THREE[1], THREE[2]]}
+        initialAuthMethods={['password', 'oauth']}
+        onConfigReplace={onConfigReplace}
+        onReadinessChange={onReadinessChange}
+        onError={onError}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(mockUpdateOAuthProvider).toHaveBeenCalledTimes(1))
+    const [providerId] = mockUpdateOAuthProvider.mock.calls[0] as [string, Record<string, unknown>]
+    // Must be the provider the admin actually opened — never the one that
+    // reshuffled into its old list position.
+    expect(providerId).toBe('prov-2')
+    expect(providerId).not.toBe('prov-3')
+  })
+
+  it('deletion of the edited provider itself: the edit form goes with it, so a stale draft can never be submitted', async () => {
+    // The edit form is rendered inline under its own row (unlike ModelEditor's
+    // detached form), so once the row's id no longer matches anything in the
+    // list, the form — and its "Save Changes" button — has nowhere to attach
+    // and disappears with it. An index match (the old bug) would instead keep
+    // showing the stale form under whichever *other* provider slid into that
+    // row's position, letting Save silently write to the wrong record.
+    const { rerender } = render(
+      <AuthPanel
+        providers={THREE}
+        initialAuthMethods={['password', 'oauth']}
+        onConfigReplace={onConfigReplace}
+        onReadinessChange={onReadinessChange}
+        onError={onError}
+      />,
+    )
+
+    // Open the edit form on row 1 — prov-2.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit provider' })[1])
+    expect(await screen.findByDisplayValue('Campus Google')).toBeInTheDocument()
+
+    // prov-2 itself gets deleted by someone else while the form is open.
+    // Note row 1 in the new list is now occupied by prov-3 — a position-based
+    // match would find "something at index 1" and keep the form open there.
+    rerender(
+      <AuthPanel
+        providers={[THREE[0], THREE[2]]}
+        initialAuthMethods={['password', 'oauth']}
+        onConfigReplace={onConfigReplace}
+        onReadinessChange={onReadinessChange}
+        onError={onError}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Campus Google')).not.toBeInTheDocument()
+    expect(mockUpdateOAuthProvider).not.toHaveBeenCalled()
+  })
+})
+
 /** The "New Provider" form's labels are not htmlFor-associated, so resolve a
  *  field by the label text that precedes it inside the form. */
 function formField(form: HTMLElement, labelText: string): HTMLElement {
