@@ -181,7 +181,7 @@ class TestAdminAnalyticsScoping:
             resp = await client.get("/api/admin/users", cookies=cookies, headers=headers)
 
         assert resp.status_code == 200
-        data = resp.json()
+        data = resp.json()["items"]
         assert len(data) == 1
         assert data[0]["user_id"] == "member-1"
         assert data[0]["is_admin"] is False
@@ -396,6 +396,171 @@ class TestAdminAnalyticsScoping:
             "0123456789abcdef01234567",
             "team-uuid",
         ]
+
+
+class TestAdminListEndpointLimits:
+    """Plan 012: the five previously-unbounded admin list endpoints now accept
+    a `limit` and report `total`/`capped`. Exercised against the user
+    leaderboard (GET /users), which has the richest scoping logic of the five;
+    the other four share the same "scope via find(), then slice" shape.
+    """
+
+    @pytest.mark.asyncio
+    async def test_more_rows_than_limit_caps_and_reports_true_total(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+
+        events = [
+            SimpleNamespace(user_id="user-1", tokens_input=100, tokens_output=0, type="workflow_run", started_at=None),
+            SimpleNamespace(user_id="user-2", tokens_input=50, tokens_output=0, type="workflow_run", started_at=None),
+            SimpleNamespace(user_id="user-3", tokens_input=10, tokens_output=0, type="workflow_run", started_at=None),
+        ]
+        users = [
+            SimpleNamespace(user_id=e.user_id, name=e.user_id, email=f"{e.user_id}@example.com", is_admin=False, is_staff=False, is_examiner=False)
+            for e in events
+        ]
+
+        activity_find = MagicMock()
+        activity_find.to_list = AsyncMock(return_value=events)
+        users_find = MagicMock()
+        users_find.limit.return_value.to_list = AsyncMock(return_value=users)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.ActivityEvent") as MockActivityEvent,
+            patch("app.routers.admin.User") as MockRouteUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockActivityEvent.find.return_value = activity_find
+            MockRouteUser.find.return_value = users_find
+
+            resp = await client.get("/api/admin/users?limit=2", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 3
+        assert body["capped"] is True
+        assert len(body["items"]) == 2
+        # Sorted desc by tokens_total — the two highest survive the cap.
+        assert [i["user_id"] for i in body["items"]] == ["user-1", "user-2"]
+
+    @pytest.mark.asyncio
+    async def test_fewer_rows_than_limit_not_capped(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+
+        events = [
+            SimpleNamespace(user_id="user-1", tokens_input=10, tokens_output=0, type="workflow_run", started_at=None),
+        ]
+        users = [
+            SimpleNamespace(user_id="user-1", name="User One", email="user-1@example.com", is_admin=False, is_staff=False, is_examiner=False),
+        ]
+
+        activity_find = MagicMock()
+        activity_find.to_list = AsyncMock(return_value=events)
+        users_find = MagicMock()
+        users_find.limit.return_value.to_list = AsyncMock(return_value=users)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.ActivityEvent") as MockActivityEvent,
+            patch("app.routers.admin.User") as MockRouteUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockActivityEvent.find.return_value = activity_find
+            MockRouteUser.find.return_value = users_find
+
+            resp = await client.get("/api/admin/users", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["capped"] is False
+        assert len(body["items"]) == 1
+        assert body["items"][0]["user_id"] == "user-1"
+
+    @pytest.mark.asyncio
+    async def test_limit_above_max_list_limit_rejected(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            resp = await client.get("/api/admin/users?limit=2001", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_team_scoped_cap_never_widens_visibility_identity_check(self, client):
+        """A limit small enough to truncate the response must still only ever
+        surface rows the team-scoped caller is entitled to see. Guards against
+        a regression where `limit` is applied before (rather than after) the
+        team-scope filter — that would be a data-exposure bug, not a perf one.
+        """
+        team_admin = _make_user("team-admin", current_team="0123456789abcdef01234567")
+        cookies, headers = _auth("team-admin")
+        team = SimpleNamespace(id="0123456789abcdef01234567", uuid="team-uuid", name="Team One")
+
+        events = [
+            SimpleNamespace(user_id="member-1", tokens_input=100, tokens_output=0, type="workflow_run", started_at=None),
+            SimpleNamespace(user_id="member-2", tokens_input=10, tokens_output=0, type="workflow_run", started_at=None),
+        ]
+        team_memberships = [
+            SimpleNamespace(user_id="member-1"),
+            SimpleNamespace(user_id="member-2"),
+        ]
+        users = [
+            SimpleNamespace(user_id="member-1", name="Member One", email="member-1@example.com", is_admin=False, is_examiner=False),
+            SimpleNamespace(user_id="member-2", name="Member Two", email="member-2@example.com", is_admin=False, is_examiner=False),
+        ]
+
+        activity_find = MagicMock()
+        activity_find.to_list = AsyncMock(return_value=events)
+        memberships_find = MagicMock()
+        memberships_find.to_list = AsyncMock(return_value=team_memberships)
+        users_find = MagicMock()
+        users_find.to_list = AsyncMock(return_value=users)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "team-admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.admin._require_admin_or_team_admin",
+                new=AsyncMock(return_value=(team_admin, "0123456789abcdef01234567")),
+            ),
+            patch("app.routers.admin.Team") as MockTeam,
+            patch("app.routers.admin.ActivityEvent") as MockActivityEvent,
+            patch("app.routers.admin.TeamMembership") as MockTeamMembership,
+            patch("app.routers.admin.User") as MockRouteUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=team_admin)
+            MockTeam.find_one = AsyncMock(return_value=team)
+            MockActivityEvent.find.return_value = activity_find
+            MockTeamMembership.find.return_value = memberships_find
+            MockRouteUser.find.return_value = users_find
+
+            resp = await client.get("/api/admin/users?limit=1", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 200
+
+        # The query issued to ActivityEvent still carries the team scope
+        # filter regardless of the limit — the cap never substitutes for it.
+        query = MockActivityEvent.find.call_args.args[0]
+        assert query["team_id"]["$in"] == ["0123456789abcdef01234567", "team-uuid"]
+
+        body = resp.json()
+        assert body["total"] == 2
+        assert body["capped"] is True
+        assert len(body["items"]) == 1
+        # Identity, not just count: the single surviving row must be the
+        # in-scope member with the higher token total — never a row that
+        # slipped in ahead of, or instead of, the scope filter.
+        assert body["items"][0]["user_id"] == "member-1"
 
 
 class TestUserActivityHistory:

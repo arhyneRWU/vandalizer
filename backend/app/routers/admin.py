@@ -33,6 +33,14 @@ router = APIRouter()
 # unbounded scans.
 MAX_ANALYTICS_DAYS = 730
 
+# Ceiling for the `limit` query param on the admin list endpoints (user/team
+# leaderboards, all-teams, isolated-users, certification progress). These
+# build a Python list in memory after scoping, so an unbounded response is
+# both a large JSON payload and thousands of re-sorted DOM rows client-side.
+# 2000 is generous relative to any current deployment's row counts while
+# still bounding the worst case.
+MAX_LIST_LIMIT = 2000
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -196,6 +204,12 @@ class UserLeaderboardItem(BaseModel):
     last_active: Optional[datetime.datetime] = None
 
 
+class UserLeaderboardResponse(BaseModel):
+    items: list[UserLeaderboardItem]
+    total: int
+    capped: bool
+
+
 class TeamLeaderboardItem(BaseModel):
     team_id: str
     name: str
@@ -205,6 +219,12 @@ class TeamLeaderboardItem(BaseModel):
     active_users: int = 0
     member_count: int = 0
     avg_latency_ms: Optional[float] = None
+
+
+class TeamLeaderboardResponse(BaseModel):
+    items: list[TeamLeaderboardItem]
+    total: int
+    capped: bool
 
 
 class WorkflowEventItem(BaseModel):
@@ -265,6 +285,12 @@ class AdminTeamItem(BaseModel):
     is_default: bool
 
 
+class AdminTeamListResponse(BaseModel):
+    items: list[AdminTeamItem]
+    total: int
+    capped: bool
+
+
 class AdminCreateTeamRequest(BaseModel):
     name: str
 
@@ -278,6 +304,12 @@ class IsolatedUserItem(BaseModel):
     user_id: str
     name: Optional[str] = None
     email: Optional[str] = None
+
+
+class IsolatedUsersResponse(BaseModel):
+    items: list[IsolatedUserItem]
+    total: int
+    capped: bool
 
 
 class ModelAddRequest(BaseModel):
@@ -578,9 +610,10 @@ async def usage_timeseries(
 # 2. GET /users  - User leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/users", response_model=list[UserLeaderboardItem])
+@router.get("/users", response_model=UserLeaderboardResponse)
 async def user_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -615,7 +648,7 @@ async def user_leaderboard(
     # Fetch user records — scope to team members when team-scoped
     if team_scope:
         if not scoped_team:
-            return []
+            return UserLeaderboardResponse(items=[], total=0, capped=False)
         team_memberships = await TeamMembership.find(
             TeamMembership.team == scoped_team.id
         ).to_list()
@@ -678,16 +711,19 @@ async def user_leaderboard(
 
     # Sort by tokens desc
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return UserLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
 # 3. GET /teams  - Team leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/teams", response_model=list[TeamLeaderboardItem])
+@router.get("/teams", response_model=TeamLeaderboardResponse)
 async def team_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -762,7 +798,9 @@ async def team_leaderboard(
         )
 
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return TeamLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2099,8 +2137,11 @@ async def quality_contract(
 # 19. GET /admin/teams/all  - All teams (admin management view)
 # ---------------------------------------------------------------------------
 
-@router.get("/teams/all", response_model=list[AdminTeamItem])
-async def admin_list_all_teams(user: User = Depends(get_current_user)):
+@router.get("/teams/all", response_model=AdminTeamListResponse)
+async def admin_list_all_teams(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     cfg = await SystemConfig.get_config()
@@ -2112,7 +2153,7 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         key = str(m.team)
         member_counts[key] = member_counts.get(key, 0) + 1
 
-    return [
+    items = [
         AdminTeamItem(
             team_id=str(t.id),
             uuid=t.uuid,
@@ -2123,6 +2164,9 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         )
         for t in all_teams
     ]
+    total = len(items)
+    capped = total > limit
+    return AdminTeamListResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2226,8 +2270,11 @@ async def admin_remove_user_from_team(
 # 23. GET /admin/users/isolated  - Users with no shared team
 # ---------------------------------------------------------------------------
 
-@router.get("/users/isolated", response_model=list[IsolatedUserItem])
-async def isolated_users(user: User = Depends(get_current_user)):
+@router.get("/users/isolated", response_model=IsolatedUsersResponse)
+async def isolated_users(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     all_memberships = await TeamMembership.find().limit(100000).to_list()
@@ -2247,13 +2294,16 @@ async def isolated_users(user: User = Depends(get_current_user)):
     ]
 
     if not isolated_ids:
-        return []
+        return IsolatedUsersResponse(items=[], total=0, capped=False)
 
     users = await User.find({"user_id": {"$in": isolated_ids}}).to_list()
-    return [
+    items = [
         IsolatedUserItem(user_id=u.user_id, name=u.name, email=u.email)
         for u in users
     ]
+    total = len(items)
+    capped = total > limit
+    return IsolatedUsersResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2819,8 +2869,17 @@ class CertificationProgressDetail(CertificationProgressItem):
     modules: dict
 
 
-@router.get("/certifications", response_model=list[CertificationProgressItem])
-async def list_certification_progress(user: User = Depends(get_current_user)):
+class CertificationProgressListResponse(BaseModel):
+    items: list[CertificationProgressItem]
+    total: int
+    capped: bool
+
+
+@router.get("/certifications", response_model=CertificationProgressListResponse)
+async def list_certification_progress(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     """List all users who have started the certification program with progress summary."""
     await _require_admin(user)
 
@@ -2829,7 +2888,7 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
 
     progresses = await CertificationProgress.find().to_list()
     if not progresses:
-        return []
+        return CertificationProgressListResponse(items=[], total=0, capped=False)
 
     user_ids = [p.user_id for p in progresses]
     users = await User.find({"user_id": {"$in": user_ids}}).to_list()
@@ -2859,7 +2918,9 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
         )
 
     items.sort(key=lambda i: (i.modules_completed, i.total_xp), reverse=True)
-    return items
+    total = len(items)
+    capped = total > limit
+    return CertificationProgressListResponse(items=items[:limit], total=total, capped=capped)
 
 
 @router.get("/certifications/{user_id}", response_model=CertificationProgressDetail)
