@@ -17,21 +17,26 @@ export function WorkflowsTab() {
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
     getWorkflowEvents(page, status || undefined, search || undefined)
-      .then(setData)
-      .catch(e => setError(e?.message || 'Failed to load workflow events'))
-      .finally(() => setLoading(false))
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load workflow events') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [page, status, search])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const handleSearchChange = (v: string) => {
     setSearchInput(v)
     if (searchDebounce.current) clearTimeout(searchDebounce.current)
     searchDebounce.current = setTimeout(() => { setSearch(v); setPage(1) }, 400)
   }
+
+  // Clear any pending debounce timer on unmount so it can't fire after teardown.
+  useEffect(() => () => { if (searchDebounce.current) clearTimeout(searchDebounce.current) }, [])
 
   const filters = ['', 'completed', 'running', 'failed', 'queued', 'canceled']
 

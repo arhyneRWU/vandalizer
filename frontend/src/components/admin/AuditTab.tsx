@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertCircle, ChevronLeft, ChevronRight, Download } from 'lucide-react'
 
 import * as auditApi from '../../api/audit'
@@ -12,23 +12,38 @@ export function AuditTab() {
   const [error, setError] = useState<string | null>(null)
   const [loadedOnce, setLoadedOnce] = useState(false)
   const [actionFilter, setActionFilter] = useState('')
+  const [debouncedActionFilter, setDebouncedActionFilter] = useState('')
   const [resourceTypeFilter, setResourceTypeFilter] = useState('')
+  const actionDebounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const limit = 25
 
-  const load = useCallback(async () => {
+  // Debounce the free-text action filter so typing does not fire a request
+  // per keystroke; the input itself stays controlled/responsive via
+  // `actionFilter`, only the fetch trigger (`debouncedActionFilter`) lags.
+  const handleActionFilterChange = (v: string) => {
+    setActionFilter(v)
+    if (actionDebounce.current) clearTimeout(actionDebounce.current)
+    actionDebounce.current = setTimeout(() => { setDebouncedActionFilter(v); setPage(0) }, 400)
+  }
+
+  // Clear any pending debounce timer on unmount so it can't fire after teardown.
+  useEffect(() => () => { if (actionDebounce.current) clearTimeout(actionDebounce.current) }, [])
+
+  useEffect(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    try {
-      const data = await auditApi.queryAuditLog({ action: actionFilter || undefined, resource_type: resourceTypeFilter || undefined, skip: page * limit, limit })
-      setEntries(data.entries)
-      setTotal(data.total)
-      setLoadedOnce(true)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load audit log')
-    } finally { setLoading(false) }
-  }, [page, actionFilter, resourceTypeFilter])
-
-  useEffect(() => { load() }, [load])
+    auditApi.queryAuditLog({ action: debouncedActionFilter || undefined, resource_type: resourceTypeFilter || undefined, skip: page * limit, limit })
+      .then(data => {
+        if (cancelled) return
+        setEntries(data.entries)
+        setTotal(data.total)
+        setLoadedOnce(true)
+      })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load audit log') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [page, debouncedActionFilter, resourceTypeFilter])
 
   const ACTION_COLORS: Record<string, string> = {
     'document.create': '#dcfce7', 'document.delete': '#fee2e2',
@@ -50,7 +65,7 @@ export function AuditTab() {
         </a>
       </div>
       <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
-        <input type="text" value={actionFilter} onChange={e => { setActionFilter(e.target.value); setPage(0) }}
+        <input type="text" value={actionFilter} onChange={e => handleActionFilterChange(e.target.value)}
           placeholder="Filter by action…" style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13, fontFamily: 'inherit' }} />
         <select value={resourceTypeFilter} onChange={e => { setResourceTypeFilter(e.target.value); setPage(0) }}
           style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13, fontFamily: 'inherit' }}>

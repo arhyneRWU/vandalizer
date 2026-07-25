@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { AuditTab } from './AuditTab'
 import type { AuditLogEntry } from '../../api/audit'
 
@@ -70,5 +70,77 @@ describe('AuditTab — filters', () => {
       expect.objectContaining({ skip: 0, action: 'document.create' }),
     ))
     await waitFor(() => expect(screen.getByText('Page 1 of 3')).toBeInTheDocument())
+  })
+})
+
+describe('AuditTab — out-of-order responses (plan 010)', () => {
+  it('renders only the latest response when an earlier request resolves after a later one', async () => {
+    let resolveFirst: (value: unknown) => void = () => {}
+    const firstPromise = new Promise(resolve => { resolveFirst = resolve })
+    const firstPayload = {
+      entries: [{ ...entry, uuid: 'first', resource_name: 'First Doc' }],
+      total: 1, skip: 0, limit: 25,
+    }
+    const secondPayload = {
+      entries: [{ ...entry, uuid: 'second', resource_name: 'Second Doc' }],
+      total: 1, skip: 0, limit: 25,
+    }
+
+    // First call (triggered by mount) hangs until we resolve it manually;
+    // second call (triggered by the resourceTypeFilter change below, which
+    // is not debounced) resolves immediately.
+    mockQueryAuditLog
+      .mockImplementationOnce(() => firstPromise)
+      .mockResolvedValueOnce(secondPayload)
+
+    render(<AuditTab />)
+    await waitFor(() => expect(mockQueryAuditLog).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'document' } })
+    await waitFor(() => expect(mockQueryAuditLog).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByText('Second Doc')).toBeInTheDocument())
+
+    // Now let the slower, superseded first request resolve.
+    await act(async () => {
+      resolveFirst(firstPayload)
+      await Promise.resolve()
+    })
+
+    // The stale response must not have overwritten the current, correct render.
+    expect(screen.getByText('Second Doc')).toBeInTheDocument()
+    expect(screen.queryByText('First Doc')).not.toBeInTheDocument()
+  })
+})
+
+describe('AuditTab — debounced action filter (plan 010)', () => {
+  it('coalesces rapid keystrokes into a single debounced request', async () => {
+    mockQueryAuditLog.mockResolvedValue({ entries: [entry], total: 1, skip: 0, limit: 25 })
+    vi.useFakeTimers()
+    try {
+      render(<AuditTab />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(mockQueryAuditLog).toHaveBeenCalledTimes(1) // initial mount fetch
+
+      const input = screen.getByPlaceholderText('Filter by action…')
+      const keystrokes = ['d', 'do', 'doc', 'docu', 'docum']
+      for (const v of keystrokes) {
+        fireEvent.change(input, { target: { value: v } })
+      }
+
+      // Still within the debounce window — no new request yet.
+      expect(mockQueryAuditLog).toHaveBeenCalledTimes(1)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(400) })
+
+      // One debounced request fired for all 5 keystrokes — fewer than the
+      // keystroke count, not one request per keystroke.
+      expect(mockQueryAuditLog).toHaveBeenCalledTimes(2)
+      expect(mockQueryAuditLog.mock.calls.length).toBeLessThan(keystrokes.length)
+      expect(mockQueryAuditLog).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'docum' }),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
