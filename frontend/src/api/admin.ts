@@ -462,7 +462,7 @@ export function probeModel(data: {
   endpoint?: string
   api_protocol?: string
   api_key?: string
-  existing_model_index?: number | null
+  existing_model_id?: string | null
 }) {
   return apiFetch<ProbeModelResult>('/api/admin/config/probe-model', {
     method: 'POST',
@@ -514,8 +514,8 @@ export type ModelTestResult = {
   summary: string
 }
 
-export function testModel(index: number) {
-  return apiFetch<ModelTestResult>(`/api/admin/config/test-model/${index}`, { method: 'POST' })
+export function testModel(modelId: string) {
+  return apiFetch<ModelTestResult>(`/api/admin/config/test-model/${encodeURIComponent(modelId)}`, { method: 'POST' })
 }
 
 // System readiness — the admin setup checklist

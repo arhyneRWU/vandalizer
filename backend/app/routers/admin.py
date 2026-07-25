@@ -2402,19 +2402,27 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
         raise HTTPException(status_code=502, detail=f"OCR test failed: {e}")
 
 
-@router.post("/config/test-model/{index}")
-async def test_model(index: int, user: User = Depends(get_current_user)):
+@router.post("/config/test-model/{model_id}")
+async def test_model(model_id: str, user: User = Depends(get_current_user)):
     """Run a real round-trip against a model and return full diagnostics.
 
     Returns HTTP 200 with ``ok`` true/false (in-band, like the Prompt
     Playground) so the UI can render a step-by-step breakdown — on success why
     the model is healthy, on failure a classified error with a suggested fix —
     instead of a bare error toast. A genuinely missing model still 404s.
+
+    Addressed by stable id, not array index — see PUT/DELETE
+    /config/models/{model_id} for the position-shift bug this avoids: without
+    it, another admin's edit between page load and this request could make
+    the badge for model X actually reflect a live test of model Y's
+    credentials.
     """
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
         raise HTTPException(status_code=404, detail="Model not found")
 
     from app.services.system_diagnostics import diagnose_model
@@ -2513,9 +2521,12 @@ class ModelProbeRequest(BaseModel):
     api_protocol: Optional[str] = ""
     api_key: Optional[str] = ""
     # When editing an existing model, the form sends api_key="***" to
-    # preserve the stored credential. Pass that model's index so we can
-    # decrypt and use it.
-    existing_model_index: Optional[int] = None
+    # preserve the stored credential. Pass that model's stable id so we can
+    # decrypt and use it — addressed by id, not array index, for the same
+    # reason PUT/DELETE /config/models/{model_id} are: an index resolved
+    # against a list that has since shifted would decrypt and use a
+    # different model's credential against this endpoint.
+    existing_model_id: Optional[str] = None
 
 
 @router.post("/config/probe-model")
@@ -2534,10 +2545,11 @@ async def probe_model(
     from app.services.model_probe import probe_context_window
 
     api_key = (body.api_key or "").strip()
-    if (api_key == "***" or not api_key) and body.existing_model_index is not None:
+    if (api_key == "***" or not api_key) and body.existing_model_id:
         cfg = await SystemConfig.get_config()
-        idx = body.existing_model_index
-        if 0 <= idx < len(cfg.available_models):
+        await _ensure_config_ids(cfg)
+        idx = _find_by_id(cfg.available_models, body.existing_model_id)
+        if idx != -1:
             stored = cfg.available_models[idx].get("api_key", "")
             if stored:
                 api_key = decrypt_value(stored) or ""

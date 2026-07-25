@@ -703,12 +703,15 @@ export function ConfigTab() {
     setProbingContext(true)
     setProbeResult(null)
     try {
+      const existingModelId = editingModelIndex !== null
+        ? cfg?.available_models[editingModelIndex]?.id ?? null
+        : null
       const result = await probeModel({
         name: newModel.name,
         endpoint: newModel.endpoint,
         api_protocol: newModel.api_protocol,
         api_key: newModel.api_key,
-        existing_model_index: editingModelIndex,
+        existing_model_id: existingModelId,
       })
       if (result.context_window && result.context_window > 0) {
         setNewModel(prev => ({ ...prev, context_window: result.context_window as number }))
@@ -799,10 +802,15 @@ export function ConfigTab() {
       setEditingModelIndex(savedIndex)
       void refreshReadiness()
       // Auto-run a connection test so the admin gets a clear pass/fail without
-      // having to know where the test button lives.
+      // having to know where the test button lives. Resolve the id from the
+      // just-returned list — the test-model route is id-addressed.
+      const savedModelId = res.models[savedIndex]?.id
       setWizardTesting(true)
       try {
-        const t = await testModel(savedIndex)
+        if (!savedModelId) {
+          throw new Error('Saved model is missing an id')
+        }
+        const t = await testModel(savedModelId)
         setModelTest(t)
       } catch (e) {
         setModelTest({
@@ -914,16 +922,17 @@ export function ConfigTab() {
   }
 
   const handleTestModel = async (index: number) => {
-    // The test-model backend route is still index-addressed (unchanged by
-    // this fix — see plan 011's scope notes), but the badge result is stored
-    // keyed by the model's stable id so it can never be misattributed to a
-    // different model after a delete shifts positions.
+    // The test-model backend route is now id-addressed, same as the model
+    // PUT/DELETE routes — a list-position shift between load and request
+    // (e.g. another admin's delete) can no longer make this test run
+    // against, and badge as "Connected", a different model. `index` is only
+    // used here to key the row's local spinner state and to resolve the id.
     const modelId = cfg?.available_models[index]?.id
     if (!modelId) return
     setModelTesting(index)
     setModelTestResults(prev => { const next = { ...prev }; delete next[modelId]; return next })
     try {
-      const res = await testModel(index)
+      const res = await testModel(modelId)
       setModelTestResults(prev => ({ ...prev, [modelId]: res }))
       // Auto-expand so the admin sees the breakdown — especially on failure.
       setExpandedModelTest(modelId)

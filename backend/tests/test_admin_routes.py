@@ -1004,3 +1004,138 @@ class TestModelsAddressedById:
         assert resp.status_code == 200
         assert cfg.default_model == ""
         assert resp.json()["default_model"] == ""
+
+
+class TestTestModelAddressedById:
+    """POST /api/admin/config/test-model/{model_id} — stable-id addressing.
+
+    Same class of bug TestModelsAddressedById covers for PUT/DELETE: the old
+    route addressed the model to test by array position, so a shift in the
+    list (e.g. another admin's delete) could silently run the connectivity
+    test — and badge as "Connected" — against the wrong model's credentials.
+    """
+
+    @staticmethod
+    def _patched_diagnostics():
+        """Patch the pieces diagnose_model calls out to so it runs its real
+        addressing/step logic without making a live model call."""
+        fake_run = MagicMock()
+        fake_run.output = "ok"
+        fake_run.usage = lambda: SimpleNamespace(request_tokens=1, response_tokens=1, total_tokens=2)
+        fake_agent = MagicMock()
+        fake_agent.run = AsyncMock(return_value=fake_run)
+        return (
+            patch("app.services.system_diagnostics.get_agent_model", return_value=MagicMock()),
+            patch("pydantic_ai.Agent", return_value=fake_agent),
+            patch("app.services.system_diagnostics.decrypt_value", return_value="secret"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_test_by_id_survives_a_position_shift(self, client):
+        """Seed three models, delete a different one first (shifting
+        positions), then test a specific remaining model BY ID — the
+        response must reflect that model, not whatever now sits at its old
+        index. Under the old index scheme, testing "bravo" after "alpha" was
+        deleted would have hit "charlie" instead."""
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        models = [
+            _model("alpha", "id-alpha", api_key="enc-alpha", api_protocol="openai"),
+            _model("bravo", "id-bravo", api_key="enc-bravo", api_protocol="openai"),
+            _model("charlie", "id-charlie", api_key="enc-charlie", api_protocol="openai"),
+        ]
+        cfg = SimpleNamespace(
+            available_models=models,
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+            model_dump=lambda: {"available_models": models},
+        )
+
+        p1, p2, p3 = self._patched_diagnostics()
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+            p1, p2, p3,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+
+            # Another admin (or tab) deletes "alpha" first — bravo/charlie
+            # shift from positions 1/2 down to 0/1.
+            resp_delete = await client.delete(
+                "/api/admin/config/models/id-alpha", cookies=cookies, headers=headers
+            )
+            assert resp_delete.status_code == 200
+
+            # Test "bravo" BY ID. Under the old index scheme, a client still
+            # holding index 1 (bravo's original position) would now hit
+            # "charlie" (now at index 1 post-shift) instead.
+            resp = await client.post(
+                "/api/admin/config/test-model/id-bravo", cookies=cookies, headers=headers
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["model"] == "bravo"
+        assert body["tag"] == "bravo"
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_returns_404(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        cfg = SimpleNamespace(
+            available_models=[_model("alpha", "id-alpha")],
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.post(
+                "/api/admin/config/test-model/no-such-id", cookies=cookies, headers=headers
+            )
+
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_non_superadmin_rejected_before_lookup(self, client):
+        """403 for a non-superadmin, proving `_require_superadmin` runs before
+        the by-id lookup (and thus before any 404 could leak list contents)."""
+        staffer = _make_user("staffer", is_admin=False)
+        cookies, headers = _auth("staffer")
+        cfg = SimpleNamespace(
+            available_models=[_model("alpha", "id-alpha")],
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "staffer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+        ):
+            MockUser.find_one = AsyncMock(return_value=staffer)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.post(
+                # Even a garbage id must still 403, not 404 — the auth check
+                # must short-circuit before the list is ever searched.
+                "/api/admin/config/test-model/whatever",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 403
+        # The config (and thus the model list) must never even be loaded —
+        # proof the superadmin check ran first, not just that nothing saved.
+        MockCfg.get_config.assert_not_called()
