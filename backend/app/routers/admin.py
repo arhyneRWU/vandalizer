@@ -4,6 +4,7 @@ import datetime
 import logging
 import math
 import re
+import uuid
 from typing import Literal, Optional
 
 from bson import ObjectId as BsonObjectId
@@ -14,7 +15,7 @@ from app.config import Settings
 from app.dependencies import get_current_user, get_settings
 from app.models.activity import ActivityEvent
 from app.models.audit_log import AdminAuditLog
-from app.models.system_config import SystemConfig
+from app.models.system_config import SystemConfig, ensure_stable_ids
 from app.services import audit_service
 from app.services.llm_service import clear_agent_caches, get_agent_model
 from app.services.version_service import get_update_status
@@ -62,6 +63,29 @@ def _sanitize_providers(providers: list[dict]) -> list[dict]:
             p_copy["client_secret"] = "***" if decrypt_value(secret) else ""
         sanitized.append(p_copy)
     return sanitized
+
+
+async def _ensure_config_ids(cfg: SystemConfig) -> None:
+    """Backfill stable `id`s for models/providers and persist if any changed.
+
+    Existing deployments have `available_models`/`oauth_providers` entries
+    with no `id` (they used to be addressed by array index). This assigns one
+    lazily the first time the config is touched after upgrading, and never
+    regenerates an `id` once assigned. Call this before addressing any entry
+    by id, and on the GET path too, so the client always has ids to send back.
+    """
+    changed = ensure_stable_ids(cfg.available_models)
+    changed = ensure_stable_ids(cfg.oauth_providers) or changed
+    if changed:
+        await cfg.save()
+
+
+def _find_by_id(entries: list[dict], entry_id: str) -> int:
+    """Return the index of the dict in `entries` whose `id` matches, or -1."""
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("id") == entry_id:
+            return i
+    return -1
 
 
 def _sanitize_models(models: list[dict]) -> list[dict]:
@@ -1392,6 +1416,7 @@ async def get_config(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     return {
         "extraction_config": cfg.get_extraction_config(),
         "quality_config": cfg.get_quality_config(),
@@ -1530,9 +1555,11 @@ async def add_model(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     was_empty = len(cfg.available_models) == 0
     cfg.available_models.append(
         {
+            "id": str(uuid.uuid4()),
             "name": body.name,
             "tag": body.tag,
             "external": body.external,
@@ -1570,7 +1597,8 @@ async def add_model(
 # ---------------------------------------------------------------------------
 # 7b. PUT /config/models/default  - Set (or clear) the system default model
 # ---------------------------------------------------------------------------
-# Defined before PUT /config/models/{index} so "default" isn't parsed as an int.
+# Defined before PUT /config/models/{model_id} so this literal path wins over
+# the parameterized route (FastAPI matches by registration order).
 
 class DefaultModelRequest(BaseModel):
     name: str = ""
@@ -1605,20 +1633,22 @@ async def set_default_model(
 
 
 # ---------------------------------------------------------------------------
-# 7c. PUT /config/models/{index}  - Update an existing model
+# 7c. PUT /config/models/{model_id}  - Update an existing model
 # ---------------------------------------------------------------------------
 
-@router.put("/config/models/{index}")
+@router.put("/config/models/{model_id}")
 async def update_model(
-    index: int,
+    model_id: str,
     body: ModelAddRequest,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
 
     # If the client sends '***', preserve the existing (encrypted) key
     new_api_key = body.api_key or ""
@@ -1629,6 +1659,7 @@ async def update_model(
 
     prev_name = cfg.available_models[index].get("name", "")
     cfg.available_models[index] = {
+        "id": model_id,
         "name": body.name,
         "tag": body.tag,
         "external": body.external,
@@ -1655,25 +1686,27 @@ async def update_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "update_model", f"Updated model at index {index}: {body.tag}")
+    await _audit(user, "update_model", f"Updated model {model_id}: {body.tag}")
 
     return {"status": "ok", "models": _sanitize_models(cfg.available_models), "default_model": cfg.default_model or ""}
 
 
 # ---------------------------------------------------------------------------
-# 8. DELETE /config/models/{index}  - Remove a model by index
+# 8. DELETE /config/models/{model_id}  - Remove a model by id
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/models/{index}")
+@router.delete("/config/models/{model_id}")
 async def delete_model(
-    index: int,
+    model_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
 
     removed = cfg.available_models.pop(index)
     # Clear default_model if we just deleted it.
@@ -1683,7 +1716,7 @@ async def delete_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "delete_model", f"Deleted model at index {index}: {removed.get('tag', '?')}")
+    await _audit(user, "delete_model", f"Deleted model {model_id}: {removed.get('tag', '?')}")
 
     return {"status": "ok", "removed": removed, "models": cfg.available_models, "default_model": cfg.default_model or ""}
 
@@ -1717,7 +1750,9 @@ async def add_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = str(uuid.uuid4())
     provider_dict["enabled"] = True
     if provider_dict.get("client_secret"):
         provider_dict["client_secret"] = encrypt_value(provider_dict["client_secret"])
@@ -1781,12 +1816,12 @@ async def parse_saml_metadata(
 
 
 # ---------------------------------------------------------------------------
-# 10. PUT /config/auth/providers/{index}  - Update OAuth provider
+# 10. PUT /config/auth/providers/{provider_id}  - Update OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.put("/config/auth/providers/{index}")
+@router.put("/config/auth/providers/{provider_id}")
 async def update_oauth_provider(
-    index: int,
+    provider_id: str,
     body: OAuthProviderRequest,
     user: User = Depends(get_current_user),
 ):
@@ -1794,10 +1829,13 @@ async def update_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = provider_id
     # If the client sends '***', preserve the existing (encrypted) secret
     if provider_dict.get("client_secret") == "***":
         provider_dict["client_secret"] = cfg.oauth_providers[index].get("client_secret", "")
@@ -1807,31 +1845,33 @@ async def update_oauth_provider(
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "update_oauth_provider", f"Updated OAuth provider at index {index}: {body.provider}")
+    await _audit(user, "update_oauth_provider", f"Updated OAuth provider {provider_id}: {body.provider}")
 
     return {"status": "ok", "providers": _sanitize_providers(cfg.oauth_providers)}
 
 
 # ---------------------------------------------------------------------------
-# 11. DELETE /config/auth/providers/{index}  - Remove OAuth provider
+# 11. DELETE /config/auth/providers/{provider_id}  - Remove OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/auth/providers/{index}")
+@router.delete("/config/auth/providers/{provider_id}")
 async def delete_oauth_provider(
-    index: int,
+    provider_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     removed = cfg.oauth_providers.pop(index)
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider at index {index}: {removed.get('provider', '?')}")
+    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider {provider_id}: {removed.get('provider', '?')}")
 
     return {"status": "ok", "removed": removed, "providers": cfg.oauth_providers}
 

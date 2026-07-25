@@ -735,3 +735,272 @@ class TestUpdateAuthMethods:
             )
 
         assert resp.status_code == 403
+
+
+def _model(name: str, model_id: str | None = None, **overrides) -> dict:
+    """Build a minimal available_models entry for tests."""
+    entry = {
+        "id": model_id,
+        "name": name,
+        "tag": name,
+        "external": False,
+        "thinking": False,
+        "endpoint": "",
+        "api_protocol": "",
+        "api_key": "",
+        "speed": "",
+        "tier": "",
+        "privacy": "",
+        "supports_structured": True,
+        "multimodal": False,
+        "supports_pdf": False,
+        "context_window": 128000,
+        "request_timeout_seconds": None,
+        "response_reserve_tokens": None,
+        "cost_per_1m_input": None,
+        "cost_per_1m_output": None,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _get_config_cfg(available_models: list[dict], oauth_providers: list[dict] | None = None) -> SimpleNamespace:
+    """Build a fake SystemConfig with every attribute GET /config touches."""
+    return SimpleNamespace(
+        available_models=available_models,
+        oauth_providers=oauth_providers or [],
+        default_model="",
+        auth_methods=["password"],
+        ocr_endpoint="",
+        ocr_api_key="",
+        llm_endpoint="",
+        highlight_color="#eab308",
+        ui_radius="12px",
+        default_team_id="",
+        support_contacts=[],
+        get_extraction_config=lambda: {},
+        get_quality_config=lambda: {},
+        get_compliance_config=lambda: {},
+        get_retention_config=lambda: {},
+        save=AsyncMock(),
+    )
+
+
+class TestModelsAddressedById:
+    """PUT/DELETE /api/admin/config/models/{model_id} — stable-id addressing.
+
+    Regression coverage for the bug this plan fixes: the old routes addressed
+    models by array position, so a shift in the list (e.g. another delete)
+    could make a client's stale index land on the wrong model.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_by_id_survives_a_position_shift(self, client):
+        """Seed three models, delete a different one first (shifting
+        positions), then delete a specific model BY ID — the intended model
+        must be gone and the other two must remain untouched. Under the old
+        index scheme, deleting the second model after a prior delete removed
+        whichever model happened to now sit at that position, not the one the
+        admin actually clicked delete on."""
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        models = [
+            _model("alpha", "id-alpha"),
+            _model("bravo", "id-bravo"),
+            _model("charlie", "id-charlie"),
+        ]
+        cfg = SimpleNamespace(
+            available_models=models,
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+
+            # Another admin (or tab) deletes "alpha" first — bravo/charlie
+            # shift from positions 1/2 down to 0/1.
+            resp1 = await client.delete(
+                "/api/admin/config/models/id-alpha", cookies=cookies, headers=headers
+            )
+            assert resp1.status_code == 200
+
+            # Now delete "bravo" BY ID. Under the old index scheme, a client
+            # still holding index 1 (bravo's original position) would now hit
+            # charlie instead.
+            resp2 = await client.delete(
+                "/api/admin/config/models/id-bravo", cookies=cookies, headers=headers
+            )
+            assert resp2.status_code == 200
+
+        remaining_names = {m["name"] for m in cfg.available_models}
+        assert remaining_names == {"charlie"}
+        assert resp2.json()["removed"]["name"] == "bravo"
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_returns_404(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        cfg = SimpleNamespace(
+            available_models=[_model("alpha", "id-alpha")],
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.delete(
+                "/api/admin/config/models/no-such-id", cookies=cookies, headers=headers
+            )
+
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_non_superadmin_rejected_before_lookup(self, client):
+        """403 for a non-superadmin, proving `_require_superadmin` runs before
+        the by-id lookup (and thus before any 404 could leak list contents)."""
+        staffer = _make_user("staffer", is_admin=False)
+        cookies, headers = _auth("staffer")
+        cfg = SimpleNamespace(
+            available_models=[_model("alpha", "id-alpha")],
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "staffer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+        ):
+            MockUser.find_one = AsyncMock(return_value=staffer)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.delete(
+                # Even a garbage id must still 403, not 404 — the auth check
+                # must short-circuit before the list is ever searched.
+                "/api/admin/config/models/whatever",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 403
+        cfg.save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lazy_backfill_assigns_ids_and_is_idempotent(self, client):
+        """A config whose entries predate stable ids gains one on first touch,
+        and calling the backfill again does not change already-assigned ids."""
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        legacy_models = [_model("alpha", None), _model("bravo", None)]
+        # Simulate an already-untyped dict lacking the key entirely, not just None.
+        del legacy_models[0]["id"]
+        del legacy_models[1]["id"]
+        cfg = _get_config_cfg(legacy_models)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin.decrypt_value", return_value=""),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.get("/api/admin/config", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 200
+        ids_first = [m["id"] for m in resp.json()["available_models"]]
+        assert all(ids_first)
+        assert len(set(ids_first)) == 2  # unique
+        cfg.save.assert_called_once()  # persisted the backfill
+
+        # Calling again must not regenerate the now-assigned ids.
+        cfg.save.reset_mock()
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin.decrypt_value", return_value=""),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp2 = await client.get("/api/admin/config", cookies=cookies, headers=headers)
+
+        ids_second = [m["id"] for m in resp2.json()["available_models"]]
+        assert ids_second == ids_first
+        cfg.save.assert_not_called()  # nothing changed, so no persist needed
+
+    @pytest.mark.asyncio
+    async def test_update_by_id_preserves_key_on_sentinel(self, client):
+        """The '***' API-key sentinel must still preserve the stored
+        (encrypted) key when updating by id — plan 003 depends on this."""
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        models = [_model("alpha", "id-alpha", api_key="enc-stored-secret")]
+        cfg = SimpleNamespace(
+            available_models=models,
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.put(
+                "/api/admin/config/models/id-alpha",
+                json={"name": "alpha", "tag": "alpha", "api_key": "***"},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert cfg.available_models[0]["api_key"] == "enc-stored-secret"
+        assert cfg.available_models[0]["id"] == "id-alpha"
+
+    @pytest.mark.asyncio
+    async def test_delete_default_model_clears_default(self, client):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        models = [_model("alpha", "id-alpha"), _model("bravo", "id-bravo")]
+        cfg = SimpleNamespace(
+            available_models=models,
+            oauth_providers=[],
+            default_model="alpha",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.delete(
+                "/api/admin/config/models/id-alpha", cookies=cookies, headers=headers
+            )
+
+        assert resp.status_code == 200
+        assert cfg.default_model == ""
+        assert resp.json()["default_model"] == ""
