@@ -62,6 +62,9 @@ class KBSourceResponse(BaseModel):
     status: str
     error_message: Optional[str] = None
     chunk_count: int = 0
+    # URL source whose extracted text was cut off at the fetcher size cap:
+    # "ready" but incomplete, so the UI warns instead of showing a clean check.
+    truncated: bool = False
     created_at: Optional[str] = None
 
 

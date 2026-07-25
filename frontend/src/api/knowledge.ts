@@ -123,6 +123,7 @@ export interface KBSourceResponse {
   status: 'pending' | 'processing' | 'ready' | 'error'
   error_message?: string | null
   chunk_count: number
+  truncated?: boolean
   created_at?: string | null
 }
 

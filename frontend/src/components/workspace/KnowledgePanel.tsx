@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, Sparkles, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, Sparkles, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight } from 'lucide-react'
 import { useKnowledgeBases, useScopedKnowledgeBases } from '../../hooks/useKnowledgeBases'
 import { useProjectPins } from '../../hooks/useProjectPins'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
@@ -1125,7 +1125,14 @@ export function KnowledgePanel() {
                 paddingRight: 4,
               }}>
                 {selectedKB.sources.map((source: KnowledgeBaseSource) => {
-                  const st = SOURCE_STATUS[source.status] || SOURCE_STATUS.pending
+                  // A ready-but-truncated source is incomplete: the fetched page
+                  // was cut off at the size cap, so it retrieves wrong answers
+                  // for anything past the cut. Show an amber warning, not a
+                  // clean green check.
+                  const isTruncated = source.status === 'ready' && !!source.truncated
+                  const st = isTruncated
+                    ? { icon: AlertTriangle, color: '#d97706' }
+                    : (SOURCE_STATUS[source.status] || SOURCE_STATUS.pending)
                   const StatusIcon = st.icon
                   const autoLabel = source.source_type === 'url'
                     ? (source.url_title || source.url || source.uuid)
@@ -1240,6 +1247,11 @@ export function KnowledgePanel() {
                         {!isRenaming && source.status === 'ready' && (
                           <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>{source.chunk_count} chunks</div>
                         )}
+                        {!isRenaming && isTruncated && (
+                          <div style={{ fontSize: 11, color: '#b45309', marginTop: 2 }}>
+                            Page too long — text was cut off; later sections aren’t in this source.
+                          </div>
+                        )}
                       </div>
                       {isRenaming ? (
                         <>
@@ -1268,11 +1280,14 @@ export function KnowledgePanel() {
                         <>
                           <StatusIcon
                             size={14}
+                            aria-label={isTruncated ? 'Source text was truncated' : undefined}
                             style={{
                               color: st.color, flexShrink: 0,
                               ...(source.status === 'processing' || source.status === 'pending' ? { animation: 'spin 1s linear infinite' } : {}),
                             }}
-                          />
+                          >
+                            {isTruncated && <title>Page too long — text was cut off; later sections aren’t in this source.</title>}
+                          </StatusIcon>
                           <button
                             type="button"
                             aria-label="Rename source"

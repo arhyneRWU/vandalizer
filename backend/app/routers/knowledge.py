@@ -217,6 +217,7 @@ def _source_response(s, *, document_title: str | None = None) -> KBSourceRespons
         status=s.status,
         error_message=s.error_message or "",
         chunk_count=s.chunk_count,
+        truncated=bool(getattr(s, "truncated", False)),
         created_at=s.created_at.isoformat() if s.created_at else None,
     )
 

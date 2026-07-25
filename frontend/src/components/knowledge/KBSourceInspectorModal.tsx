@@ -378,6 +378,22 @@ function SourceContentInspector({
         </div>
       )}
 
+      {/* Truncation warning — the page was longer than the fetcher's size cap,
+          so the text below stops partway through and later sections were never
+          chunked into the KB. */}
+      {detail.truncated && (
+        <div style={{
+          marginBottom: 10, padding: '8px 10px',
+          fontSize: 12, lineHeight: 1.5, color: '#fbbf24',
+          backgroundColor: 'rgba(217, 119, 6, 0.12)',
+          border: '1px solid rgba(217, 119, 6, 0.4)', borderRadius: 6,
+        }}>
+          This page was too long to ingest in full — the extracted text below was cut
+          off at the size limit, and anything after the cut is not in this knowledge base.
+          Answers about later sections of the page may be wrong or incomplete.
+        </div>
+      )}
+
       {/* Cached content */}
       <div style={{ fontSize: 12, fontWeight: 600, color: '#ccc', marginBottom: 6 }}>
         Extracted text
