@@ -340,7 +340,7 @@ export interface SystemConfigData {
   quality_config: Record<string, unknown>
   auth_methods: string[]
   oauth_providers: Record<string, unknown>[]
-  available_models: { name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null }[]
+  available_models: { id: string; name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null }[]
   default_model: string
   ocr_endpoint: string
   ocr_api_key: string
@@ -443,8 +443,8 @@ export function addModel(data: ModelFormData) {
   })
 }
 
-export function updateModel(index: number, data: ModelFormData) {
-  return apiFetch<{ status: string; models: SystemConfigData['available_models'] }>(`/api/admin/config/models/${index}`, {
+export function updateModel(modelId: string, data: ModelFormData) {
+  return apiFetch<{ status: string; models: SystemConfigData['available_models'] }>(`/api/admin/config/models/${encodeURIComponent(modelId)}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   })
@@ -470,8 +470,8 @@ export function probeModel(data: {
   })
 }
 
-export function deleteModel(index: number) {
-  return apiFetch<{ status: string; default_model?: string }>(`/api/admin/config/models/${index}`, { method: 'DELETE' })
+export function deleteModel(modelId: string) {
+  return apiFetch<{ status: string; default_model?: string }>(`/api/admin/config/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' })
 }
 
 export function setDefaultModel(name: string) {
@@ -566,12 +566,12 @@ export function addOAuthProvider(data: Record<string, string>) {
   return apiFetch<{ status: string }>('/api/admin/config/auth/providers', { method: 'POST', body: JSON.stringify(data) })
 }
 
-export function updateOAuthProvider(index: number, data: Record<string, string>) {
-  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${index}`, { method: 'PUT', body: JSON.stringify(data) })
+export function updateOAuthProvider(providerId: string, data: Record<string, string>) {
+  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${encodeURIComponent(providerId)}`, { method: 'PUT', body: JSON.stringify(data) })
 }
 
-export function deleteOAuthProvider(index: number) {
-  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${index}`, { method: 'DELETE' })
+export function deleteOAuthProvider(providerId: string) {
+  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${encodeURIComponent(providerId)}`, { method: 'DELETE' })
 }
 
 export function updateAuthMethods(methods: string[]) {

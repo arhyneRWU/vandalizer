@@ -772,7 +772,13 @@ export function ConfigTab() {
       let res
       let savedIndex: number
       if (editingModelIndex !== null) {
-        res = await updateModel(editingModelIndex, newModel)
+        const modelId = cfg?.available_models[editingModelIndex]?.id
+        if (!modelId) {
+          setError('Could not find the model to update — refresh and try again.')
+          setSavingModel(false)
+          return
+        }
+        res = await updateModel(modelId, newModel)
         savedIndex = editingModelIndex
       } else {
         res = await addModel(newModel)
@@ -854,8 +860,12 @@ export function ConfigTab() {
       destructive: true,
     })
     if (!ok) return
+    if (!model?.id) {
+      setError('Could not find the model to delete — refresh and try again.')
+      return
+    }
     try {
-      const res = await deleteModel(index)
+      const res = await deleteModel(model.id)
       if (cfg) {
         const models = [...cfg.available_models]
         models.splice(index, 1)
@@ -991,8 +1001,13 @@ export function ConfigTab() {
       destructive: true,
     })
     if (!ok) return
+    const providerId = provider?.id as string | undefined
+    if (!providerId) {
+      setError('Could not find the provider to delete — refresh and try again.')
+      return
+    }
     try {
-      await deleteOAuthProvider(index)
+      await deleteOAuthProvider(providerId)
       const c = await getSystemConfig()
       setCfg(c)
     } catch (e) {
@@ -1023,9 +1038,14 @@ export function ConfigTab() {
     if (editingProviderIndex === null) return
     const validationError = providerValidationError(editingProvider)
     if (validationError) { setProviderError(validationError); return }
+    const providerId = (cfg?.oauth_providers?.[editingProviderIndex] as Record<string, unknown> | undefined)?.id as string | undefined
+    if (!providerId) {
+      setProviderError('Could not find the provider to update — refresh and try again.')
+      return
+    }
     setProviderError('')
     try {
-      await updateOAuthProvider(editingProviderIndex, editingProvider as unknown as Record<string, string>)
+      await updateOAuthProvider(providerId, editingProvider as unknown as Record<string, string>)
       const c = await getSystemConfig()
       setCfg(c)
       setEditingProviderIndex(null)
