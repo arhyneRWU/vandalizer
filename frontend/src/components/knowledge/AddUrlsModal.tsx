@@ -149,7 +149,7 @@ export function AddUrlsModal({ onSubmit, onClose }: AddUrlsModalProps) {
             disabled={!text.trim()}
             style={{
               padding: '8px 16px', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
-              color: '#000', backgroundColor: 'var(--highlight-color, #eab308)',
+              color: 'var(--highlight-text-color, #000)', backgroundColor: 'var(--highlight-color, #eab308)',
               border: 'none', borderRadius: 6,
               cursor: text.trim() ? 'pointer' : 'default',
               opacity: text.trim() ? 1 : 0.5,

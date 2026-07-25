@@ -444,7 +444,7 @@ export function TeamsTab() {
   const subTabStyle = (key: string) => ({
     padding: '6px 14px', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none',
     background: subTab === key ? 'var(--highlight-color, #eab308)' : 'transparent',
-    color: subTab === key ? '#000' : '#6b7280',
+    color: subTab === key ? 'var(--highlight-text-color, #000)' : '#6b7280',
     fontFamily: 'inherit',
   } as React.CSSProperties)
 
@@ -496,7 +496,7 @@ export function TeamsTab() {
                 onClick={handleCreateTeam}
                 disabled={!newTeamName.trim() || creating}
                 style={{
-                  padding: '8px 18px', background: 'var(--highlight-color, #eab308)', color: '#000',
+                  padding: '8px 18px', background: 'var(--highlight-color, #eab308)', color: 'var(--highlight-text-color, #000)',
                   border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
                   opacity: !newTeamName.trim() || creating ? 0.5 : 1, fontFamily: 'inherit',
                 }}
@@ -739,7 +739,7 @@ export function TeamsTab() {
                 onClick={() => handleAssignIsolated(u.user_id)}
                 disabled={!assignTargets[u.user_id] || assignLoading[u.user_id]}
                 style={{
-                  padding: '6px 14px', background: 'var(--highlight-color, #eab308)', color: '#000',
+                  padding: '6px 14px', background: 'var(--highlight-color, #eab308)', color: 'var(--highlight-text-color, #000)',
                   border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
                   opacity: !assignTargets[u.user_id] || assignLoading[u.user_id] ? 0.5 : 1,
                 }}
