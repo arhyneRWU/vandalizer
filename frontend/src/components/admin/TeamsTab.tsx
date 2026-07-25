@@ -32,12 +32,17 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    getTeamDetail(teamId, days).then(setData).catch(e => setError(e?.message || 'Failed to load')).finally(() => setLoading(false))
+    getTeamDetail(teamId, days)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [teamId, days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const prev = data?.previous_period
   const maxMemberTokens = data?.members.length ? Math.max(...data.members.map(m => m.tokens_total), 1) : 1
@@ -261,43 +266,65 @@ export function TeamsTab() {
   const [addUserErrors, setAddUserErrors] = useState<Record<string, string>>({})
 
   const refreshAllTeams = useCallback(() => {
+    let cancelled = false
     setLoadingAll(true)
     setAllTeamsError(null)
     adminListAllTeams().then(t => {
+      if (cancelled) return
       setAllTeams(t)
       const def = t.find(x => x.is_default)
       if (def) setDefaultTeamUuid(def.uuid)
-    }).catch(e => setAllTeamsError(e?.message || 'Failed to load teams')).finally(() => setLoadingAll(false))
+    }).catch(e => { if (!cancelled) setAllTeamsError(e?.message || 'Failed to load teams') })
+      .finally(() => { if (!cancelled) setLoadingAll(false) })
+    return () => { cancelled = true }
   }, [])
 
   const refreshIsolated = useCallback(() => {
+    let cancelled = false
     setLoadingIsolated(true)
     setIsolatedError(null)
     getIsolatedUsers().then(users => {
+      if (cancelled) return
       setIsolated(users)
       setIsolatedLoaded(true)
-    }).catch(e => { setIsolatedError(e?.message || 'Failed to load isolated users'); setIsolatedLoaded(true) })
-      .finally(() => setLoadingIsolated(false))
+    }).catch(e => {
+      if (cancelled) return
+      setIsolatedError(e?.message || 'Failed to load isolated users')
+      setIsolatedLoaded(true)
+    }).finally(() => { if (!cancelled) setLoadingIsolated(false) })
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
-    refreshAllTeams()
-    refreshIsolated()  // Load eagerly so badge shows immediately
+    const cancelAllTeams = refreshAllTeams()
+    const cancelIsolated = refreshIsolated()  // Load eagerly so badge shows immediately
+    let cfgCancelled = false
     getSystemConfig().then(cfg => {
+      if (cfgCancelled) return
       if (cfg.default_team_id) setDefaultTeamUuid(cfg.default_team_id)
     }).catch(() => {})
+    return () => {
+      cancelAllTeams()
+      cancelIsolated()
+      cfgCancelled = true
+    }
   }, [refreshAllTeams, refreshIsolated])
 
   const refreshStats = useCallback(() => {
+    let cancelled = false
     setLoadingStats(true)
     setStatsError(null)
     const arg = typeof statsDays === 'number' ? statsDays : undefined
-    getTeamLeaderboard(arg).then(setStatsTeams).catch(e => setStatsError(e?.message || 'Failed to load team stats')).finally(() => setLoadingStats(false))
+    getTeamLeaderboard(arg)
+      .then(res => { if (!cancelled) setStatsTeams(res) })
+      .catch(e => { if (!cancelled) setStatsError(e?.message || 'Failed to load team stats') })
+      .finally(() => { if (!cancelled) setLoadingStats(false) })
+    return () => { cancelled = true }
   }, [statsDays])
 
   useEffect(() => {
     if (subTab === 'stats') {
-      refreshStats()
+      return refreshStats()
     }
   }, [subTab, refreshStats])
 

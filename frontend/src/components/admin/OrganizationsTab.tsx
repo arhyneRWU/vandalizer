@@ -128,13 +128,19 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
   // Debounced user search
   useEffect(() => {
     if (!searchQ.trim()) { setSearchResults([]); return }
+    let cancelled = false
     const timer = setTimeout(async () => {
       setSearching(true)
-      try { const data = await orgApi.searchUsers(searchQ.trim()); setSearchResults(data.users) }
-      catch { setSearchResults([]) }
-      finally { setSearching(false) }
+      try {
+        const data = await orgApi.searchUsers(searchQ.trim())
+        if (!cancelled) setSearchResults(data.users)
+      } catch {
+        if (!cancelled) setSearchResults([])
+      } finally {
+        if (!cancelled) setSearching(false)
+      }
     }, 300)
-    return () => clearTimeout(timer)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [searchQ])
 
   const assignUser = async (userId: string) => {

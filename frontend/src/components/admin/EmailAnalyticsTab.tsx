@@ -20,15 +20,17 @@ export function EmailAnalyticsTab() {
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
     getEmailAnalytics(days)
-      .then(d => setData(d))
-      .catch(e => setError(e?.message || 'Failed to load email analytics'))
-      .finally(() => setLoading(false))
+      .then(d => { if (!cancelled) setData(d) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load email analytics') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   if (loading && !data) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading email analytics...</div>

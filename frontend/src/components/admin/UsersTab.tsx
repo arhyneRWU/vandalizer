@@ -34,12 +34,17 @@ function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void 
   const [savingRoles, setSavingRoles] = useState(false)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    getUserDetail(userId, days).then(setData).catch(e => setError(e?.message || 'Failed to load')).finally(() => setLoading(false))
+    getUserDetail(userId, days)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [userId, days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const prev = data?.previous_period
 
@@ -404,13 +409,18 @@ export function UsersTab() {
   const [days, setDays] = useState<DayOption>('all')
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
     const arg = typeof days === 'number' ? days : undefined
-    getUserLeaderboard(arg).then(setUsers).catch(e => setError(e?.message || 'Failed to load users')).finally(() => setLoading(false))
+    getUserLeaderboard(arg)
+      .then(res => { if (!cancelled) setUsers(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load users') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const handleSort = (key: string) => {
     setSort(prev => ({

@@ -40,6 +40,7 @@ export function QualityTab() {
   const [itemSort, setItemSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'score', dir: 'asc' })
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
     Promise.all([
@@ -48,15 +49,17 @@ export function QualityTab() {
       getQualityAlerts(50, false),
       getQualityItems('score', 'asc', 100),
     ]).then(([s, t, a, qi]) => {
+      if (cancelled) return
       setSummary(s)
       setTimeline(t.timeline)
       setAlerts(a.alerts)
       setQualityItems(qi.items)
-    }).catch(e => setError(e?.message || 'Failed to load quality data'))
-      .finally(() => setLoading(false))
+    }).catch(e => { if (!cancelled) setError(e?.message || 'Failed to load quality data') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   // Config is fetched separately and tolerantly: it's superadmin-only
   // (`GET /api/admin/config` calls `_require_superadmin`), so staff users
@@ -64,7 +67,9 @@ export function QualityTab() {
   // panel below, which degrades to an empty/default-only list when cfg is
   // null — it must not block the tab's real payload (the four calls above).
   useEffect(() => {
-    getSystemConfig().then(setCfg).catch(() => {})
+    let cancelled = false
+    getSystemConfig().then(cfg => { if (!cancelled) setCfg(cfg) }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   const handleRunRegression = async () => {
