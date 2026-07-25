@@ -499,9 +499,10 @@ export function TeamsTab() {
                   padding: '8px 18px', background: 'var(--highlight-color, #eab308)', color: 'var(--highlight-text-color, #000)',
                   border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
                   opacity: !newTeamName.trim() || creating ? 0.5 : 1, fontFamily: 'inherit',
+                  flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
                 }}
               >
-                <Plus size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                <Plus size={14} />
                 Create
               </button>
             </div>
@@ -742,6 +743,7 @@ export function TeamsTab() {
                   padding: '6px 14px', background: 'var(--highlight-color, #eab308)', color: 'var(--highlight-text-color, #000)',
                   border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
                   opacity: !assignTargets[u.user_id] || assignLoading[u.user_id] ? 0.5 : 1,
+                  flexShrink: 0, whiteSpace: 'nowrap',
                 }}
               >
                 Add to Team
