@@ -45,7 +45,7 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
   useEffect(() => load(), [load])
 
   const prev = data?.previous_period
-  const maxMemberTokens = data?.members.length ? Math.max(...data.members.map(m => m.tokens_total), 1) : 1
+  const maxMemberTokens = (data?.members ?? []).reduce((max, m) => Math.max(max, m.tokens_total), 1)
 
   if (loading && !data) return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading team details...</div>
   if (error) return (
@@ -447,7 +447,7 @@ export function TeamsTab() {
       return sort.dir === 'asc' ? cmp : -cmp
     })
   }, [statsTeams, search, sort])
-  const maxTokens = statsTeams.length > 0 ? Math.max(...statsTeams.map(t => t.tokens_total), 1) : 1
+  const maxTokens = statsTeams.reduce((max, t) => Math.max(max, t.tokens_total), 1)
 
   if (selectedTeamId) {
     return <TeamDrillDown teamId={selectedTeamId} onBack={() => setSelectedTeamId(null)} />

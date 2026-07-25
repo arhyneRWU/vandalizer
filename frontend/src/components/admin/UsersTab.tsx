@@ -451,7 +451,7 @@ export function UsersTab() {
     return sorted
   }, [users, search, sort])
 
-  const maxTokens = users.length > 0 ? Math.max(...users.map(u => u.tokens_total), 1) : 1
+  const maxTokens = users.reduce((max, u) => Math.max(max, u.tokens_total), 1)
 
   const handleExport = () => {
     downloadCSV('users.csv',
