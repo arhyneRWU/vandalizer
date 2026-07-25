@@ -401,8 +401,11 @@ export function ConfigTab() {
   const [ocrTesting, setOcrTesting] = useState(false)
   const [ocrTestResult, setOcrTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [modelTesting, setModelTesting] = useState<number | null>(null)
-  const [modelTestResults, setModelTestResults] = useState<Record<number, ModelTestResult>>({})
-  const [expandedModelTest, setExpandedModelTest] = useState<number | null>(null)
+  // Keyed by model id (not list index/position) so a delete can never
+  // misattribute another model's "Connected"/"Failed" badge to this one —
+  // removing an entry removes exactly its own key, with nothing to reindex.
+  const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult>>({})
+  const [expandedModelTest, setExpandedModelTest] = useState<string | null>(null)
 
   // System readiness / setup checklist
   const [readiness, setReadiness] = useState<ReadinessReport | null>(null)
@@ -876,7 +879,7 @@ export function ConfigTab() {
         })
       }
       // Dropping a model can clear the only configured LLM — re-grade setup.
-      setModelTestResults(prev => { const next = { ...prev }; delete next[index]; return next })
+      setModelTestResults(prev => { const next = { ...prev }; delete next[model.id]; return next })
       void refreshReadiness()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to delete model')
@@ -911,13 +914,19 @@ export function ConfigTab() {
   }
 
   const handleTestModel = async (index: number) => {
+    // The test-model backend route is still index-addressed (unchanged by
+    // this fix — see plan 011's scope notes), but the badge result is stored
+    // keyed by the model's stable id so it can never be misattributed to a
+    // different model after a delete shifts positions.
+    const modelId = cfg?.available_models[index]?.id
+    if (!modelId) return
     setModelTesting(index)
-    setModelTestResults(prev => { const next = { ...prev }; delete next[index]; return next })
+    setModelTestResults(prev => { const next = { ...prev }; delete next[modelId]; return next })
     try {
       const res = await testModel(index)
-      setModelTestResults(prev => ({ ...prev, [index]: res }))
+      setModelTestResults(prev => ({ ...prev, [modelId]: res }))
       // Auto-expand so the admin sees the breakdown — especially on failure.
-      setExpandedModelTest(index)
+      setExpandedModelTest(modelId)
       // A successful test means readiness may have changed.
       if (res.ok) void refreshReadiness()
     } catch (e) {
@@ -925,14 +934,14 @@ export function ConfigTab() {
       const message = e instanceof Error ? e.message : 'Test failed'
       setModelTestResults(prev => ({
         ...prev,
-        [index]: {
+        [modelId]: {
           ok: false,
           checks: [{ label: 'Request', ok: false, detail: message }],
           summary: message,
           error: { category: 'transport', title: 'Could not run the test', why: message, fix: 'Check that you are still signed in as an admin and the backend is reachable.', raw: message },
         },
       }))
-      setExpandedModelTest(index)
+      setExpandedModelTest(modelId)
     } finally {
       setModelTesting(null)
     }
@@ -1184,8 +1193,8 @@ export function ConfigTab() {
           {cfg?.available_models && cfg.available_models.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {cfg.available_models.map((m, i) => {
-                const test = modelTestResults[i]
-                const expanded = expandedModelTest === i
+                const test = modelTestResults[m.id]
+                const expanded = expandedModelTest === m.id
                 return (
                 <div key={i} style={{ display: 'flex', flexDirection: 'column' }}>
                 <div style={{
@@ -1234,7 +1243,7 @@ export function ConfigTab() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     {test && (
                       <button
-                        onClick={() => setExpandedModelTest(expanded ? null : i)}
+                        onClick={() => setExpandedModelTest(expanded ? null : m.id)}
                         style={{
                           display: 'inline-flex', alignItems: 'center', gap: 4, marginRight: 4,
                           padding: '3px 8px', borderRadius: 9999, cursor: 'pointer', border: '1px solid',
