@@ -8,5 +8,29 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test-setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
+    coverage: {
+      // Denominator is the whole src/ tree, not just what a given test
+      // happens to import. This makes the number honest (no more counting
+      // only files pulled in transitively by tests) and, crucially,
+      // monotonic: adding a test can only ever raise it, never lower it by
+      // widening the denominator. See plan 009 for the incident this fixed.
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        '**/*.test.{ts,tsx}',
+        'src/main.tsx',
+        '**/*.d.ts',
+      ],
+      // Thresholds are single-sourced here (not duplicated in Makefile or
+      // package.json). Set just below the honest whole-src measurement at
+      // the time they were last raised — ratchet upward as more
+      // components/hooks/api modules get tests. Do not lower these to make
+      // a change pass; add tests instead.
+      thresholds: {
+        statements: 8,
+        branches: 6,
+        functions: 6,
+        lines: 8,
+      },
+    },
   },
 })
