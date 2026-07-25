@@ -38,6 +38,7 @@ export function ThemePanel({ initialColor, initialRadius }: ThemePanelProps) {
   const [themeIconHideInNav, setThemeIconHideInNav] = useState(false)
   const [themeSaving, setThemeSaving] = useState(false)
   const [themeSaved, setThemeSaved] = useState(false)
+  const [themeError, setThemeError] = useState<string | null>(null)
 
   useEffect(() => {
     getThemeConfig().then(t => {
@@ -53,6 +54,7 @@ export function ThemePanel({ initialColor, initialRadius }: ThemePanelProps) {
   const handleSaveTheme = async () => {
     setThemeSaving(true)
     setThemeSaved(false)
+    setThemeError(null)
     try {
       const updated = await updateThemeConfig({
         highlight_color: themeColor,
@@ -66,6 +68,8 @@ export function ThemePanel({ initialColor, initialRadius }: ThemePanelProps) {
       await branding.refresh()
       setThemeSaved(true)
       setTimeout(() => setThemeSaved(false), 3000)
+    } catch (e) {
+      setThemeError(e instanceof Error ? e.message : 'Failed to save theme')
     } finally {
       setThemeSaving(false)
     }
@@ -292,6 +296,11 @@ export function ThemePanel({ initialColor, initialRadius }: ThemePanelProps) {
           </button>
           {themeSaved && <span role="status" aria-live="polite" style={{ fontSize: 13, color: '#16a34a' }}>Theme saved!</span>}
         </div>
+        {themeError && (
+          <div role="alert" style={{ marginTop: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 'var(--ui-radius, 12px)', color: '#991b1b', fontSize: 13 }}>
+            {themeError}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -110,4 +110,17 @@ describe('ThemePanel — save', () => {
       expect.objectContaining({ ui_radius: '20px' }),
     ))
   })
+
+  it('surfaces a failed save instead of leaving the admin with no feedback', async () => {
+    mockUpdateThemeConfig.mockRejectedValue(new Error('network unreachable'))
+    render(<ThemePanel initialColor="#eab308" initialRadius={12} />)
+    await waitFor(() => expect(mockGetThemeConfig).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Theme' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('network unreachable')
+    // No false success, and no DOM/branding side effects from a failed save.
+    expect(screen.queryByText('Theme saved!')).not.toBeInTheDocument()
+    expect(mockBrandingRefresh).not.toHaveBeenCalled()
+  })
 })
