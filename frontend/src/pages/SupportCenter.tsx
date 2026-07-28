@@ -1796,7 +1796,7 @@ function WatcherBar({
 // Tag editor — agent-only chips with add/remove
 // ---------------------------------------------------------------------------
 
-function TagEditor({
+export function TagEditor({
   tags, onChange,
 }: {
   tags: string[]
@@ -1804,20 +1804,54 @@ function TagEditor({
 }) {
   const [draft, setDraft] = useState('')
   const [adding, setAdding] = useState(false)
+  // null = not fetched yet; fetched lazily the first time the editor opens
+  const [knownTags, setKnownTags] = useState<string[] | null>(null)
+  const [highlight, setHighlight] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const commit = () => {
-    const t = draft.trim()
-    if (!t) { setDraft(''); setAdding(false); return }
-    if (tags.includes(t)) { setDraft(''); setAdding(false); return }
-    onChange([...tags, t])
+  const startAdding = () => {
+    setAdding(true)
+    setHighlight(0)
+    if (knownTags === null) {
+      supportApi.listAllTags()
+        .then((r) => setKnownTags(r.tags))
+        .catch(() => setKnownTags([]))
+    }
+  }
+
+  const close = () => {
     setDraft('')
     setAdding(false)
+  }
+
+  const apply = (t: string) => {
+    const clean = t.trim()
+    if (clean && !tags.includes(clean)) {
+      onChange([...tags, clean])
+      // New tags become suggestions immediately, without a refetch.
+      setKnownTags((prev) => (prev && !prev.includes(clean) ? [...prev, clean] : prev))
+    }
+    close()
   }
 
   const remove = (t: string) => {
     onChange(tags.filter((x) => x !== t))
   }
+
+  const query = draft.trim().toLowerCase()
+  const suggestions = (knownTags ?? [])
+    .filter((t) => !tags.includes(t))
+    .filter((t) => !query || t.toLowerCase().includes(query))
+  // Offer "create" only when the typed text isn't already an existing tag
+  // (on this ticket or any other) — that's the whole point of the dropdown.
+  const isKnown = (knownTags ?? []).some((t) => t.toLowerCase() === query)
+    || tags.some((t) => t.toLowerCase() === query)
+  const canCreate = query.length > 0 && !isKnown
+  const options: { label: string; value: string; isCreate: boolean }[] = [
+    ...suggestions.map((t) => ({ label: t, value: t, isCreate: false })),
+    ...(canCreate ? [{ label: draft.trim(), value: draft.trim(), isCreate: true }] : []),
+  ]
+  const activeIndex = Math.min(highlight, Math.max(0, options.length - 1))
 
   return (
     <div style={{
@@ -1855,26 +1889,93 @@ function TagEditor({
         </span>
       ))}
       {adding ? (
-        <input
-          ref={inputRef}
-          value={draft}
-          autoFocus
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') { e.preventDefault(); commit() }
-            if (e.key === 'Escape') { setDraft(''); setAdding(false) }
-          }}
-          placeholder="tag…"
-          aria-label="Add tag"
-          style={{
-            fontSize: 12, padding: '2px 8px', border: '1px solid #d1d5db',
-            borderRadius: 9999, outline: 'none', minWidth: 80, fontFamily: 'inherit',
-          }}
-        />
+        <span style={{ position: 'relative', display: 'inline-flex' }}>
+          <input
+            ref={inputRef}
+            value={draft}
+            autoFocus
+            onChange={(e) => { setDraft(e.target.value); setHighlight(0) }}
+            onBlur={close}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setHighlight((h) => Math.min(h + 1, options.length - 1))
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setHighlight((h) => Math.max(h - 1, 0))
+              }
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                if (options[activeIndex]) apply(options[activeIndex].value)
+              }
+              if (e.key === 'Escape') { e.preventDefault(); close() }
+            }}
+            placeholder="Search or create…"
+            aria-label="Add tag"
+            role="combobox"
+            aria-expanded={true}
+            aria-controls="tag-editor-listbox"
+            style={{
+              fontSize: 12, padding: '2px 8px', border: '1px solid #d1d5db',
+              borderRadius: 9999, outline: 'none', minWidth: 120, fontFamily: 'inherit',
+            }}
+          />
+          <div
+            id="tag-editor-listbox"
+            role="listbox"
+            aria-label="Existing tags"
+            style={{
+              position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 30,
+              minWidth: 200, maxHeight: 220, overflowY: 'auto', padding: 4,
+              background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+            }}
+          >
+            {knownTags === null && (
+              <div style={{ fontSize: 12, color: '#9ca3af', padding: '6px 8px' }}>
+                Loading tags…
+              </div>
+            )}
+            {knownTags !== null && options.length === 0 && (
+              <div style={{ fontSize: 12, color: '#9ca3af', padding: '6px 8px' }}>
+                {query ? 'Already tagged' : 'No existing tags — type to create one'}
+              </div>
+            )}
+            {options.map((opt, i) => (
+              <button
+                key={opt.isCreate ? '__create__' : opt.value}
+                role="option"
+                aria-selected={i === activeIndex}
+                // preventDefault keeps the input focused so onBlur doesn't
+                // close the dropdown before the click lands.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => apply(opt.value)}
+                onMouseEnter={() => setHighlight(i)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                  textAlign: 'left', fontSize: 12, padding: '6px 8px',
+                  border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                  background: i === activeIndex ? '#eef2ff' : 'transparent',
+                  color: opt.isCreate ? '#4338ca' : '#111827',
+                  borderTop: opt.isCreate && suggestions.length > 0 ? '1px solid #e5e7eb' : 'none',
+                  fontWeight: opt.isCreate ? 600 : 400,
+                }}
+              >
+                {opt.isCreate ? (
+                  <>
+                    <Plus size={11} /> Create new tag: “{opt.label}”
+                  </>
+                ) : (
+                  opt.label
+                )}
+              </button>
+            ))}
+          </div>
+        </span>
       ) : (
         <button
-          onClick={() => setAdding(true)}
+          onClick={startAdding}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 3,
             fontSize: 12, padding: '2px 8px', borderRadius: 9999,
