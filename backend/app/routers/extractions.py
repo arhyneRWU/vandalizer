@@ -973,19 +973,33 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 model=req.model,
                 extraction_config_override=req.extraction_config_override,
                 combined_context=req.combined_context,
+                capture_sources=True,
             )
         await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
+        # Split the per-field source sidecar out of each entity so `results`
+        # keeps its historical flat {field: value} shape. `sources` stays
+        # index-aligned with `results`.
+        from app.services.extraction_sources import SOURCE_KEY
+        sources: list[dict] = []
+        for entity in results:
+            if isinstance(entity, dict):
+                sources.append(entity.pop(SOURCE_KEY, None) or {})
+            else:
+                sources.append({})
         # Merge all result entities into a single normalized map so the
         # activity rail can restore results when the user reopens the run.
         normalized: dict = {}
-        for entity in results:
+        merged_sources: dict = {}
+        for entity, entity_sources in zip(results, sources):
             if isinstance(entity, dict):
                 normalized.update(entity)
+                merged_sources.update(entity_sources)
         await activity_service.activity_update(
             activity.id,
             documents_touched=len(document_uuids),
             result_snapshot={
                 "normalized": normalized,
+                "sources": merged_sources,
                 "document_uuids": document_uuids,
                 "search_set_uuid": req.search_set_uuid,
             },
@@ -995,7 +1009,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         from app.tasks.quality_tasks import auto_validate_extraction
         auto_validate_extraction.delay(req.search_set_uuid, user.user_id, req.model)
 
-        return {"results": results}
+        return {"results": results, "sources": sources}
     except Exception as e:
         await activity_service.activity_finish(
             activity.id, ActivityStatus.FAILED, error=str(e),

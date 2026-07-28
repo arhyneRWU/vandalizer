@@ -145,7 +145,11 @@ export function ActivityRail() {
         const initialResults = normalized && typeof normalized === 'object' && Object.keys(normalized).length > 0
           ? Object.fromEntries(Object.entries(normalized).map(([k, v]) => [k, v === null ? 'N/A' : String(v)]))
           : undefined
-        openExtraction(activity.search_set_uuid, initialResults)
+        const snapSources = activity.result_snapshot?.sources as import('../../api/extractions').ExtractionSourceMap | undefined
+        const initialSources = snapSources && typeof snapSources === 'object' && Object.keys(snapSources).length > 0
+          ? snapSources
+          : undefined
+        openExtraction(activity.search_set_uuid, initialResults, initialSources)
       }
     },
     [setActiveRightTab, setLoadConversationId, openWorkflow, openExtraction, closeWorkflow, closeExtraction, closeAutomation],
