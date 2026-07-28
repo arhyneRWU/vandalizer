@@ -289,6 +289,9 @@ export function KBExploreTab({ onAdopted }: KBExploreTabProps) {
   // Data
   const [items, setItems] = useState<VerifiedCatalogItem[]>([])
   const [total, setTotal] = useState(0)
+  // Unfiltered KB count for the "All Knowledge Bases" badge — `total` tracks
+  // the active query, so it shrinks whenever a collection/search filter is on.
+  const [allTotal, setAllTotal] = useState<number | null>(null)
   const [collections, setCollections] = useState<VerifiedCollection[]>([])
   const [featuredCollections, setFeaturedCollections] = useState<VerifiedCollection[]>([])
   const [loading, setLoading] = useState(true)
@@ -314,12 +317,12 @@ export function KBExploreTab({ onAdopted }: KBExploreTabProps) {
     return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
   }, [searchQuery])
 
-  // Load collections once
+  // Load collections once (counts scoped to knowledge bases only)
   useEffect(() => {
-    browseCollections()
+    browseCollections('knowledge_base')
       .then(d => setCollections(d.collections))
       .catch(() => {})
-    listFeaturedCollections()
+    listFeaturedCollections('knowledge_base')
       .then(d => setFeaturedCollections(d.collections))
       .catch(() => {})
   }, [])
@@ -341,6 +344,11 @@ export function KBExploreTab({ onAdopted }: KBExploreTabProps) {
       })
       setItems(data.items)
       setTotal(data.total)
+      // Sort doesn't change the result count, so any fetch without narrowing
+      // filters carries the true "all KBs" total.
+      if (!debouncedSearch && !qualityFilter && !tagFilter && !selectedCollectionId) {
+        setAllTotal(data.total)
+      }
     } catch {
       setError('Failed to load knowledge bases. Please try again.')
     } finally {
@@ -448,7 +456,7 @@ export function KBExploreTab({ onAdopted }: KBExploreTabProps) {
             }}
           >
             <span>All Knowledge Bases</span>
-            <span style={{ fontSize: 11, color: !selectedCollectionId ? '#cbd5e1' : C.textFaint }}>{total}</span>
+            <span style={{ fontSize: 11, color: !selectedCollectionId ? '#cbd5e1' : C.textFaint }}>{allTotal ?? total}</span>
           </button>
 
           {featuredCollections.length > 0 && (

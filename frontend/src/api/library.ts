@@ -338,12 +338,14 @@ export function removeFromCollection(collectionId: string, itemId: string) {
 
 // Verification - Featured Collections (available to all users)
 
-export function listFeaturedCollections() {
-  return apiFetch<{ collections: VerifiedCollection[] }>('/api/verification/collections/featured')
+export function listFeaturedCollections(kind?: string) {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  return apiFetch<{ collections: VerifiedCollection[] }>(`/api/verification/collections/featured${qs}`)
 }
 
-export function browseCollections() {
-  return apiFetch<{ collections: VerifiedCollection[] }>('/api/verification/collections/browse')
+export function browseCollections(kind?: string) {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  return apiFetch<{ collections: VerifiedCollection[] }>(`/api/verification/collections/browse${qs}`)
 }
 
 // Verification - Try verified item

@@ -740,6 +740,7 @@ async def list_verified_items(
 
 async def get_visible_verified_item_ids(
     user_org_ancestry: list[str] | None = None,
+    kind: str | None = None,
 ) -> set[str]:
     """Return the item_ids that are currently verified AND visible to this user.
 
@@ -750,8 +751,15 @@ async def get_visible_verified_item_ids(
     category is opened, so a raw ``len(item_ids)`` over-counts (e.g. badge says
     "8 items" but only 2 actually render). This applies the same verified +
     org-visibility filter so the badge matches the list.
+
+    ``kind`` restricts the result to one item kind (e.g. "knowledge_base") for
+    views that list a single kind — collections mix kinds, so a kind-agnostic
+    count over-states what such a view will render.
     """
-    items = await LibraryItem.find({"verified": True}).to_list()
+    query: dict = {"verified": True}
+    if kind is not None:
+        query["kind"] = kind
+    items = await LibraryItem.find(query).to_list()
     all_meta = await VerifiedItemMetadata.find_all().to_list()
     meta_map: dict[tuple[str, str], VerifiedItemMetadata] = {
         (m.item_kind, m.item_id): m for m in all_meta
