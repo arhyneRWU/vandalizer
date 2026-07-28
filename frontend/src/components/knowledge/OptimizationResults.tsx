@@ -139,7 +139,21 @@ export function OptimizationResults({
         }
         bottomSlot={
           (winningPerQuery?.length ?? 0) > 0 && (defaultPerQuery?.length ?? 0) > 0
-            ? <TriCounter optimized={winningPerQuery} baseline={defaultPerQuery} />
+            ? (
+              <div>
+                {/* The counter is computed on the training slice while the CI
+                    above uses the holdout slice — without this caption the two
+                    read as contradictory counts over the same queries. */}
+                {holdoutHeadline && (
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 6, lineHeight: 1.5 }}>
+                    Per-query outcomes below are from the {trainCount ?? ''} training
+                    quer{trainCount === 1 ? 'y' : 'ies'}; the significance test above uses
+                    the {holdoutCount ?? ''} held-out quer{holdoutCount === 1 ? 'y' : 'ies'}.
+                  </div>
+                )}
+                <TriCounter optimized={winningPerQuery} baseline={defaultPerQuery} />
+              </div>
+            )
             : null
         }
       />

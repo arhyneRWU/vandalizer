@@ -27,6 +27,12 @@ export interface LiftCIInput {
   confidence_level?: number  // e.g. 0.95; falls back to 95% in the readout
 }
 
+// Minimum paired-bootstrap sample size below which the CI is too wobbly to
+// trust — surfaced as "n too small" / "not enough queries" rather than a
+// green/amber call. n=5 is the usual lower bound for paired-bootstrap
+// stability on 0..1 score deltas.
+const MIN_N_FOR_SIGNIFICANCE = 5
+
 interface QualityComparisonCardProps {
   /**
    * Ordered list of baselines to render top-to-bottom (typically 2–4 entries).
@@ -108,6 +114,17 @@ export function QualityComparisonCard({
     : liftVsDefault != null && Math.abs(liftVsDefault / 100) > 2 * legacyCi
   const liftIsNoise = liftVsDefault != null && !liftSignificant
     && (liftCI != null || Math.abs(liftVsDefault) < insignificantThreshold)
+  // Below the paired-bootstrap reliability floor we can't call it either way —
+  // the banner must say "not enough data", never "equivalent to default".
+  const nTooSmall = liftCI != null && liftCI.n_queries < MIN_N_FOR_SIGNIFICANCE
+  // The paired test runs on per-query answer-quality scores, but the bars show
+  // the blended score, which also folds in components measured once per
+  // configuration (retrieval precision, source health, coverage). When the two
+  // diverge, the banner must say which one the statistics cover — otherwise
+  // "no significant change" flatly contradicts visibly different bars.
+  const judgeLiftPts = liftCI != null ? liftCI.lift * 100 : null
+  const statsCoverageGap = judgeLiftPts != null && liftVsDefault != null
+    && Math.abs(judgeLiftPts - liftVsDefault) > 2
 
   return (
     <div style={{
@@ -156,12 +173,15 @@ export function QualityComparisonCard({
           {liftCI ? (
             <>
               <strong>Paired bootstrap:</strong> we computed this CI by resampling
-              the per-query (default → optimized) scores {liftCI.n_iterations.toLocaleString()} times.
+              the per-query (default → optimized) answer-quality scores {liftCI.n_iterations.toLocaleString()} times.
               The {(liftCI.confidence_level ? liftCI.confidence_level * 100 : 95).toFixed(0)}% interval
               for the per-query lift is [{fmtSignedPts(liftCI.lower * 100)}, {fmtSignedPts(liftCI.upper * 100)}].
               A two-sided permutation p-value gives <strong>p={liftCI.p_value < 0.001 ? '<0.001' : liftCI.p_value.toFixed(3)}</strong>{' '}
               ({liftSignificant ? 'significant' : 'not significant'}).
-              {' '}n={liftCI.n_queries} queries.
+              {' '}n={liftCI.n_queries} paired queries.
+              {statsCoverageGap && (
+                ' Bar heights are the blended quality score, which also includes components measured once per configuration — only the per-query answer-quality portion can be significance-tested.'
+              )}
             </>
           ) : (
             <>
@@ -200,25 +220,30 @@ export function QualityComparisonCard({
         <div style={{
           marginTop: 14, padding: '10px 12px',
           backgroundColor: liftIsNoise
-            ? 'rgba(245, 158, 11, 0.08)'
+            ? (nTooSmall ? 'rgba(120, 120, 120, 0.10)' : 'rgba(245, 158, 11, 0.08)')
             : liftVsDefault > 0 ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
           border: '1px solid ' + (liftIsNoise
-            ? 'rgba(245, 158, 11, 0.3)'
+            ? (nTooSmall ? 'rgba(160, 160, 160, 0.30)' : 'rgba(245, 158, 11, 0.3)')
             : liftVsDefault > 0 ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)'),
           borderRadius: 6,
         }}>
           {liftIsNoise ? (
             <>
               <div style={{
-                fontSize: 14, fontWeight: 600, color: '#f59e0b',
+                fontSize: 14, fontWeight: 600, color: nTooSmall ? '#bbb' : '#f59e0b',
                 display: 'flex', alignItems: 'center', gap: 6,
               }}>
-                ⚠ No significant change
+                {nTooSmall ? 'Not enough queries for a significance call' : '⚠ No significant change'}
               </div>
               <div style={{ marginTop: 4, fontSize: 11, color: '#888', lineHeight: 1.5 }}>
-                {liftCI
-                  ? `The 95% CI on the per-query lift spans zero (${fmtSignedPts(liftCI.lower * 100)} to ${fmtSignedPts(liftCI.upper * 100)}, n=${liftCI.n_queries}, p=${liftCI.p_value < 0.001 ? '<0.001' : liftCI.p_value.toFixed(3)}). Treat the optimized run as equivalent to default.`
-                  : `The ${liftVsDefault > 0 ? '+' : ''}${liftVsDefault.toFixed(0)}pts difference is inside the judge's measurement noise (±${(legacyCi * 100).toFixed(1)}pts) — treat the optimized run as equivalent to default.`}
+                {liftCI && nTooSmall
+                  ? `Only n=${liftCI.n_queries} paired ${liftCI.n_queries === 1 ? 'query was' : 'queries were'} available for the statistical test — at least ${MIN_N_FOR_SIGNIFICANCE} are needed for a reliable call. The bars are real measurements, but we can't yet tell how much of the difference would repeat on new questions. Add more test queries and re-run for a trustworthy verdict.`
+                  : liftCI
+                    ? `The 95% CI on the per-query lift spans zero (${fmtSignedPts(liftCI.lower * 100)} to ${fmtSignedPts(liftCI.upper * 100)}, n=${liftCI.n_queries}, p=${liftCI.p_value < 0.001 ? '<0.001' : liftCI.p_value.toFixed(3)}). On answer quality, treat the optimized run as equivalent to default.`
+                    : `The ${liftVsDefault > 0 ? '+' : ''}${liftVsDefault.toFixed(0)}pts difference is inside the judge's measurement noise (±${(legacyCi * 100).toFixed(1)}pts) — treat the optimized run as equivalent to default.`}
+                {liftCI && statsCoverageGap && judgeLiftPts != null && (
+                  ` The test covers the per-query answer-quality scores (${fmtSignedPts(judgeLiftPts)} there); the rest of the bar difference comes from score components measured once per configuration, which can't be significance-tested.`
+                )}
               </div>
             </>
           ) : (
@@ -250,11 +275,6 @@ export function QualityComparisonCard({
     </div>
   )
 }
-
-// Minimum paired-bootstrap sample size below which the CI is too wobbly to
-// trust — surfaced as "n too small" rather than a green/amber call. n=5 is the
-// usual lower bound for paired-bootstrap stability on 0..1 score deltas.
-const MIN_N_FOR_SIGNIFICANCE = 5
 
 function SignificanceBadge({
   liftCI, liftSignificant,
