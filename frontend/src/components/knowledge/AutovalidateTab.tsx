@@ -15,6 +15,7 @@ import {
   type StartOptimizationOptions,
 } from '../../api/knowledge'
 import { AutovalidateModal } from './AutovalidateModal'
+import { ApplyPreviewModal } from '../shared/ApplyPreviewModal'
 import { OptimizationProgress } from './OptimizationProgress'
 import { OptimizationResults } from './OptimizationResults'
 import { OptimizationHistoryPanel } from './OptimizationHistoryPanel'
@@ -151,7 +152,21 @@ export function AutovalidateTab({ kbUuid, kbReady, canManage, queriesCount, onSw
     }
   }
 
-  const handleApply = async () => {
+  // Apply click shows the regression-count preview modal first (parity with
+  // the workflow and extraction panels). Older runs without ``apply_preview``
+  // go through the direct path.
+  const [showApplyPreview, setShowApplyPreview] = useState(false)
+
+  const handleApply = () => {
+    if (!run) return
+    if (run.apply_preview) {
+      setShowApplyPreview(true)
+    } else {
+      void doApply()
+    }
+  }
+
+  const doApply = async () => {
     if (!run) return
     setActionPending('apply')
     try {
@@ -159,6 +174,7 @@ export function AutovalidateTab({ kbUuid, kbReady, canManage, queriesCount, onSw
       // Refresh so the UI flips to "applied" state with the revert button.
       const fresh = await getKBOptimization(kbUuid, run.uuid)
       setRun(fresh)
+      setShowApplyPreview(false)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -274,6 +290,17 @@ export function AutovalidateTab({ kbUuid, kbReady, canManage, queriesCount, onSw
             onConfirm={handleStart}
             onClose={() => setShowModal(false)}
             onSwitchToQueries={onSwitchToQueries}
+          />
+        )}
+        {run.apply_preview && (
+          <ApplyPreviewModal
+            open={showApplyPreview}
+            preview={run.apply_preview}
+            itemNoun="query"
+            itemNounPlural="queries"
+            onConfirm={() => void doApply()}
+            onCancel={() => setShowApplyPreview(false)}
+            applying={actionPending === 'apply'}
           />
         )}
       </div>
