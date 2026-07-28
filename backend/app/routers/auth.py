@@ -77,6 +77,7 @@ async def _user_response(user: User) -> UserResponse:
         is_demo_user=user.is_demo_user,
         current_team=str(user.current_team) if user.current_team else None,
         current_team_uuid=current_team_uuid,
+        sso_provider=user.sso_provider,
     )
 
 
@@ -399,9 +400,13 @@ async def update_profile(
 
     email_changed = body.email is not None and body.email != user.email
     if email_changed:
-        # SSO-only accounts have no local password to re-auth against, and their
-        # email is owned by the identity provider — don't let it be changed here.
-        if not user.password_hash:
+        # SSO-linked accounts' email is owned by the identity provider — every
+        # SSO login syncs it back from the IdP, so a local edit would silently
+        # revert. That includes hybrid accounts (SSO + local password), which is
+        # why this checks sso_provider and not just the absence of a password.
+        # The password_hash fallback covers SSO accounts that haven't logged in
+        # since sso_provider was introduced.
+        if user.sso_provider or not user.password_hash:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your email is managed by your sign-in provider and "

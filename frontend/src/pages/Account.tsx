@@ -23,9 +23,14 @@ export default function Account() {
     }
   }, [user])
 
+  // SSO-linked accounts get their email from the identity provider on every
+  // sign-in, so a local edit would be silently overwritten — lock the field.
+  const emailManagedBySso = Boolean(user?.sso_provider)
+
   // Changing the email requires re-authentication, so reveal a password prompt
   // as soon as the field diverges from the saved address.
-  const emailChanged = email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
+  const emailChanged = !emailManagedBySso &&
+    email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
 
   const handleSaveProfile = async () => {
     if (emailChanged && !currentPassword) {
@@ -37,7 +42,7 @@ export default function Account() {
     try {
       await updateProfile({
         name,
-        email,
+        ...(emailManagedBySso ? {} : { email }),
         ...(emailChanged ? { current_password: currentPassword } : {}),
       })
       await refreshUser()
@@ -225,9 +230,15 @@ curl -X POST "$BASE_URL/api/workflows/run-integrated" \\
                   autoComplete="email"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-highlight focus:outline-none focus:ring-1 focus:ring-highlight"
+                  disabled={emailManagedBySso}
+                  className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-highlight focus:outline-none focus:ring-1 focus:ring-highlight disabled:bg-gray-50 disabled:text-gray-500"
                   placeholder="you@example.com"
                 />
+                {emailManagedBySso && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Managed by your sign-in provider and updated automatically when you sign in.
+                  </p>
+                )}
               </div>
               {emailChanged && (
                 <div className="col-span-2">
