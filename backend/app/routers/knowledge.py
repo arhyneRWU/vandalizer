@@ -1522,12 +1522,27 @@ async def cancel_kb_optimization(uuid: str, run_uuid: str, user: User = Depends(
 
 
 @router.post("/{uuid}/optimize/{run_uuid}/apply")
-async def apply_kb_optimization(uuid: str, run_uuid: str, user: User = Depends(get_current_user)):
+async def apply_kb_optimization(
+    uuid: str,
+    run_uuid: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+):
     """Apply a completed optimization's best config to the KB's rag_config_override.
 
     This is for users who want to review trial results before applying. Runs
     started with apply_on_finish=True don't need to call this.
+
+    Optional body: ``{"force": true}`` overrides the tied-with-baseline gate —
+    for callers who reviewed the data and still want the tied config (e.g. it
+    scored the same on a cheaper model).
     """
+    # The UI calls this with no body; only API callers opting into force send one.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    force = bool(body.get("force", False)) if isinstance(body, dict) else False
     user_org_ancestry = await organization_service.get_user_org_ancestry(user)
     kb = await _require_manageable_kb(uuid, user, user_org_ancestry)
     from app.models.kb_optimization_run import KBOptimizationRun
@@ -1544,6 +1559,19 @@ async def apply_kb_optimization(uuid: str, run_uuid: str, user: User = Depends(g
         )
     if not run.best_config:
         raise HTTPException(status_code=400, detail="Run has no best_config to apply")
+    if run.tied_with_baseline and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "tied_with_baseline",
+                "message": (
+                    "The winning configuration is statistically tied with the KB's "
+                    "current settings (within judge noise), so the data doesn't "
+                    "justify a config change. Re-submit with force=true to apply "
+                    "anyway."
+                ),
+            },
+        )
 
     import datetime as _dt
     now = _dt.datetime.now(tz=_dt.timezone.utc)
