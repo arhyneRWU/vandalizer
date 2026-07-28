@@ -603,19 +603,31 @@ function ListView({
                 && t.last_message_is_support_reply === false
                 && !t.read_by?.includes(currentUserId)
               return (
-                <button
+                // Not a <button>: browsers block text selection inside buttons,
+                // and agents need to copy the subject/preview text from the row.
+                <div
                   key={t.uuid}
-                  onClick={() => onSelect(t.uuid)}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (window.getSelection()?.toString()) return
+                    onSelect(t.uuid)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onSelect(t.uuid)
+                    }
+                  }}
                   style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     width: '100%', padding: '12px 20px', borderBottom: '1px solid #f3f4f6',
                     background: needsAttention ? '#fffbeb' : '#fff',
-                    border: 'none', borderTop: 'none', borderLeft: 'none', borderRight: 'none',
-                    cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                    cursor: 'pointer', textAlign: 'left',
                     transition: 'background 0.1s',
                   }}
-                  onMouseEnter={(e) => { if (!needsAttention) (e.currentTarget as HTMLButtonElement).style.background = '#f9fafb' }}
-                  onMouseLeave={(e) => { if (!needsAttention) (e.currentTarget as HTMLButtonElement).style.background = '#fff' }}
+                  onMouseEnter={(e) => { if (!needsAttention) (e.currentTarget as HTMLDivElement).style.background = '#f9fafb' }}
+                  onMouseLeave={(e) => { if (!needsAttention) (e.currentTarget as HTMLDivElement).style.background = '#fff' }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -686,7 +698,7 @@ function ListView({
                   <div style={{ fontSize: 12, color: '#9ca3af', flexShrink: 0, marginLeft: 16 }}>
                     {timeAgo(t.updated_at || t.created_at)}
                   </div>
-                </button>
+                </div>
               )
             })}
           </div>

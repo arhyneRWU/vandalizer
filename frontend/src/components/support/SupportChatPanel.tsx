@@ -212,10 +212,23 @@ function TicketListView({
               const isWatching = t.user_id !== currentUserId
                 && (t.watcher_ids ?? []).includes(currentUserId)
               return (
-                <button
+                // Not a <button>: browsers block text selection inside buttons,
+                // and users need to copy the subject/preview text from the row.
+                <div
                   key={t.uuid}
-                  onClick={() => onSelect(t.uuid)}
-                  className={`flex w-full items-start gap-3 border-b border-gray-100 px-4 py-3 text-left hover:bg-gray-50 ${
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (window.getSelection()?.toString()) return
+                    onSelect(t.uuid)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onSelect(t.uuid)
+                    }
+                  }}
+                  className={`flex w-full cursor-pointer items-start gap-3 border-b border-gray-100 px-4 py-3 text-left hover:bg-gray-50 ${
                     attention ? 'bg-blue-50/50' : ''
                   }`}
                 >
@@ -260,7 +273,7 @@ function TicketListView({
                       <span className="text-[10px] font-medium text-red-500">High</span>
                     )}
                   </div>
-                </button>
+                </div>
               )
             })}
             {closed.length > 0 && (
@@ -269,10 +282,21 @@ function TicketListView({
                   {closed.length} closed ticket{closed.length !== 1 ? 's' : ''}
                 </summary>
                 {closed.map((t) => (
-                  <button
+                  <div
                     key={t.uuid}
-                    onClick={() => onSelect(t.uuid)}
-                    className="flex w-full items-start gap-3 border-b border-gray-50 px-4 py-2.5 text-left opacity-60 hover:bg-gray-50 hover:opacity-100"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      if (window.getSelection()?.toString()) return
+                      onSelect(t.uuid)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onSelect(t.uuid)
+                      }
+                    }}
+                    className="flex w-full cursor-pointer items-start gap-3 border-b border-gray-50 px-4 py-2.5 text-left opacity-60 hover:bg-gray-50 hover:opacity-100"
                   >
                     <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${STATUS_DOT.closed}`} />
                     <div className="min-w-0 flex-1">
@@ -284,7 +308,7 @@ function TicketListView({
                       </p>
                     </div>
                     <span className="text-[10px] text-gray-500">{timeAgo(t.updated_at)}</span>
-                  </button>
+                  </div>
                 ))}
               </details>
             )}
