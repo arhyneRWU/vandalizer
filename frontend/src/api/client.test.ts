@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { apiFetch, ApiError, parseCsrfToken } from './client'
+import { apiFetch, rawFetch, ApiError, parseCsrfToken, NETWORK_ERROR_MESSAGE } from './client'
 
 // Mock global fetch
 const mockFetch = vi.fn()
@@ -207,6 +207,50 @@ describe('apiFetch', () => {
     await assertion
   })
 
+  it('retries a GET once after a transient network failure', async () => {
+    vi.useFakeTimers()
+    try {
+      // Browsers surface dead connections as a bare TypeError("Failed to fetch").
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      mockFetch.mockResolvedValueOnce(jsonResponse({ data: 'recovered' }))
+
+      const pending = apiFetch('/api/test')
+      await vi.advanceTimersByTimeAsync(501)
+      expect(await pending).toEqual({ data: 'recovered' })
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('throws a friendly network error when the GET retry also fails', async () => {
+    vi.useFakeTimers()
+    try {
+      mockFetch.mockRejectedValue(new TypeError('Failed to fetch'))
+
+      const pending = apiFetch('/api/test')
+      const assertion = expect(pending).rejects.toMatchObject({
+        status: 0,
+        message: NETWORK_ERROR_MESSAGE,
+      })
+      await vi.advanceTimersByTimeAsync(501)
+      await assertion
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not retry non-GET requests on network failure', async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await expect(apiFetch('/api/test', { method: 'POST' })).rejects.toMatchObject({
+      status: 0,
+      message: NETWORK_ERROR_MESSAGE,
+    })
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects immediately when the caller signal is already aborted', async () => {
     mockFetch.mockImplementationOnce((_url, init: RequestInit) => {
       if (init.signal?.aborted) {
@@ -220,6 +264,18 @@ describe('apiFetch', () => {
     await expect(apiFetch('/api/slow', { signal: controller.signal })).rejects.toSatisfy(
       (err) => err instanceof DOMException && err.name === 'AbortError',
     )
+  })
+})
+
+describe('rawFetch', () => {
+  it('translates a network TypeError into a friendly ApiError', async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await expect(rawFetch('/api/upload', { method: 'POST' })).rejects.toMatchObject({
+      status: 0,
+      message: NETWORK_ERROR_MESSAGE,
+    })
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 })
 
