@@ -164,4 +164,53 @@ describe('KnowledgePanel add-source permissions', () => {
     expect(screen.getByText('Add Documents').closest('button')).not.toBeDisabled()
     expect(screen.getByText('Add URLs').closest('button')).not.toBeDisabled()
   }, 30000)
+
+  // Every other write action in this pane hits a manage-gated endpoint too, so
+  // none of them may be offered to a viewer.
+  it('hides the rename, description, share and per-source edit actions', async () => {
+    detail.current = makeDetail({
+      can_manage: false,
+      sources: [{
+        uuid: 'src-1',
+        source_type: 'url',
+        url: 'https://example.gov/rule',
+        url_title: 'A Rule',
+        status: 'ready',
+        chunk_count: 4,
+        created_at: '2026-01-01T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    expect(screen.queryByLabelText('Edit title')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Edit description')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Rename source')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Remove source')).not.toBeInTheDocument()
+    expect(screen.getByText('Share with Team').closest('button')).toBeDisabled()
+    // Read-only actions stay available.
+    expect(screen.getByText('Chat with this KB').closest('button')).not.toBeDisabled()
+    expect(screen.getByText('Export').closest('button')).not.toBeDisabled()
+  }, 30000)
+
+  it('offers those actions to a user who can manage the KB', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-1',
+        source_type: 'url',
+        url: 'https://example.gov/rule',
+        url_title: 'A Rule',
+        status: 'ready',
+        chunk_count: 4,
+        created_at: '2026-01-01T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    expect(screen.getByLabelText('Edit title')).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit description')).toBeInTheDocument()
+    expect(screen.getByLabelText('Rename source')).toBeInTheDocument()
+    expect(screen.getByLabelText('Remove source')).toBeInTheDocument()
+    expect(screen.getByText('Share with Team').closest('button')).not.toBeDisabled()
+  }, 30000)
 })
