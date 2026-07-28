@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CheckCircle2 } from 'lucide-react'
 import { BarRow } from './BarRow'
+import { InfoHint } from './InfoHint'
 
 export interface BaselinePoint {
   id: string
@@ -117,16 +118,7 @@ export function QualityComparisonCard({
         <CheckCircle2 size={16} style={{ color: '#22c55e' }} />
         <h3 style={{ margin: 0, fontSize: 14, color: '#fff' }}>{title}</h3>
         {scoreFormulaHint && (
-          <span
-            title={scoreFormulaHint}
-            aria-label={scoreFormulaHint}
-            style={{
-              fontSize: 11, color: '#888', cursor: 'help', userSelect: 'none',
-              border: '1px solid #444', borderRadius: '50%',
-              width: 14, height: 14, lineHeight: '12px', textAlign: 'center',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            }}
-          >ⓘ</span>
+          <InfoHint content={scoreFormulaHint} label="How this score is computed" />
         )}
         {liftCI ? (
           <button
