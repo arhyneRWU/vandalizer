@@ -315,6 +315,7 @@ def kb_ingest_url(self, source_uuid: str) -> None:
                 "$set": {
                     "content": raw_text[:500000],
                     "url_title": (url_title or "")[:500],
+                    "truncated": bool(getattr(result, "truncated", False)),
                 }
             },
         )

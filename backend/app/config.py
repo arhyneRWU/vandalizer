@@ -132,7 +132,15 @@ class Settings(BaseSettings):
     # Nuxt, etc.) produce usable content for chat / workflow / KB ingestion.
     web_fetcher_browser_enabled: bool = True
     web_fetcher_min_chars: int = 500
+    # Cap on the *extracted* main-content text kept from a page.
     web_fetcher_max_chars: int = 500_000
+    # Cap on the *raw HTML* parsed before extraction. This must be much larger
+    # than web_fetcher_max_chars: HTML markup (nav, inline styles, deeply nested
+    # tables, scripts) dwarfs the readable text, so long .gov/.edu pages routinely
+    # exceed 500 KB of HTML well before the document body ends. Capping raw HTML at
+    # the *text* limit silently drops the tail of the page before it is ever
+    # parsed (e.g. a reg page cut off mid-document, losing later subparts).
+    web_fetcher_max_html_chars: int = 8_000_000
     web_fetcher_timeout_seconds: int = 30
 
     # Per-request read timeout (seconds) for the dedicated httpx client used by

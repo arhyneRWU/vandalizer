@@ -51,6 +51,9 @@ export interface KnowledgeBaseSource {
   status: 'pending' | 'processing' | 'ready' | 'error'
   error_message?: string
   chunk_count: number
+  // URL source whose extracted text was cut off at the fetcher size cap:
+  // "ready" but incomplete, so the UI warns instead of showing a clean check.
+  truncated?: boolean
   created_at: string
 }
 

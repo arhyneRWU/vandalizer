@@ -1276,6 +1276,7 @@ async def _ingest_url_source(
 
         source.content = raw_text[:500000]
         source.url_title = result.title
+        source.truncated = bool(result.truncated)
 
         dm = _get_dm()
         chunk_count = await asyncio.to_thread(
@@ -1346,6 +1347,9 @@ async def ingest_text_into_source(
         if label:
             source.url_title = label[:500]
         source.chunk_count = chunk_count
+        # Caller-supplied text is chunked in full (dm.add_to_kb gets the whole
+        # string), so re-ingesting here repairs any earlier fetch truncation.
+        source.truncated = False
         source.status = "ready"
         source.error_message = None
         source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)

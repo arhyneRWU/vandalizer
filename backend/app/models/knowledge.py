@@ -23,6 +23,10 @@ class KnowledgeBaseSource(Document):
     status: str = "pending"  # pending | processing | ready | error
     error_message: Optional[str] = None
     chunk_count: int = 0
+    # True when the fetched web page's extracted text was cut off at the fetcher
+    # size cap — the source is "ready" but incomplete, so the UI shows a warning
+    # rather than a clean check. Only set for URL sources.
+    truncated: bool = False
     # Crawl fields
     crawl_enabled: bool = False
     max_crawl_pages: int = 5
