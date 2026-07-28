@@ -23,6 +23,10 @@ export interface KnowledgeBase {
   is_reference?: boolean
   source_kb_uuid?: string
   reference_uuid?: string
+  // Whether the current user may run manage-level actions (add sources, rename,
+  // share, delete). False for e.g. an adopted verified catalog KB the user
+  // doesn't own. Treat a missing value as true — read it as `can_manage !== false`.
+  can_manage?: boolean
   // Set by KB Autovalidate's apply path
   has_optimized_config?: boolean
   optimized_config_set_at?: string | null

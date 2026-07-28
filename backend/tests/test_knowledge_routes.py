@@ -37,6 +37,23 @@ def _auth(user_id="user1"):
     return {"access_token": token, "csrf_token": csrf}, {"X-CSRF-Token": csrf}
 
 
+@pytest.fixture(autouse=True)
+def stub_team_access():
+    """KB responses carry a per-user ``can_manage`` flag, computed from the
+    caller's team memberships. Beanie isn't initialized under the ASGI test
+    client, so the real ``TeamMembership`` query can't run — stub it to "no
+    teams". Ownership/verified/admin branches of the gate still run for real.
+    """
+    from app.services.access_control import TeamAccessContext
+
+    with patch(
+        "app.routers.knowledge.access_control.get_team_access_context",
+        new_callable=AsyncMock,
+        return_value=TeamAccessContext(),
+    ):
+        yield
+
+
 @pytest.fixture
 async def client():
     with patch("app.main.init_db", new_callable=AsyncMock):
@@ -397,7 +414,7 @@ class TestKnowledgeListEndpoints:
         """
         user = _make_user()
         cookies, headers = _auth()
-        source_kb = _mock_kb(uuid="kb-src", title="Raw KB Title")
+        source_kb = _mock_kb(uuid="kb-src", title="Raw KB Title", user_id="owner", verified=True)
         source_kb.id = "oid-123"
         ref = MagicMock()
         ref.uuid = "ref-1"
@@ -436,6 +453,8 @@ class TestKnowledgeListEndpoints:
         assert len(items) == 1
         assert items[0]["is_reference"] is True
         assert items[0]["title"] == "Curated Catalog Name"
+        # Adopting a verified catalog KB doesn't confer manage rights on it.
+        assert items[0]["can_manage"] is False
         # The catalog lookup is scoped to KB items for the adopted source KBs.
         MockMeta.find.assert_called_once_with({
             "item_kind": "knowledge_base",
@@ -584,6 +603,56 @@ class TestKnowledgeCRUD:
         assert data["uuid"] == "kb-uuid-1"
         assert len(data["sources"]) == 1
         assert data["sources"][0]["document_title"] == "Some Document.pdf"
+        # The owner manages their own KB.
+        assert data["can_manage"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "is_examiner,is_admin,expected",
+        [
+            (False, False, False),  # regular user: view only
+            (True, False, True),    # examiners curate verified KBs
+            (False, True, True),    # admins manage everything
+        ],
+    )
+    async def test_get_detail_can_manage_on_foreign_verified_kb(
+        self, client, is_examiner, is_admin, expected,
+    ):
+        """A verified catalog KB the user doesn't own is viewable by everyone but
+        manageable only by an examiner or admin. The detail response must say so,
+        so the UI can disable Add Documents / Add URLs instead of letting the user
+        finish the flow and collect a 403.
+        """
+        user = _make_user("viewer")
+        user.is_examiner = is_examiner
+        user.is_admin = is_admin
+        cookies, headers = _auth("viewer")
+        kb = _mock_kb(user_id="someone-else", verified=True)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "viewer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch(
+                "app.routers.knowledge._resolve_document_titles",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+            MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+
+            resp = await client.get("/api/knowledge/kb-uuid-1", cookies=cookies, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json()["can_manage"] is expected
 
     @pytest.mark.asyncio
     async def test_get_detail_not_found(self, client):

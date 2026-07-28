@@ -36,6 +36,7 @@ from app.schemas.knowledge import (
     UpdateKBRequest,
     UpdateSourceRequest,
 )
+from app.services import access_control
 from app.services import knowledge_service as svc
 from app.services.name_conflicts import DuplicateNameError
 
@@ -98,6 +99,7 @@ def _kb_response(
     scope: str | None = None,
     trust: "_TrustSummary | None" = None,
     last_used_at: datetime.datetime | None = None,
+    can_manage: bool = True,
 ) -> KBResponse:
     import datetime as _dt
     override = getattr(kb, "rag_config_override", None)
@@ -143,7 +145,33 @@ def _kb_response(
         last_used_at=(
             last_used_at.isoformat() if isinstance(last_used_at, _dt.datetime) else None
         ),
+        can_manage=can_manage,
     )
+
+
+async def _manage_flags_by_kb(
+    kbs: list, user: User, user_org_ancestry: list[str],
+) -> dict[str, bool]:
+    """Per-KB manage rights for the requesting user, keyed by KB uuid.
+
+    Mirrors the gate ``_require_manageable_kb`` applies on write endpoints, so
+    the UI can disable manage affordances (add sources, rename, share, delete)
+    up front rather than surfacing a 403 at the end of the flow. One team-access
+    lookup covers the whole batch.
+    """
+    if not kbs:
+        return {}
+    team_access = await access_control.get_team_access_context(user)
+    return {
+        kb.uuid: access_control.can_manage_knowledge_base(
+            kb,
+            user,
+            team_access,
+            user_org_ancestry=user_org_ancestry,
+            allow_admin=True,
+        )
+        for kb in kbs
+    }
 
 
 async def _latest_runs_by_kb(kb_uuids: list[str]) -> dict[str, _TrustSummary]:
@@ -235,7 +263,11 @@ async def list_knowledge_bases_legacy(user: User = Depends(get_current_user)):
     kbs = await svc.list_knowledge_bases_flat(
         user.user_id, team_id=team_id, user_org_ancestry=user_org_ancestry,
     )
-    return [_kb_response(kb) for kb in kbs]
+    manage_flags = await _manage_flags_by_kb(kbs, user, user_org_ancestry)
+    return [
+        _kb_response(kb, can_manage=manage_flags.get(kb.uuid, False))
+        for kb in kbs
+    ]
 
 
 def _classify_scope(kb, user_id: str, team_id: str | None) -> str:
@@ -299,6 +331,9 @@ async def list_knowledge_bases_v2(
     all_uuids = [kb.uuid for kb in kbs] + [src.uuid for _, src in ref_kbs]
     latest_runs = await _latest_runs_by_kb(all_uuids)
     usage_map = await svc.get_kb_usage_map(user.user_id, all_uuids)
+    manage_flags = await _manage_flags_by_kb(
+        list(kbs) + [src for _, src in ref_kbs], user, user_org_ancestry,
+    )
 
     items: list[KBResponse] = []
     for kb in kbs:
@@ -308,6 +343,7 @@ async def list_knowledge_bases_v2(
             scope=kb_scope,
             trust=latest_runs.get(kb.uuid),
             last_used_at=usage_map.get(kb.uuid),
+            can_manage=manage_flags.get(kb.uuid, False),
         ))
 
     for ref, source_kb in ref_kbs:
@@ -316,6 +352,7 @@ async def list_knowledge_bases_v2(
             scope="reference",
             trust=latest_runs.get(source_kb.uuid),
             last_used_at=usage_map.get(source_kb.uuid),
+            can_manage=manage_flags.get(source_kb.uuid, False),
         )
         resp.title = catalog_names.get(str(source_kb.id), resp.title)
         resp.is_reference = True
@@ -447,8 +484,13 @@ async def get_knowledge_base(uuid: str, user: User = Depends(get_current_user)):
     sources = await svc.get_kb_sources(kb.uuid)
     titles = await _resolve_document_titles(sources)
     latest_runs = await _latest_runs_by_kb([kb.uuid])
+    manage_flags = await _manage_flags_by_kb([kb], user, user_org_ancestry)
     return KBDetailResponse(
-        **_kb_response(kb, trust=latest_runs.get(kb.uuid)).model_dump(),
+        **_kb_response(
+            kb,
+            trust=latest_runs.get(kb.uuid),
+            can_manage=manage_flags.get(kb.uuid, False),
+        ).model_dump(),
         sources=[
             _source_response(s, document_title=titles.get(s.document_uuid or ""))
             for s in sources

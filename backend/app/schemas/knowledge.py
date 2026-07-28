@@ -110,6 +110,14 @@ class KBResponse(BaseModel):
     is_reference: bool = False
     source_kb_uuid: Optional[str] = None  # set when is_reference=True
     reference_uuid: Optional[str] = None  # the reference's own uuid
+    # Whether the requesting user may perform manage-level actions (add sources,
+    # rename, share, delete). Lets the UI disable those affordances up front
+    # instead of letting the user complete a flow that ends in a 403 — e.g. an
+    # adopted verified catalog KB, which is viewable by everyone but manageable
+    # only by its owner, an examiner, or an admin. Defaults True because the
+    # endpoints that don't set it explicitly (create/import/adopt) only ever
+    # return a KB the requester just became the owner of.
+    can_manage: bool = True
     # Set by KB Autovalidate's apply path. Presence (not value) is what the UI
     # surfaces as a small "Optimized" chip.
     has_optimized_config: bool = False

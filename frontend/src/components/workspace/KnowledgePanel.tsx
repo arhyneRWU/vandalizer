@@ -629,6 +629,12 @@ export function KnowledgePanel() {
   // Detail view
   if (selectedKB) {
     const badge = STATUS_BADGE[selectedKB.status] || STATUS_BADGE.empty
+    // Manage rights come from the backend's own gate (owner / examiner on a
+    // verified KB / team manager / admin). Without this, a viewer on e.g. an
+    // adopted verified catalog KB could walk the whole add-source flow and only
+    // hit "You don't have permission to manage this knowledge base." on submit.
+    const canManageKB = selectedKB.can_manage !== false
+    const noManageReason = "You don't have permission to manage this knowledge base."
     return (
       <>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#1e1e1e', position: 'relative' }}>
@@ -915,14 +921,15 @@ export function KnowledgePanel() {
             <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
               <button
                 onClick={() => setShowDocPicker(true)}
-                disabled={addingDocs}
+                disabled={addingDocs || !canManageKB}
+                title={canManageKB ? undefined : noManageReason}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
                   color: '#e5e5e5',
                   backgroundColor: '#2a2a2a', border: '1px solid #3a3a3a', borderRadius: 6,
-                  cursor: addingDocs ? 'default' : 'pointer',
-                  opacity: addingDocs ? 0.5 : 1,
+                  cursor: addingDocs || !canManageKB ? 'default' : 'pointer',
+                  opacity: addingDocs || !canManageKB ? 0.5 : 1,
                 }}
               >
                 <FileText size={13} />
@@ -930,14 +937,15 @@ export function KnowledgePanel() {
               </button>
               <button
                 onClick={() => setShowUrlModal(true)}
-                disabled={addingUrls}
+                disabled={addingUrls || !canManageKB}
+                title={canManageKB ? undefined : noManageReason}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
                   color: '#e5e5e5', backgroundColor: '#2a2a2a', border: '1px solid #3a3a3a',
                   borderRadius: 6,
-                  cursor: addingUrls ? 'default' : 'pointer',
-                  opacity: addingUrls ? 0.5 : 1,
+                  cursor: addingUrls || !canManageKB ? 'default' : 'pointer',
+                  opacity: addingUrls || !canManageKB ? 0.5 : 1,
                 }}
               >
                 {addingUrls ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Globe size={13} />}
@@ -1058,6 +1066,18 @@ export function KnowledgePanel() {
                 </button>
               )}
             </div>
+
+            {/* A disabled button's tooltip is unreachable by keyboard and touch,
+                so say once, visibly, why the add-source actions are inert. */}
+            {!canManageKB && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                marginTop: -8, marginBottom: 16, fontSize: 11, color: '#999',
+              }}>
+                <ShieldCheck size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
+                <span>View only — {noManageReason}</span>
+              </div>
+            )}
 
             {/* Org visibility badges */}
             {(selectedKB.organization_ids?.length ?? 0) > 0 && (
