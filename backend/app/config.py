@@ -132,8 +132,22 @@ class Settings(BaseSettings):
     # Nuxt, etc.) produce usable content for chat / workflow / KB ingestion.
     web_fetcher_browser_enabled: bool = True
     web_fetcher_min_chars: int = 500
+    # Cap on the *extracted* main-content text kept from a page.
     web_fetcher_max_chars: int = 500_000
+    # Cap on the *raw HTML* parsed before extraction. This must be much larger
+    # than web_fetcher_max_chars: HTML markup (nav, inline styles, deeply nested
+    # tables, scripts) dwarfs the readable text, so long .gov/.edu pages routinely
+    # exceed 500 KB of HTML well before the document body ends. Capping raw HTML at
+    # the *text* limit silently drops the tail of the page before it is ever
+    # parsed (e.g. a reg page cut off mid-document, losing later subparts).
+    web_fetcher_max_html_chars: int = 8_000_000
     web_fetcher_timeout_seconds: int = 30
+
+    # Minimum characters of extracted content for an auto-discovered crawl page
+    # to be kept as a KB source. Pages below it are site navigation (Home,
+    # Topics, Agencies) — still followed for their links, never embedded. Does
+    # not apply to a URL the user pasted themselves; that is always kept.
+    kb_crawl_min_content_chars: int = 1200
 
     # Per-request read timeout (seconds) for the dedicated httpx client used by
     # workflow LLM calls. Reasoning models (e.g. gpt-oss) can think for a while

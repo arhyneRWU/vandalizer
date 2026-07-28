@@ -74,6 +74,20 @@ class WebFetchResult:
     # www.uidaho.edu). Crawlers dedup on this too, so the same page can't be
     # fetched once per spelling.
     final_url: Optional[str] = None
+    # True when the returned ``text`` was cut off at web_fetcher_max_chars (a
+    # genuinely huge page). Ingestion surfaces this so a partial source shows a
+    # warning instead of a clean "ready" — a truncated page yields wrong answers
+    # for anything past the cut. (Note: raw HTML being trimmed at
+    # web_fetcher_max_html_chars would also set this, but that limit is sized so
+    # real documents never hit it.)
+    truncated: bool = False
+
+
+def _cap(text: str, limit: int) -> tuple[str, bool]:
+    """Return ``text`` bounded to ``limit`` chars plus whether it was cut."""
+    if len(text) > limit:
+        return text[:limit], True
+    return text, False
 
 
 def _extract_title(html: str, fallback_url: str) -> str:
@@ -280,18 +294,25 @@ async def fetch_url(
         # HTML extraction where bot-challenge detection can name the failure.
         if _looks_like_pdf(url, resp.headers.get("content-type", "")) and b"%PDF" in resp.content[:1024]:
             pdf_text, pdf_title, pdf_links = _extract_pdf_response(resp.content, url)
+            pdf_text, pdf_truncated = _cap(pdf_text, settings.web_fetcher_max_chars)
             return WebFetchResult(
                 url=url,
                 title=pdf_title,
-                text=pdf_text[: settings.web_fetcher_max_chars],
+                text=pdf_text,
                 raw_html=None,  # no HTML — crawlers use pdf_links instead
                 used_browser=False,
                 status_code=status_code,
                 pdf_links=pdf_links or None,
                 final_url=str(resp.url),
+                truncated=pdf_truncated,
             )
 
-        raw_html = resp.text[: settings.web_fetcher_max_chars]
+        # Cap the *raw HTML* at the (much larger) HTML limit, not the text limit
+        # — trimming HTML at the text cap silently drops the tail of long pages
+        # before trafilatura ever parses them. web_fetcher_max_html_chars is
+        # sized so real documents never hit it; if they somehow do, the flag
+        # propagates so the source is not marked cleanly ready.
+        raw_html, html_truncated = _cap(resp.text, settings.web_fetcher_max_html_chars)
 
     text = _extract_main_text(raw_html)
     title = _extract_title(raw_html, url)
@@ -303,24 +324,32 @@ async def fetch_url(
         )
         rendered = await _render_with_browser(url, settings.web_fetcher_timeout_seconds)
         if rendered:
-            rendered = rendered[: settings.web_fetcher_max_chars]
+            rendered, rendered_html_truncated = _cap(rendered, settings.web_fetcher_max_html_chars)
             rendered_text = _extract_main_text(rendered)
             if len(rendered_text) > len(text):
                 raw_html = rendered
                 text = rendered_text
+                html_truncated = rendered_html_truncated
                 # Re-extract title from the rendered DOM; SPAs often set
                 # <title> via JS after mount.
                 title = _extract_title(rendered, url)
                 used_browser = True
 
+    text, text_truncated = _cap(text, settings.web_fetcher_max_chars)
+    if text_truncated:
+        logger.warning(
+            "Extracted text for %s exceeded %d chars and was truncated",
+            url, settings.web_fetcher_max_chars,
+        )
     return WebFetchResult(
         url=url,
         title=title,
-        text=text[: settings.web_fetcher_max_chars],
+        text=text,
         raw_html=raw_html,
         used_browser=used_browser,
         status_code=status_code,
         final_url=str(resp.url),
+        truncated=text_truncated or html_truncated,
     )
 
 

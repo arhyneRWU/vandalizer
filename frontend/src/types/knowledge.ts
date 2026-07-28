@@ -51,6 +51,9 @@ export interface KnowledgeBaseSource {
   status: 'pending' | 'processing' | 'ready' | 'error'
   error_message?: string
   chunk_count: number
+  // URL source whose extracted text was cut off at the fetcher size cap:
+  // "ready" but incomplete, so the UI warns instead of showing a clean check.
+  truncated?: boolean
   created_at: string
 }
 
@@ -60,6 +63,8 @@ export interface KnowledgeBaseSourceDetail extends KnowledgeBaseSource {
   max_crawl_pages: number
   parent_source_uuid?: string | null
   crawled_urls?: string[] | null
+  // Navigation pages the crawl followed for their links but did not embed.
+  skipped_urls?: string[] | null
   child_sources: KnowledgeBaseSource[]
   processed_at?: string | null
 }

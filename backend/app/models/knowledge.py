@@ -20,14 +20,23 @@ class KnowledgeBaseSource(Document):
     custom_name: Optional[str] = None  # user-provided label; overrides auto-derived title
     source_reference: Optional[str] = None  # user-verifiable provenance (origin URL / citation); shown as "Source: …"
     content: Optional[str] = None
-    status: str = "pending"  # pending | processing | ready | error
+    # "skipped" is transient: the crawler marks a navigation page skipped and
+    # then deletes the record, so it should not be seen on a stored source.
+    status: str = "pending"  # pending | processing | ready | error | skipped
     error_message: Optional[str] = None
     chunk_count: int = 0
+    # True when the fetched web page's extracted text was cut off at the fetcher
+    # size cap — the source is "ready" but incomplete, so the UI shows a warning
+    # rather than a clean check. Only set for URL sources.
+    truncated: bool = False
     # Crawl fields
     crawl_enabled: bool = False
     max_crawl_pages: int = 5
     parent_source_uuid: Optional[str] = None  # links crawled children to parent
     crawled_urls: Optional[list[str]] = None  # list of discovered URLs (on parent)
+    # Pages the crawl fetched and mined for links but judged to be navigation
+    # rather than content, so they were never embedded (on parent).
+    skipped_urls: Optional[list[str]] = None
     created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(tz=datetime.timezone.utc))
     processed_at: Optional[datetime.datetime] = None
 

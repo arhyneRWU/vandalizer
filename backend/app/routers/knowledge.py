@@ -245,6 +245,7 @@ def _source_response(s, *, document_title: str | None = None) -> KBSourceRespons
         status=s.status,
         error_message=s.error_message or "",
         chunk_count=s.chunk_count,
+        truncated=bool(getattr(s, "truncated", False)),
         created_at=s.created_at.isoformat() if s.created_at else None,
     )
 
@@ -725,6 +726,7 @@ async def get_source_detail(uuid: str, source_uuid: str, user: User = Depends(ge
         max_crawl_pages=int(source.max_crawl_pages or 5),
         parent_source_uuid=source.parent_source_uuid,
         crawled_urls=source.crawled_urls,
+        skipped_urls=source.skipped_urls,
         child_sources=[
             _source_response(c, document_title=child_titles.get(c.document_uuid or ""))
             for c in children

@@ -12,6 +12,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from app.models.kb_suggestion import KBSuggestion
     from app.services.web_fetcher import WebFetchResult
 
@@ -973,10 +975,24 @@ async def _crawl_from_source(
     allowed_domains: str,
     parent_fetched: WebFetchResult,
 ) -> int:
-    """BFS crawl from parent URL, creating child sources. Returns count added."""
+    """BFS crawl from parent URL, creating child sources. Returns count added.
+
+    Only pages with real content become sources. Navigation pages (Home,
+    Topics, Agencies) are fetched and mined for links but never embedded, so
+    ``max_pages`` counts documents the user wanted rather than being spent on
+    site chrome — without anyone having to fill in Allowed domains.
+    """
+    from app.config import Settings
     from app.utils.crawl_scope import parse_crawl_scope, url_in_crawl_scope
+    from app.utils.page_quality import describe_low_value_page
 
     max_pages = max(1, min(max_pages, 50))
+    min_content_chars = Settings().kb_crawl_min_content_chars
+    # Skipped pages don't consume a page slot, so bound the total fetches too —
+    # otherwise a site that is nothing but navigation would crawl until it ran
+    # out of links. Mirrors the workflow CrawlerNode's budget.
+    max_fetches = max_pages * 5
+    fetches = 0
 
     # Explicit allowed-domains entries (which may carry path prefixes) define
     # the scope; blank falls back to the parent URL's whole domain.
@@ -1007,8 +1023,9 @@ async def _crawl_from_source(
     logger.info(f"Crawl: {len(queue)} in-scope links queued (max_pages={max_pages}, scope={scope})")
 
     crawled_urls: list[str] = []
+    skipped_urls: list[str] = []
 
-    while queue and added < max_pages:
+    while queue and added < max_pages and fetches < max_fetches:
         url = queue.pop(0)
 
         # A redirect on an earlier fetch may have landed on this URL under
@@ -1033,16 +1050,32 @@ async def _crawl_from_source(
             parent_source_uuid=parent.uuid,
         )
         await child.insert()
+        fetches += 1
         # _ingest_url_source returns the fetch result on success
-        child_fetched = await _ingest_url_source(child, kb)
-        added += 1
-        crawled_urls.append(url)
+        child_fetched = await _ingest_url_source(
+            child, kb,
+            content_gate=lambda result, page=url: describe_low_value_page(
+                result.text,
+                len(_crawlable_links(result, page)),
+                min_chars=min_content_chars,
+            ),
+        )
         landed.add(_normalize_crawl_url(url))
         if child_fetched and child_fetched.final_url:
             child_final = _normalize_crawl_url(child_fetched.final_url)
             visited.add(child_final)
             landed.add(child_final)
-        logger.info(f"Crawl: added child {added}/{max_pages} — {url} (status={child.status})")
+
+        if child.status == "skipped":
+            # Navigation, not content: drop the source record entirely so it
+            # never shows up in the KB, but fall through to harvest its links.
+            skipped_urls.append(url)
+            await child.delete()
+            logger.info(f"Crawl: skipped {url} — {child.error_message}")
+        else:
+            added += 1
+            crawled_urls.append(url)
+            logger.info(f"Crawl: added child {added}/{max_pages} — {url} (status={child.status})")
 
         # Extract more links from this page for BFS
         if child_fetched and added < max_pages:
@@ -1053,9 +1086,13 @@ async def _crawl_from_source(
 
     # Update parent with crawled URL list
     parent.crawled_urls = crawled_urls
+    parent.skipped_urls = skipped_urls or None
     await parent.save()
 
-    logger.info(f"Crawl complete for {parent.url}: {added} child pages added")
+    logger.info(
+        f"Crawl complete for {parent.url}: {added} child pages added, "
+        f"{len(skipped_urls)} navigation pages skipped ({fetches} fetched)",
+    )
     return added
 
 
@@ -1248,8 +1285,16 @@ async def _ingest_document_source(source: KnowledgeBaseSource, kb: KnowledgeBase
 
 async def _ingest_url_source(
     source: KnowledgeBaseSource, kb: KnowledgeBase,
+    content_gate: Callable[[WebFetchResult], str | None] | None = None,
 ) -> WebFetchResult | None:
-    """Ingest a URL source. Returns the fetch result on success (for crawling), None on failure."""
+    """Ingest a URL source. Returns the fetch result on success (for crawling), None on failure.
+
+    ``content_gate`` lets a caller reject a page that fetched fine but isn't
+    worth embedding (the crawler uses it to drop navigation pages). It runs
+    before anything reaches ChromaDB, so a rejected page costs no embeddings.
+    A rejected source is marked ``skipped``, but the fetch result is still
+    returned — nav pages are how a crawl reaches the content behind them.
+    """
     source.status = "processing"
     await source.save()
     try:
@@ -1274,8 +1319,19 @@ async def _ingest_url_source(
             await source.save()
             return None
 
+        if content_gate is not None:
+            skip_reason = content_gate(result)
+            if skip_reason:
+                source.status = "skipped"
+                source.error_message = skip_reason[:2000]
+                source.url_title = result.title
+                await source.save()
+                # Not an error — the caller still wants the links off this page.
+                return result
+
         source.content = raw_text[:500000]
         source.url_title = result.title
+        source.truncated = bool(result.truncated)
 
         dm = _get_dm()
         chunk_count = await asyncio.to_thread(
@@ -1346,6 +1402,9 @@ async def ingest_text_into_source(
         if label:
             source.url_title = label[:500]
         source.chunk_count = chunk_count
+        # Caller-supplied text is chunked in full (dm.add_to_kb gets the whole
+        # string), so re-ingesting here repairs any earlier fetch truncation.
+        source.truncated = False
         source.status = "ready"
         source.error_message = None
         source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)

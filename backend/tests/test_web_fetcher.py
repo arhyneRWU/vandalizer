@@ -410,3 +410,107 @@ async def test_html_pages_do_not_set_pdf_links():
 
     assert result.pdf_links is None
     assert result.raw_html is not None
+
+
+# ---------------------------------------------------------------------------
+# Truncation: raw HTML is capped at the (large) HTML limit, not the text limit.
+# Regression test for the bug where a long page's HTML was trimmed at
+# web_fetcher_max_chars before extraction, silently dropping the document tail.
+# ---------------------------------------------------------------------------
+
+def _long_html(body_paragraphs: int) -> str:
+    """An HTML page whose *markup* is far larger than its extracted text.
+    Each paragraph carries a heavy wrapper of tags/attributes so the HTML
+    inflates ~10x relative to the readable sentence it contains."""
+    parts = ["<!DOCTYPE html><html><head><title>Long Reg</title></head><body><main><article>"]
+    for i in range(body_paragraphs):
+        parts.append(
+            f'<section class="para" data-index="{i}" '
+            f'style="margin:0;padding:0;border:0;font-family:serif">'
+            f"<p>Section {i}: subrecipient and contractor determinations must be "
+            f"documented and retained for audit under the applicable federal rules.</p>"
+            f"</section>"
+        )
+    parts.append("</article></main></body></html>")
+    return "".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_long_page_not_truncated_when_html_exceeds_text_cap():
+    # HTML far larger than the text cap, but under the HTML cap. Under the old
+    # code (raw_html sliced at web_fetcher_max_chars) the tail sections would be
+    # dropped; now the whole body must survive extraction.
+    html = _long_html(300)
+    text_cap = 50_000
+    # The markup is well over the text cap, but the *extracted* text is under it
+    # — the exact regime where the old code (HTML sliced at the text cap) would
+    # have dropped the document tail.
+    assert len(html) > text_cap
+    settings = Settings(
+        web_fetcher_browser_enabled=False,
+        web_fetcher_max_chars=text_cap,
+        web_fetcher_max_html_chars=8_000_000,
+    )
+
+    with patch("app.services.web_fetcher.httpx.AsyncClient",
+               return_value=_mock_async_client(html)), \
+         patch("app.services.web_fetcher.validate_outbound_url",
+               return_value="https://example.gov/reg"):
+        result = await fetch_url("https://example.gov/reg", settings=settings)
+
+    assert len(result.text) < text_cap  # extracted text really is under the cap
+    # The last section must be present — proof the tail was extracted, not cut.
+    assert "Section 299" in result.text
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_extracted_text_over_cap_sets_truncated_flag():
+    # A page whose *extracted text* genuinely exceeds the cap must still be
+    # bounded — but now the truncation is flagged rather than silent.
+    html = _long_html(100)
+    settings = Settings(
+        web_fetcher_browser_enabled=False,
+        web_fetcher_max_chars=2_000,        # tiny cap: extracted text will exceed it
+        web_fetcher_max_html_chars=8_000_000,
+    )
+
+    with patch("app.services.web_fetcher.httpx.AsyncClient",
+               return_value=_mock_async_client(html)), \
+         patch("app.services.web_fetcher.validate_outbound_url",
+               return_value="https://example.gov/reg"):
+        result = await fetch_url("https://example.gov/reg", settings=settings)
+
+    assert len(result.text) <= 2_000
+    assert result.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_raw_html_over_html_cap_sets_truncated_flag():
+    html = _long_html(400)
+    settings = Settings(
+        web_fetcher_browser_enabled=False,
+        web_fetcher_max_chars=500_000,
+        web_fetcher_max_html_chars=2_000,   # HTML cap smaller than the markup
+    )
+
+    with patch("app.services.web_fetcher.httpx.AsyncClient",
+               return_value=_mock_async_client(html)), \
+         patch("app.services.web_fetcher.validate_outbound_url",
+               return_value="https://example.gov/reg"):
+        result = await fetch_url("https://example.gov/reg", settings=settings)
+
+    assert result.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_normal_page_is_not_flagged_truncated():
+    settings = Settings(web_fetcher_browser_enabled=False)
+
+    with patch("app.services.web_fetcher.httpx.AsyncClient",
+               return_value=_mock_async_client(STATIC_PAGE_HTML)), \
+         patch("app.services.web_fetcher.validate_outbound_url",
+               return_value="https://example.com/policy"):
+        result = await fetch_url("https://example.com/policy", settings=settings)
+
+    assert result.truncated is False

@@ -62,6 +62,9 @@ class KBSourceResponse(BaseModel):
     status: str
     error_message: Optional[str] = None
     chunk_count: int = 0
+    # URL source whose extracted text was cut off at the fetcher size cap:
+    # "ready" but incomplete, so the UI warns instead of showing a clean check.
+    truncated: bool = False
     created_at: Optional[str] = None
 
 
@@ -77,6 +80,8 @@ class KBSourceDetailResponse(KBSourceResponse):
     max_crawl_pages: int = 5
     parent_source_uuid: Optional[str] = None
     crawled_urls: Optional[list[str]] = None
+    # Navigation pages the crawl followed for links but did not embed
+    skipped_urls: Optional[list[str]] = None
     child_sources: list[KBSourceResponse] = []  # Crawled children (when this is a parent)
     processed_at: Optional[str] = None
 
