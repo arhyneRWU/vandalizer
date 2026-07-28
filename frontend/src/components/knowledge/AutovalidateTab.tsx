@@ -399,7 +399,8 @@ function IdleHero({
       </div>
       <FeedbackImpactCallout impact={impact} />
       <p style={{ margin: '0 0 12px 0', fontSize: 13, color: '#bbb', lineHeight: 1.5 }}>
-        Typically <b>$1–$5</b> and <b>10–20 minutes</b>. We test your KB against
+        Typically <b>10–20 minutes</b>, using roughly <b>$1–$5</b> worth of LLM
+        tokens — an estimate of AI usage, not a charge to you. We test your KB against
         expected answers, try dozens of retrieval setups, and recommend the
         best. Nothing changes until you click Apply.
       </p>
