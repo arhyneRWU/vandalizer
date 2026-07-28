@@ -912,7 +912,7 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '8px 14px', fontSize: 14, fontWeight: 500,
-              backgroundColor: 'var(--highlight-color)', color: '#fff',
+              backgroundColor: 'var(--highlight-color)', color: 'var(--highlight-text-color, #fff)',
               borderRadius: 6, textDecoration: 'none',
             }}
           >
