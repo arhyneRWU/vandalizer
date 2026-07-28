@@ -19,10 +19,16 @@ interface NavigationContextValue {
   openWorkflow: (id: string, sessionId?: string) => void
   closeWorkflow: () => void
   consumeWorkflowSession: () => string | null
+  // Bumped on every openWorkflow call so panels reload run data even when
+  // the workflow id in the URL is unchanged (e.g. switching between two
+  // runs of the same workflow in the Activity rail).
+  workflowOpenSignal: number
   openExtractionId: string | null
   openExtraction: (uuid: string, initialResults?: Record<string, string>) => void
   closeExtraction: () => void
   consumeExtractionResults: () => Record<string, string> | null
+  // Same as workflowOpenSignal, for the extraction panel.
+  extractionOpenSignal: number
   openAutomationId: string | null
   openAutomation: (id: string) => void
   closeAutomation: () => void
@@ -256,6 +262,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [viewDocumentRequest, setViewDocumentRequest] = useState<{ uuid: string; title: string } | null>(null)
   const pendingExtractionResultsRef = useRef<Record<string, string> | null>(null)
   const pendingWorkflowSessionRef = useRef<string | null>(null)
+  const [workflowOpenSignal, setWorkflowOpenSignal] = useState(0)
+  const [extractionOpenSignal, setExtractionOpenSignal] = useState(0)
 
   const updateSearch = useCallback(
     (updater: (prev: WorkspaceSearchState) => WorkspaceSearchState) => {
@@ -280,6 +288,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const openWorkflow = useCallback((id: string, sessionId?: string) => {
     pendingWorkflowSessionRef.current = sessionId ?? null
+    setWorkflowOpenSignal(prev => prev + 1)
     updateSearch((prev) => ({
       ...prev,
       workflow: id,
@@ -302,6 +311,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const openExtraction = useCallback((uuid: string, initialResults?: Record<string, string>) => {
     pendingExtractionResultsRef.current = initialResults ?? null
+    setExtractionOpenSignal(prev => prev + 1)
     updateSearch((prev) => ({ ...prev, extraction: uuid, workflow: undefined, automation: undefined }))
   }, [updateSearch])
 
@@ -611,16 +621,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     workspaceMode, setWorkspaceMode,
     activeRightTab, setActiveRightTab,
     openWorkflowId, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession,
+    workflowOpenSignal,
     openExtractionId, openExtraction, closeExtraction,
     consumeExtractionResults,
+    extractionOpenSignal,
     openAutomationId, openAutomation, closeAutomation,
     resetToHome,
   }), [
     workspaceMode, setWorkspaceMode,
     activeRightTab, setActiveRightTab,
     openWorkflowId, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession,
+    workflowOpenSignal,
     openExtractionId, openExtraction, closeExtraction,
     consumeExtractionResults,
+    extractionOpenSignal,
     openAutomationId, openAutomation, closeAutomation,
     resetToHome,
   ])

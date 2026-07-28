@@ -212,7 +212,7 @@ export function WorkflowEditorPanel() {
   const { user } = useAuth()
   const shareLink = useShareLink()
   const confirm = useConfirm()
-  const { openWorkflowId, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession, selectedDocUuids, bumpActivitySignal, activeProjectUuid } = useWorkspace()
+  const { openWorkflowId, workflowOpenSignal, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession, selectedDocUuids, bumpActivitySignal, activeProjectUuid } = useWorkspace()
   const [workflow, setWorkflow] = useState<Workflow | null>(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<Tab>('design')
@@ -290,13 +290,16 @@ export function WorkflowEditorPanel() {
 
   useEffect(() => { refresh() }, [refresh])
 
-  // Load results from a pending session (e.g. clicking a completed activity)
+  // Load results from a pending session (e.g. clicking a completed activity).
+  // workflowOpenSignal reruns this when a rail click re-opens the workflow
+  // that's already on screen (switching between two runs of it), since
+  // openWorkflowId alone doesn't change in that case.
   useEffect(() => {
     const sid = consumeWorkflowSession()
     if (sid) {
       runner.loadSession(sid)
     }
-  }, [openWorkflowId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [openWorkflowId, workflowOpenSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch quality status on mount
   useEffect(() => {

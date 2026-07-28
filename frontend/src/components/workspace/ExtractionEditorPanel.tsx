@@ -103,7 +103,7 @@ interface ExtractionConfig {
 
 export function ExtractionEditorPanel() {
   const queryClient = useQueryClient()
-  const { openExtractionId, openExtraction, closeExtraction, selectedDocUuids, selectedDocNames, setHighlightTerms, bumpActivitySignal, consumeExtractionResults, activeProjectUuid, activeProjectRootFolder } = useWorkspace()
+  const { openExtractionId, extractionOpenSignal, openExtraction, closeExtraction, selectedDocUuids, selectedDocNames, setHighlightTerms, bumpActivitySignal, consumeExtractionResults, activeProjectUuid, activeProjectRootFolder } = useWorkspace()
   const { toast } = useToast()
   const { user } = useAuth()
   const shareLink = useShareLink()
@@ -161,7 +161,10 @@ export function ExtractionEditorPanel() {
     getQualityStatus(openExtractionId).then(setQualityStatus).catch(() => {})
   }, [openExtractionId, refreshSparkline])
 
-  // Initial load — shows spinner and restores any pending results from activity rail
+  // Initial load — shows spinner and restores any pending results from activity rail.
+  // extractionOpenSignal reruns this when a rail click re-opens the extraction
+  // that's already on screen (e.g. switching between two runs of it), since
+  // openExtractionId alone doesn't change in that case.
   useEffect(() => {
     if (!openExtractionId) return
     setLoading(true)
@@ -176,7 +179,7 @@ export function ExtractionEditorPanel() {
       .finally(() => setLoading(false))
     refreshSparkline()
     getQualityStatus(openExtractionId).then(setQualityStatus).catch(() => {})
-  }, [openExtractionId, refreshSparkline])
+  }, [openExtractionId, extractionOpenSignal, refreshSparkline])
 
   // Nudge dismissal state
   useEffect(() => {
