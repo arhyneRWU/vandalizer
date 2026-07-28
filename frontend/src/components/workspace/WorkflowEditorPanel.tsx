@@ -6429,7 +6429,7 @@ function ValidateTab({
   }, [workflowId])
 
   const handleProposeTestCases = async () => {
-    if (!workflowId) return
+    if (!workflowId || !canManage) return
     setProposalsOpen(true)
     setProposalsLoading(true)
     setProposalsError(null)
@@ -7093,17 +7093,19 @@ function ValidateTab({
                 Saved outputs from past runs. The optimizer compares trial configurations against these.
               </div>
             </div>
-            <button
-              onClick={handleProposeTestCases}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '4px 10px', fontSize: 11, fontWeight: 600, fontFamily: 'inherit',
-                borderRadius: 5, border: '1px solid #d1d5db', backgroundColor: '#fff',
-                color: '#374151', cursor: 'pointer',
-              }}
-            >
-              <Sparkles style={{ width: 11, height: 11 }} /> Suggest from history
-            </button>
+            {canManage && (
+              <button
+                onClick={handleProposeTestCases}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 10px', fontSize: 11, fontWeight: 600, fontFamily: 'inherit',
+                  borderRadius: 5, border: '1px solid #d1d5db', backgroundColor: '#fff',
+                  color: '#374151', cursor: 'pointer',
+                }}
+              >
+                <Sparkles style={{ width: 11, height: 11 }} /> Suggest from history
+              </button>
+            )}
           </div>
 
           {expectedOutputs.length === 0 ? (
@@ -7112,7 +7114,9 @@ function ValidateTab({
               padding: '14px 16px', border: '2px dashed #e5e7eb', borderRadius: 8, marginTop: 4,
             }}>
               <div style={{ fontSize: 12, color: '#6b7280', textAlign: 'center' }}>
-                None saved yet. Run the workflow at least once, then "Suggest from history" to nominate candidates.
+                {canManage
+                  ? 'None saved yet. Run the workflow at least once, then "Suggest from history" to nominate candidates.'
+                  : 'None saved yet. Only the workflow owner or a team admin can add expected outputs.'}
               </div>
             </div>
           ) : (

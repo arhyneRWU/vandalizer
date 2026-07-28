@@ -1617,6 +1617,8 @@ async def accept_test_cases(
             workflow_id, user, body.session_ids,
             label_overrides=body.label_overrides,
         )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
