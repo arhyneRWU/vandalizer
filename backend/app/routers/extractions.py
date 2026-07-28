@@ -2173,6 +2173,20 @@ async def apply_extraction_optimization(
     # Normalize missing body to a defaults instance — UI callers don't send one.
     body = req or ApplyExtractionOptimizationRequest()
 
+    if run.tied_with_baseline and not body.force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "tied_with_baseline",
+                "message": (
+                    "The winning configuration is statistically tied with the "
+                    "search set's current settings (within judge noise), so the "
+                    "data doesn't justify a config change. Re-submit with "
+                    "force=true to apply anyway."
+                ),
+            },
+        )
+
     # Cross-field apply-gate. Only meaningful when the run actually evaluated
     # rules (winner_cross_field_summary populated and has a decisive pass_rate).
     if (

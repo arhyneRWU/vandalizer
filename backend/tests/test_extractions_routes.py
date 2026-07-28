@@ -871,6 +871,9 @@ class TestExtractionsRoutes:
         run.status = "completed"
         run.best_config = {"model": "claude-sonnet", "strategy": "two-pass"}
         run.previous_override = None
+        # Explicit False — a bare MagicMock attribute is truthy, which would
+        # trip the tied-with-baseline apply gate.
+        run.tied_with_baseline = False
         run.save = AsyncMock()
 
         with (

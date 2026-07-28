@@ -212,7 +212,7 @@ export function WorkflowEditorPanel() {
   const { user } = useAuth()
   const shareLink = useShareLink()
   const confirm = useConfirm()
-  const { openWorkflowId, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession, selectedDocUuids, bumpActivitySignal, activeProjectUuid } = useWorkspace()
+  const { openWorkflowId, workflowOpenSignal, openWorkflowShareToken, openWorkflow, closeWorkflow, consumeWorkflowSession, selectedDocUuids, bumpActivitySignal, activeProjectUuid } = useWorkspace()
   const [workflow, setWorkflow] = useState<Workflow | null>(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<Tab>('design')
@@ -290,13 +290,16 @@ export function WorkflowEditorPanel() {
 
   useEffect(() => { refresh() }, [refresh])
 
-  // Load results from a pending session (e.g. clicking a completed activity)
+  // Load results from a pending session (e.g. clicking a completed activity).
+  // workflowOpenSignal reruns this when a rail click re-opens the workflow
+  // that's already on screen (switching between two runs of it), since
+  // openWorkflowId alone doesn't change in that case.
   useEffect(() => {
     const sid = consumeWorkflowSession()
     if (sid) {
       runner.loadSession(sid)
     }
-  }, [openWorkflowId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [openWorkflowId, workflowOpenSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch quality status on mount
   useEffect(() => {
@@ -6429,7 +6432,7 @@ function ValidateTab({
   }, [workflowId])
 
   const handleProposeTestCases = async () => {
-    if (!workflowId) return
+    if (!workflowId || !canManage) return
     setProposalsOpen(true)
     setProposalsLoading(true)
     setProposalsError(null)
@@ -7093,17 +7096,19 @@ function ValidateTab({
                 Saved outputs from past runs. The optimizer compares trial configurations against these.
               </div>
             </div>
-            <button
-              onClick={handleProposeTestCases}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '4px 10px', fontSize: 11, fontWeight: 600, fontFamily: 'inherit',
-                borderRadius: 5, border: '1px solid #d1d5db', backgroundColor: '#fff',
-                color: '#374151', cursor: 'pointer',
-              }}
-            >
-              <Sparkles style={{ width: 11, height: 11 }} /> Suggest from history
-            </button>
+            {canManage && (
+              <button
+                onClick={handleProposeTestCases}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 10px', fontSize: 11, fontWeight: 600, fontFamily: 'inherit',
+                  borderRadius: 5, border: '1px solid #d1d5db', backgroundColor: '#fff',
+                  color: '#374151', cursor: 'pointer',
+                }}
+              >
+                <Sparkles style={{ width: 11, height: 11 }} /> Suggest from history
+              </button>
+            )}
           </div>
 
           {expectedOutputs.length === 0 ? (
@@ -7112,7 +7117,9 @@ function ValidateTab({
               padding: '14px 16px', border: '2px dashed #e5e7eb', borderRadius: 8, marginTop: 4,
             }}>
               <div style={{ fontSize: 12, color: '#6b7280', textAlign: 'center' }}>
-                None saved yet. Run the workflow at least once, then "Suggest from history" to nominate candidates.
+                {canManage
+                  ? 'None saved yet. Run the workflow at least once, then "Suggest from history" to nominate candidates.'
+                  : 'None saved yet. Only the workflow owner or a team admin can add expected outputs.'}
               </div>
             </div>
           ) : (

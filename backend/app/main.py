@@ -16,7 +16,7 @@ from app.exceptions import AppError
 from app.middleware.csrf import CSRFMiddleware
 from app.observability import init_sentry
 from app.rate_limit import limiter
-from app.routers import activity, admin, audit, auth, automations, browser_automation, certification, chat, config, credentials, demo, documents, extractions, feedback, feedback_prompt, files, folders, graph_webhooks, knowledge, library, mgmt, notifications, office, optimizer_inbox, organizations, projects, reviews, spaces, support, teams, telemetry, verification, workflows
+from app.routers import activity, admin, audit, auth, automations, browser_automation, certification, chat, config, credentials, demo, documents, extractions, feedback, feedback_admin, feedback_prompt, files, folders, graph_webhooks, knowledge, library, mgmt, notifications, office, optimizer_inbox, organizations, projects, reviews, spaces, support, teams, telemetry, verification, workflows
 
 
 @lru_cache
@@ -211,6 +211,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(library.router, prefix="/api/library", tags=["library"])
 app.include_router(feedback.router, prefix="/api/feedback", tags=["feedback"])
+app.include_router(feedback_admin.router, prefix="/api/feedback/admin", tags=["feedback-admin"])
 app.include_router(verification.router, prefix="/api/verification", tags=["verification"])
 app.include_router(office.router, prefix="/api/office", tags=["office"])
 app.include_router(automations.router, prefix="/api/automations", tags=["automations"])

@@ -13,6 +13,7 @@ import { TriCounter } from '../shared/TriCounter'
 import { TrialQueryDeltas } from '../shared/TrialQueryDeltas'
 import { ReproducibilityPanel } from '../shared/ReproducibilityPanel'
 import { CrossJudgeNote } from '../shared/CrossJudgeNote'
+import { TermDef } from '../shared/TermDef'
 import { DOMAIN_LABELS } from '../shared/labels'
 
 interface Props {
@@ -139,7 +140,21 @@ export function OptimizationResults({
         }
         bottomSlot={
           (winningPerQuery?.length ?? 0) > 0 && (defaultPerQuery?.length ?? 0) > 0
-            ? <TriCounter optimized={winningPerQuery} baseline={defaultPerQuery} />
+            ? (
+              <div>
+                {/* The counter is computed on the training slice while the CI
+                    above uses the holdout slice — without this caption the two
+                    read as contradictory counts over the same queries. */}
+                {holdoutHeadline && (
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 6, lineHeight: 1.5 }}>
+                    Per-query outcomes below are from the {trainCount ?? ''} training
+                    quer{trainCount === 1 ? 'y' : 'ies'}; the significance test above uses
+                    the {holdoutCount ?? ''} held-out quer{holdoutCount === 1 ? 'y' : 'ies'}.
+                  </div>
+                )}
+                <TriCounter optimized={winningPerQuery} baseline={defaultPerQuery} />
+              </div>
+            )
             : null
         }
       />
@@ -152,6 +167,33 @@ export function OptimizationResults({
           primaryScore={run.optimized_score ?? 0}
           primaryJudge={run.judge_model ?? null}
         />
+      )}
+
+      {/* Significance-gated outcome banner. When the optimizer's best trial
+          is statistically tied with the KB's current config (within 2σ of the
+          blended judge noise — the same gate that sets tied_with_baseline on
+          the backend), apply is disabled and we explain why — otherwise we'd
+          be writing a config change the data can't justify. Mirrors the
+          extraction and workflow panels. */}
+      {run.tied_with_baseline && (
+        <div
+          role="status"
+          style={{
+            padding: '10px 14px', borderRadius: 6, fontSize: 13,
+            background: 'rgba(245, 158, 11, 0.08)',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+            color: '#fbbf24',
+            display: 'flex', flexDirection: 'column', gap: 4,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>No significant improvement</div>
+          <div style={{ color: '#d1d5db' }}>
+            The best trial was within the <TermDef term="noise-floor">judge's measurement noise</TermDef>{' '}
+            (±{((run.judge_variance ?? 0.02) * 80).toFixed(1)} pts confidence interval)
+            of your current settings. Apply is disabled — your settings already
+            perform as well as anything we tried.
+          </div>
+        </div>
       )}
 
       {/* Best config + Apply / Revert. ``isAlreadyApplied`` is true if this
@@ -167,7 +209,7 @@ export function OptimizationResults({
             || (!run.applied_at && !!run.options?.apply_on_finish)
           }
           canRevert={!!(run.applied_at && !run.reverted_at && onRevert)}
-          canManage={canManage}
+          canManage={canManage && !run.tied_with_baseline}
           onApply={onApply}
           applying={applying}
           onRevert={onRevert}

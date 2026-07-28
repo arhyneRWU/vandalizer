@@ -2,18 +2,22 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Navigate, useNavigate, useSearch } from '@tanstack/react-router'
 import {
   ArrowLeft, Check, MessageSquare, Send, Plus, Paperclip, Pencil, X, Loader2, Link2, Tag,
-  Eye, UserPlus, Search, Flag, Lock, Layers,
+  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles,
 } from 'lucide-react'
 import { PageLayout } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
 import { useToast } from '../contexts/ToastContext'
 import { useConfirm } from '../components/shared/useConfirm'
 import * as supportApi from '../api/support'
+import {
+  listPositiveFeedback, getPositiveFeedbackStats,
+  type PositiveFeedbackItem, type PositiveFeedbackStats,
+} from '../api/feedback'
 import type {
   SupportTicket, SupportTicketSummary, SupportAttachment,
 } from '../types/support'
 
-type View = 'list' | 'new' | 'chat'
+type View = 'list' | 'new' | 'chat' | 'whats_working'
 type StatusFilter = 'all' | 'open' | 'in_progress' | 'closed'
 type PriorityFilter = 'all' | 'low' | 'normal' | 'high'
 type ClassificationFilter = 'all' | 'bug' | 'enhancement' | 'feature_request'
@@ -51,6 +55,11 @@ const CLASSIFICATION_LABELS: Record<string, string> = {
 }
 
 type Stats = { total: number; open: number; in_progress: number; closed: number }
+
+const statCardStyle = (color: string): React.CSSProperties => ({
+  flex: 1, padding: '16px 20px', background: '#fff', borderRadius: 'var(--ui-radius, 12px)',
+  border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
+})
 
 export default function SupportCenter() {
   const { user } = useAuth()
@@ -158,7 +167,11 @@ export default function SupportCenter() {
           currentUserId={user.user_id}
           onNew={() => setView('new')}
           onSelect={openTicket}
+          onWhatsWorking={() => setView('whats_working')}
         />
+      )}
+      {view === 'whats_working' && (
+        <WhatsWorkingView onBack={() => setView('list')} />
       )}
       {view === 'new' && (
         <NewTicketView
@@ -181,6 +194,142 @@ export default function SupportCenter() {
 }
 
 // ---------------------------------------------------------------------------
+// What's Working — the read home for positive signal (chat thumbs-up with a
+// comment, high extraction star ratings, and off-ticket ProductFeedback). The
+// mirror of the ticket queue: these never needed triage, they just never had a
+// place anyone looked.
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_SOURCE_META: Record<string, { label: string; color: string }> = {
+  chat: { label: 'Chat', color: '#3b82f6' },
+  extraction: { label: 'Extraction', color: '#8b5cf6' },
+  product: { label: 'Shared', color: '#ec4899' },
+}
+
+function WhatsWorkingView({ onBack }: { onBack: () => void }) {
+  const { toast } = useToast()
+  const [items, setItems] = useState<PositiveFeedbackItem[]>([])
+  const [stats, setStats] = useState<PositiveFeedbackStats | null>(null)
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'chat' | 'extraction' | 'product'>('all')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    const src = sourceFilter === 'all' ? undefined : sourceFilter
+    Promise.all([listPositiveFeedback(src, 100), getPositiveFeedbackStats()])
+      .then(([feed, s]) => {
+        if (cancelled) return
+        setItems(feed.items)
+        setStats(s)
+      })
+      .catch(() => { if (!cancelled) toast('Failed to load feedback', 'error') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [sourceFilter, toast])
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button type="button" onClick={onBack} aria-label="Back to tickets"
+          style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4, color: '#6b7280' }}>
+          <ArrowLeft size={20} />
+        </button>
+        <Heart size={20} color="#ec4899" />
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>What&rsquo;s Working</h1>
+          <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>
+            The positive signal users leave — praise, high ratings, and ideas.
+          </p>
+        </div>
+      </div>
+
+      {/* Stats cards */}
+      {stats && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <div style={statCardStyle('#ec4899')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#ec4899' }}>{stats.positive_last_7_days}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Positive · last 7 days</div>
+          </div>
+          <div style={statCardStyle('#22c55e')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#22c55e' }}>
+              {stats.thumbs_up_rate == null ? '—' : `${Math.round(stats.thumbs_up_rate * 100)}%`}
+            </div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Chat thumbs-up rate</div>
+          </div>
+          <div style={statCardStyle('#3b82f6')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{stats.by_source.chat}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Chat up-votes</div>
+          </div>
+          <div style={statCardStyle('#8b5cf6')}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: '#8b5cf6' }}>{stats.by_source.extraction}</div>
+            <div style={{ fontSize: 13, color: '#6b7280' }}>Great extractions</div>
+          </div>
+        </div>
+      )}
+
+      {/* Source filter */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {(['all', 'chat', 'extraction', 'product'] as const).map((s) => {
+          const active = sourceFilter === s
+          const label = s === 'all' ? 'All' : FEEDBACK_SOURCE_META[s].label
+          return (
+            <button key={s} type="button" onClick={() => setSourceFilter(s)}
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 13, fontWeight: 600,
+                cursor: 'pointer', border: `1px solid ${active ? '#ec4899' : '#e5e7eb'}`,
+                background: active ? '#fdf2f8' : '#fff', color: active ? '#be185d' : '#6b7280',
+              }}>
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Feed */}
+      <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', overflow: 'hidden' }}>
+        {loading ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
+            <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : items.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af', fontSize: 14 }}>
+            <Sparkles size={24} style={{ margin: '0 auto 8px', display: 'block', opacity: 0.5 }} />
+            No positive feedback yet. As users leave praise and high ratings, it lands here.
+          </div>
+        ) : (
+          items.map((it, i) => {
+            const meta = FEEDBACK_SOURCE_META[it.source] ?? { label: it.source, color: '#6b7280' }
+            return (
+              <div key={i} style={{
+                padding: '14px 20px', borderBottom: i < items.length - 1 ? '1px solid #f3f4f6' : 'none',
+                display: 'flex', gap: 12, alignItems: 'flex-start',
+              }}>
+                <span style={{
+                  flexShrink: 0, marginTop: 2, padding: '2px 8px', borderRadius: 999, fontSize: 11,
+                  fontWeight: 600, background: `${meta.color}18`, color: meta.color,
+                }}>
+                  {it.sentiment === 'idea' ? 'Idea' : meta.label}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, color: '#111827', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {it.message}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
+                    {timeAgo(it.created_at)}
+                  </div>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // List view — full queue with stats, status filter, and requester-aware rows
 // ---------------------------------------------------------------------------
 
@@ -190,7 +339,7 @@ function ListView({
   classificationFilter, onClassificationFilterChange,
   tagFilter, onTagFilterChange, allTags,
   searchInput, onSearchInputChange, activeSearch,
-  currentUserId, onNew, onSelect,
+  currentUserId, onNew, onSelect, onWhatsWorking,
 }: {
   tickets: SupportTicketSummary[]
   stats: Stats | null
@@ -210,6 +359,7 @@ function ListView({
   currentUserId: string
   onNew: () => void
   onSelect: (uuid: string) => void
+  onWhatsWorking: () => void
 }) {
   const hasFilters =
     statusFilter !== 'open' || priorityFilter !== 'all' ||
@@ -221,10 +371,6 @@ function ListView({
     onTagFilterChange('')
     onSearchInputChange('')
   }
-  const statCardStyle = (color: string): React.CSSProperties => ({
-    flex: 1, padding: '16px 20px', background: '#fff', borderRadius: 'var(--ui-radius, 12px)',
-    border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
-  })
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -239,16 +385,29 @@ function ListView({
             </p>
           </div>
         </div>
-        <button
-          onClick={onNew}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)', border: 'none',
-            background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          }}
-        >
-          <Plus size={16} /> New Ticket
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={onWhatsWorking}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)',
+              border: '1px solid #e5e7eb', background: '#fff',
+              color: '#374151', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            <Heart size={16} color="#ec4899" /> What&rsquo;s Working
+          </button>
+          <button
+            onClick={onNew}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 'var(--ui-radius, 12px)', border: 'none',
+              background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            <Plus size={16} /> New Ticket
+          </button>
+        </div>
       </div>
 
       {/* Stats cards */}
@@ -444,19 +603,31 @@ function ListView({
                 && t.last_message_is_support_reply === false
                 && !t.read_by?.includes(currentUserId)
               return (
-                <button
+                // Not a <button>: browsers block text selection inside buttons,
+                // and agents need to copy the subject/preview text from the row.
+                <div
                   key={t.uuid}
-                  onClick={() => onSelect(t.uuid)}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (window.getSelection()?.toString()) return
+                    onSelect(t.uuid)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onSelect(t.uuid)
+                    }
+                  }}
                   style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     width: '100%', padding: '12px 20px', borderBottom: '1px solid #f3f4f6',
                     background: needsAttention ? '#fffbeb' : '#fff',
-                    border: 'none', borderTop: 'none', borderLeft: 'none', borderRight: 'none',
-                    cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                    cursor: 'pointer', textAlign: 'left',
                     transition: 'background 0.1s',
                   }}
-                  onMouseEnter={(e) => { if (!needsAttention) (e.currentTarget as HTMLButtonElement).style.background = '#f9fafb' }}
-                  onMouseLeave={(e) => { if (!needsAttention) (e.currentTarget as HTMLButtonElement).style.background = '#fff' }}
+                  onMouseEnter={(e) => { if (!needsAttention) (e.currentTarget as HTMLDivElement).style.background = '#f9fafb' }}
+                  onMouseLeave={(e) => { if (!needsAttention) (e.currentTarget as HTMLDivElement).style.background = '#fff' }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -527,7 +698,7 @@ function ListView({
                   <div style={{ fontSize: 12, color: '#9ca3af', flexShrink: 0, marginLeft: 16 }}>
                     {timeAgo(t.updated_at || t.created_at)}
                   </div>
-                </button>
+                </div>
               )
             })}
           </div>
@@ -1625,7 +1796,7 @@ function WatcherBar({
 // Tag editor — agent-only chips with add/remove
 // ---------------------------------------------------------------------------
 
-function TagEditor({
+export function TagEditor({
   tags, onChange,
 }: {
   tags: string[]
@@ -1633,20 +1804,54 @@ function TagEditor({
 }) {
   const [draft, setDraft] = useState('')
   const [adding, setAdding] = useState(false)
+  // null = not fetched yet; fetched lazily the first time the editor opens
+  const [knownTags, setKnownTags] = useState<string[] | null>(null)
+  const [highlight, setHighlight] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const commit = () => {
-    const t = draft.trim()
-    if (!t) { setDraft(''); setAdding(false); return }
-    if (tags.includes(t)) { setDraft(''); setAdding(false); return }
-    onChange([...tags, t])
+  const startAdding = () => {
+    setAdding(true)
+    setHighlight(0)
+    if (knownTags === null) {
+      supportApi.listAllTags()
+        .then((r) => setKnownTags(r.tags))
+        .catch(() => setKnownTags([]))
+    }
+  }
+
+  const close = () => {
     setDraft('')
     setAdding(false)
+  }
+
+  const apply = (t: string) => {
+    const clean = t.trim()
+    if (clean && !tags.includes(clean)) {
+      onChange([...tags, clean])
+      // New tags become suggestions immediately, without a refetch.
+      setKnownTags((prev) => (prev && !prev.includes(clean) ? [...prev, clean] : prev))
+    }
+    close()
   }
 
   const remove = (t: string) => {
     onChange(tags.filter((x) => x !== t))
   }
+
+  const query = draft.trim().toLowerCase()
+  const suggestions = (knownTags ?? [])
+    .filter((t) => !tags.includes(t))
+    .filter((t) => !query || t.toLowerCase().includes(query))
+  // Offer "create" only when the typed text isn't already an existing tag
+  // (on this ticket or any other) — that's the whole point of the dropdown.
+  const isKnown = (knownTags ?? []).some((t) => t.toLowerCase() === query)
+    || tags.some((t) => t.toLowerCase() === query)
+  const canCreate = query.length > 0 && !isKnown
+  const options: { label: string; value: string; isCreate: boolean }[] = [
+    ...suggestions.map((t) => ({ label: t, value: t, isCreate: false })),
+    ...(canCreate ? [{ label: draft.trim(), value: draft.trim(), isCreate: true }] : []),
+  ]
+  const activeIndex = Math.min(highlight, Math.max(0, options.length - 1))
 
   return (
     <div style={{
@@ -1684,26 +1889,93 @@ function TagEditor({
         </span>
       ))}
       {adding ? (
-        <input
-          ref={inputRef}
-          value={draft}
-          autoFocus
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') { e.preventDefault(); commit() }
-            if (e.key === 'Escape') { setDraft(''); setAdding(false) }
-          }}
-          placeholder="tag…"
-          aria-label="Add tag"
-          style={{
-            fontSize: 12, padding: '2px 8px', border: '1px solid #d1d5db',
-            borderRadius: 9999, outline: 'none', minWidth: 80, fontFamily: 'inherit',
-          }}
-        />
+        <span style={{ position: 'relative', display: 'inline-flex' }}>
+          <input
+            ref={inputRef}
+            value={draft}
+            autoFocus
+            onChange={(e) => { setDraft(e.target.value); setHighlight(0) }}
+            onBlur={close}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setHighlight((h) => Math.min(h + 1, options.length - 1))
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setHighlight((h) => Math.max(h - 1, 0))
+              }
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                if (options[activeIndex]) apply(options[activeIndex].value)
+              }
+              if (e.key === 'Escape') { e.preventDefault(); close() }
+            }}
+            placeholder="Search or create…"
+            aria-label="Add tag"
+            role="combobox"
+            aria-expanded={true}
+            aria-controls="tag-editor-listbox"
+            style={{
+              fontSize: 12, padding: '2px 8px', border: '1px solid #d1d5db',
+              borderRadius: 9999, outline: 'none', minWidth: 120, fontFamily: 'inherit',
+            }}
+          />
+          <div
+            id="tag-editor-listbox"
+            role="listbox"
+            aria-label="Existing tags"
+            style={{
+              position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 30,
+              minWidth: 200, maxHeight: 220, overflowY: 'auto', padding: 4,
+              background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+            }}
+          >
+            {knownTags === null && (
+              <div style={{ fontSize: 12, color: '#9ca3af', padding: '6px 8px' }}>
+                Loading tags…
+              </div>
+            )}
+            {knownTags !== null && options.length === 0 && (
+              <div style={{ fontSize: 12, color: '#9ca3af', padding: '6px 8px' }}>
+                {query ? 'Already tagged' : 'No existing tags — type to create one'}
+              </div>
+            )}
+            {options.map((opt, i) => (
+              <button
+                key={opt.isCreate ? '__create__' : opt.value}
+                role="option"
+                aria-selected={i === activeIndex}
+                // preventDefault keeps the input focused so onBlur doesn't
+                // close the dropdown before the click lands.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => apply(opt.value)}
+                onMouseEnter={() => setHighlight(i)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                  textAlign: 'left', fontSize: 12, padding: '6px 8px',
+                  border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                  background: i === activeIndex ? '#eef2ff' : 'transparent',
+                  color: opt.isCreate ? '#4338ca' : '#111827',
+                  borderTop: opt.isCreate && suggestions.length > 0 ? '1px solid #e5e7eb' : 'none',
+                  fontWeight: opt.isCreate ? 600 : 400,
+                }}
+              >
+                {opt.isCreate ? (
+                  <>
+                    <Plus size={11} /> Create new tag: “{opt.label}”
+                  </>
+                ) : (
+                  opt.label
+                )}
+              </button>
+            ))}
+          </div>
+        </span>
       ) : (
         <button
-          onClick={() => setAdding(true)}
+          onClick={startAdding}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 3,
             fontSize: 12, padding: '2px 8px', borderRadius: 9999,

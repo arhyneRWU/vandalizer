@@ -1617,6 +1617,8 @@ async def accept_test_cases(
             workflow_id, user, body.session_ids,
             label_overrides=body.label_overrides,
         )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -2009,6 +2011,9 @@ class ApplyWorkflowOptimizationRequest(BaseModel):
     apply-whole-config behavior.
     """
     step_ids: list[str] | None = None
+    # Override the tied-with-baseline gate. Use when the caller has reviewed
+    # the data and still wants the tied config applied.
+    force: bool = False
 
 
 @router.post("/{workflow_id}/optimize/{run_uuid}/apply")
@@ -2044,6 +2049,19 @@ async def apply_workflow_optimization(
         )
     if not run.best_config:
         raise HTTPException(status_code=400, detail="Run has no best_config to apply")
+    if run.tied_with_baseline and not (req and req.force):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "tied_with_baseline",
+                "message": (
+                    "The winning configuration is statistically tied with the "
+                    "workflow's current settings (within judge noise), so the data "
+                    "doesn't justify a config change. Re-submit with force=true to "
+                    "apply anyway."
+                ),
+            },
+        )
 
     # Snapshot the previous override so revert is exact.
     run.previous_override = wf.config_override
