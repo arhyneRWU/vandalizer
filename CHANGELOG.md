@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Duplicate model tags could silently route a request to a different model than the user selected.** `get_llm_model_by_name` resolves a selector by scanning model names first and tags second, returning the first match either way, and user model preferences are stored and returned as *tags* — so two models sharing a tag made the stored preference ambiguous and let list order decide which model actually answered, with no error and nothing in the UI indicating a substitution. The same first-match precedence meant a model whose **name** equalled another model's **tag** would capture that tag's traffic. Neither the admin form nor `POST`/`PUT /api/admin/config/models` rejected either arrangement. Model names and tags are now validated as one case-insensitive, whitespace-trimmed identifier namespace: the backend rejects a collision with **HTTP 409** naming the conflicting value and the model already holding it (via a new `ensure_model_identity_available` in the existing `name_conflicts` service, matching how workflow/KB/extraction name conflicts are already handled), and the model form warns before submitting. Editing a model no longer collides with itself. Validation runs only on create and update, so existing installs that already contain a collision keep working and can be repaired in place — nothing is renamed automatically.
+
 ## [v4.9.0] - 2026-07-23
 
 ### Fixed

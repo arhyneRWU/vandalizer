@@ -148,3 +148,107 @@ class TestNextAvailableName:
     async def test_gives_up_and_returns_base_rather_than_failing(self):
         taken = AsyncMock(return_value=True)
         assert await nc.next_available_name("Everything Taken", taken) == "Everything Taken"
+
+
+# ---------------------------------------------------------------------------
+# Model identity: names and tags share one namespace
+# ---------------------------------------------------------------------------
+
+
+def _models(*pairs: tuple[str, str]) -> list[dict]:
+    return [{"name": n, "tag": t} for n, t in pairs]
+
+
+class TestEnsureModelIdentityAvailable:
+    def test_unique_name_and_tag_is_allowed(self):
+        nc.ensure_model_identity_available(
+            name="gpt-oss", tag="fast", models=_models(("qwen-large", "local")),
+        )
+
+    def test_duplicate_name_rejected(self):
+        with pytest.raises(nc.DuplicateNameError, match="qwen-large"):
+            nc.ensure_model_identity_available(
+                name="qwen-large", tag="fast", models=_models(("qwen-large", "local")),
+            )
+
+    def test_duplicate_name_differing_only_by_case_rejected(self):
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="QWEN-Large", tag="fast", models=_models(("qwen-large", "local")),
+            )
+
+    def test_duplicate_tag_rejected(self):
+        with pytest.raises(nc.DuplicateNameError, match="local"):
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="local", models=_models(("qwen-large", "local")),
+            )
+
+    def test_duplicate_tag_differing_only_by_case_rejected(self):
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="LOCAL", models=_models(("qwen-large", "local")),
+            )
+
+    def test_name_colliding_with_another_models_tag_rejected(self):
+        # Resolution tries names before tags, so a new model named "local"
+        # would capture every request meant for the existing model's tag.
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="local", tag="reasoning", models=_models(("qwen-large", "local")),
+            )
+
+    def test_tag_colliding_with_another_models_name_rejected(self):
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="qwen-large", models=_models(("qwen-large", "local")),
+            )
+
+    def test_whitespace_around_the_submitted_value_cannot_bypass_the_check(self):
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="  qwen-large  ", tag="fast", models=_models(("qwen-large", "local")),
+            )
+
+    def test_whitespace_around_an_already_stored_value_cannot_bypass_the_check(self):
+        # A tag saved as "local " is indistinguishable from "local" in the admin
+        # UI, so it must still count as taken.
+        with pytest.raises(nc.DuplicateNameError):
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="local", models=_models(("qwen-large", "  local  ")),
+            )
+
+    def test_a_models_own_name_may_equal_its_own_tag(self):
+        # Same model either way, so nothing is ambiguous.
+        nc.ensure_model_identity_available(
+            name="local", tag="local", models=_models(("qwen-large", "fast")),
+        )
+
+    def test_update_excludes_the_model_being_edited(self):
+        nc.ensure_model_identity_available(
+            name="qwen-large", tag="local",
+            models=_models(("qwen-large", "local"), ("gpt-oss", "fast")),
+            exclude_index=0,
+        )
+
+    def test_update_still_collides_with_a_different_model(self):
+        with pytest.raises(nc.DuplicateNameError, match="gpt-oss"):
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="local",
+                models=_models(("qwen-large", "local"), ("gpt-oss", "fast")),
+                exclude_index=0,
+            )
+
+    def test_error_names_the_conflicting_value_and_the_model_holding_it(self):
+        with pytest.raises(nc.DuplicateNameError) as exc:
+            nc.ensure_model_identity_available(
+                name="gpt-oss", tag="local", models=_models(("qwen-large", "local")),
+            )
+        message = str(exc.value)
+        assert "local" in message and "qwen-large" in message
+
+    def test_entries_that_are_not_dicts_are_ignored(self):
+        # available_models is a free-form list on SystemConfig; the resolver
+        # guards with isinstance, so validation must not crash on junk.
+        nc.ensure_model_identity_available(
+            name="gpt-oss", tag="fast", models=["junk", None, {"name": "qwen", "tag": "local"}],
+        )

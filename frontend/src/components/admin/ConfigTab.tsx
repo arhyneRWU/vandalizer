@@ -21,6 +21,7 @@ import type {
   SystemConfigData,
 } from '../../api/admin'
 import { fileToConstrainedDataUrl } from '../../utils/imageResize'
+import { getModelIdentityError } from '../../utils/modelIdentity'
 import { ModelCharacterBars } from '../ModelEffortPicker'
 import type { ModelInfo } from '../../types/workflow'
 
@@ -742,6 +743,16 @@ export function ConfigTab() {
     }
     if (!newModel.tag.trim()) {
       setError('A tag is required (set one under Advanced settings)')
+      return
+    }
+    // Names and tags are one namespace: a collision makes a user's saved model
+    // selector resolve to whichever model comes first. The backend rejects this
+    // with a 409; warn here so the admin sees it before submitting.
+    const identityError = getModelIdentityError(
+      newModel.name, newModel.tag, cfg?.available_models ?? [], editingModelIndex,
+    )
+    if (identityError) {
+      setError(identityError)
       return
     }
     setSavingModel(true)
