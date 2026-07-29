@@ -33,6 +33,7 @@ const JoinProjectAccept = lazy(() => import('./pages/JoinProjectAccept'))
 const Organizations = lazy(() => import('./pages/Organizations'))
 const Credentials = lazy(() => import('./pages/Credentials'))
 const Reviews = lazy(() => import('./pages/Reviews'))
+const TuningSuggestions = lazy(() => import('./pages/TuningSuggestions'))
 const ReviewDetail = lazy(() => import('./pages/ReviewDetail'))
 const Login = lazy(() => import('./pages/Login'))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
@@ -74,6 +75,7 @@ const ROUTE_TITLES: Array<[string, string]> = [
   ['/teams', 'Teams'],
   ['/organizations', 'Organizations'],
   ['/verification', 'Verification'],
+  ['/tuning', 'Tuning suggestions'],
   ['/support', 'Support'],
   ['/automation', 'Automations'],
   ['/docs', 'Docs'],
@@ -400,6 +402,16 @@ const reviewsRoute = createRoute({
   ),
 })
 
+const tuningRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/tuning',
+  component: () => (
+    <ProtectedRoute>
+      <TuningSuggestions />
+    </ProtectedRoute>
+  ),
+})
+
 const reviewDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/reviews/$uuid',
@@ -478,6 +490,7 @@ const routeTree = rootRoute.addChildren([
   reviewsRoute,
   reviewDetailRoute,
   approvalsRoute,
+  tuningRoute,
 ])
 
 export const router = createRouter({ routeTree })

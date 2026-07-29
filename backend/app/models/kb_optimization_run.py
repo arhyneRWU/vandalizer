@@ -211,6 +211,12 @@ class KBOptimizationRun(Document):
     # Shape documented on ``build_apply_preview``.
     apply_preview: Optional[dict] = None
 
+    # Optimizer-inbox triage. A candidate the user reviewed and rejected is
+    # dismissed rather than deleted, so the run stays auditable (and visible in
+    # the per-KB history + admin activity view) while dropping out of the inbox.
+    dismissed_at: Optional[datetime.datetime] = None
+    dismissed_by: Optional[str] = None
+
     error_message: Optional[str] = None
     # Structured failure classification — populated alongside ``error_message``
     # so the UI can render plain-English remediation (e.g. "Add documents to

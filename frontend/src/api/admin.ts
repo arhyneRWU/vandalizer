@@ -958,3 +958,76 @@ export function getAdminKnowledgeBases(params?: { search?: string; limit?: numbe
   const q = qs.toString()
   return apiFetch<AdminKBListResponse>(`/api/admin/knowledge-bases${q ? `?${q}` : ''}`)
 }
+
+// ──────────────────────────────────────────
+// Optimizer activity (read-only operator view over all three optimizers)
+// ──────────────────────────────────────────
+
+export interface OptimizerActivityRun {
+  surface: 'kb' | 'extraction' | 'workflow'
+  run_uuid: string
+  item_id: string
+  /** Null when the tuned item has since been deleted. */
+  item_name: string | null
+  item_deleted: boolean
+  user_id: string | null
+  user_email: string | null
+  status: string
+  /** Null for user-launched runs; a signal name for auto-triggered ones. */
+  trigger: string | null
+  trigger_detail: Record<string, unknown>
+  started_at: string | null
+  completed_at: string | null
+  baseline_score: number | null
+  optimized_score: number | null
+  tied_with_baseline: boolean
+  tokens_used: number
+  token_budget: number
+  actual_cost_usd: number | null
+  stopped_reason: string | null
+  error_message: string | null
+  error_code: string | null
+  phase: string | null
+  progress_message: string | null
+  is_live: boolean
+  dismissed_at: string | null
+}
+
+export interface OptimizerActivitySummary {
+  window_days: number
+  total: number
+  by_status: Record<string, number>
+  by_surface: Record<string, number>
+  auto_triggered: number
+  user_launched: number
+  failed: number
+  applied: number
+  dismissed: number
+  pending_review: number
+  tokens_used: number
+  failure_reasons: { reason: string; count: number }[]
+  /** True when a per-surface fetch hit the limit, so counts are a floor. */
+  truncated: boolean
+}
+
+export interface OptimizerActivityResponse {
+  runs: OptimizerActivityRun[]
+  summary: OptimizerActivitySummary
+}
+
+export function getOptimizerActivity(params?: {
+  days?: number
+  surface?: string
+  status?: string
+  trigger?: 'auto' | 'user'
+  limit?: number
+}) {
+  const qs = new URLSearchParams()
+  if (params?.days) qs.set('days', String(params.days))
+  if (params?.surface) qs.set('surface', params.surface)
+  if (params?.status) qs.set('status', params.status)
+  if (params?.trigger) qs.set('trigger', params.trigger)
+  if (params?.limit) qs.set('limit', String(params.limit))
+  const q = qs.toString()
+  return apiFetch<OptimizerActivityResponse>(`/api/admin/optimizer/activity${q ? `?${q}` : ''}`)
+}

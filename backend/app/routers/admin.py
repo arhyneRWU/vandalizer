@@ -2044,6 +2044,229 @@ async def quality_contract(
 
 
 # ---------------------------------------------------------------------------
+# 18b. GET /optimizer/activity  - Fleet-wide optimizer runs (read-only)
+#
+# The per-item optimizer panels only ever show one item's runs, and the user
+# inbox is access-scoped to what its caller owns. Neither answers "is the
+# optimizer healthy?" — which is how a ten-day run of failures stayed invisible.
+# This endpoint is the operator view: every run across all three surfaces, with
+# failure reasons rolled up. Read-only by construction — no apply/dismiss here,
+# because acting on someone else's item is theirs to do from their inbox.
+# ---------------------------------------------------------------------------
+
+OPTIMIZER_SURFACES = ("kb", "extraction", "workflow")
+
+
+def _failure_reason(run) -> str:
+    """Group key for the failure rollup.
+
+    Prefers the structured ``error_code`` (KB runs set one); otherwise uses a
+    truncated message, since raw exception strings carry ids that would make
+    every failure look unique.
+    """
+    code = getattr(run, "error_code", None)
+    if code:
+        return str(code)
+    message = (getattr(run, "error_message", None) or "").strip()
+    if not message:
+        return "unknown"
+    return message[:120]
+
+
+@router.get("/optimizer/activity")
+async def optimizer_activity(
+    days: int = Query(default=14, ge=1, le=MAX_ANALYTICS_DAYS),
+    surface: Optional[str] = Query(default=None, description="kb | extraction | workflow"),
+    status: Optional[str] = Query(
+        default=None, description="queued | running | completed | failed | cancelled",
+    ),
+    trigger: Optional[str] = Query(
+        default=None, description="'auto' (signal/alert-triggered) or 'user'",
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+):
+    """Every optimizer run in the window, newest first, with a health summary."""
+    await _require_admin(user)
+
+    from app.models.extraction_optimization_run import ExtractionOptimizationRun
+    from app.models.kb_optimization_run import KBOptimizationRun
+    from app.models.knowledge import KnowledgeBase
+    from app.models.search_set import SearchSet
+    from app.models.workflow import Workflow
+    from app.models.workflow_optimization_run import WorkflowOptimizationRun
+    from app.routers.optimizer_inbox import (
+        extraction_run_is_live,
+        kb_run_is_live,
+        workflow_run_is_live,
+    )
+
+    if surface and surface not in OPTIMIZER_SURFACES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"surface must be one of {', '.join(OPTIMIZER_SURFACES)}",
+        )
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    query: dict = {"started_at": {"$gte": cutoff}}
+    if status:
+        query["status"] = status
+    if trigger == "auto":
+        query["options.shadow_trigger"] = {"$exists": True}
+    elif trigger == "user":
+        query["options.shadow_trigger"] = {"$exists": False}
+
+    async def _fetch(model):
+        return await model.find(query).sort("-started_at").limit(limit).to_list()
+
+    kb_runs = [] if surface not in (None, "kb") else await _fetch(KBOptimizationRun)
+    ex_runs = [] if surface not in (None, "extraction") else await _fetch(ExtractionOptimizationRun)
+    wf_runs = [] if surface not in (None, "workflow") else await _fetch(WorkflowOptimizationRun)
+
+    # Bulk-resolve parent items (for display names and live-config checks) and
+    # owners (for "who launched this"), so the row loop stays query-free.
+    kb_by_uuid = {}
+    if kb_runs:
+        kbs = await KnowledgeBase.find(
+            {"uuid": {"$in": list({r.kb_uuid for r in kb_runs if r.kb_uuid})}},
+        ).to_list()
+        kb_by_uuid = {k.uuid: k for k in kbs}
+
+    ss_by_uuid = {}
+    if ex_runs:
+        sets = await SearchSet.find(
+            {"uuid": {"$in": list({r.search_set_uuid for r in ex_runs if r.search_set_uuid})}},
+        ).to_list()
+        ss_by_uuid = {s.uuid: s for s in sets}
+
+    wf_by_id: dict = {}
+    if wf_runs:
+        object_ids = []
+        for r in wf_runs:
+            try:
+                object_ids.append(BsonObjectId(r.workflow_id))
+            except Exception:
+                continue
+        if object_ids:
+            workflows = await Workflow.find({"_id": {"$in": object_ids}}).to_list()
+            wf_by_id = {str(w.id): w for w in workflows}
+
+    all_runs = [
+        ("kb", r, r.kb_uuid, kb_by_uuid.get(r.kb_uuid), kb_run_is_live(r))
+        for r in kb_runs
+    ] + [
+        ("extraction", r, r.search_set_uuid, ss_by_uuid.get(r.search_set_uuid),
+         extraction_run_is_live(r, ss_by_uuid.get(r.search_set_uuid)))
+        for r in ex_runs
+    ] + [
+        ("workflow", r, r.workflow_id, wf_by_id.get(r.workflow_id),
+         workflow_run_is_live(r, wf_by_id.get(r.workflow_id)))
+        for r in wf_runs
+    ]
+
+    user_ids = {getattr(r, "user_id", None) for _, r, _, _, _ in all_runs}
+    user_ids.discard(None)
+    owners = await User.find({"user_id": {"$in": list(user_ids)}}).to_list() if user_ids else []
+    email_by_user = {u.user_id: u.email for u in owners}
+
+    rows = []
+    by_status: dict[str, int] = {}
+    by_surface: dict[str, int] = {}
+    failure_counts: dict[str, int] = {}
+    auto_triggered = pending_review = applied_count = dismissed_count = 0
+    tokens_used_total = 0
+
+    for kind, run, item_id, item_doc, is_live in all_runs:
+        options = run.options or {}
+        shadow_trigger = options.get("shadow_trigger")
+        dismissed_at = getattr(run, "dismissed_at", None)
+        tied = bool(getattr(run, "tied_with_baseline", False))
+        item_name = (
+            (getattr(item_doc, "name", None) or getattr(item_doc, "title", None))
+            if item_doc is not None else None
+        )
+
+        by_status[run.status] = by_status.get(run.status, 0) + 1
+        by_surface[kind] = by_surface.get(kind, 0) + 1
+        if shadow_trigger:
+            auto_triggered += 1
+        if is_live:
+            applied_count += 1
+        if dismissed_at is not None:
+            dismissed_count += 1
+        if run.status == "failed":
+            reason = _failure_reason(run)
+            failure_counts[reason] = failure_counts.get(reason, 0) + 1
+        if (
+            run.status == "completed" and not is_live and not tied
+            and dismissed_at is None and getattr(run, "best_config", None)
+        ):
+            pending_review += 1
+        tokens_used_total += int(getattr(run, "tokens_used", 0) or 0)
+
+        rows.append({
+            "surface": kind,
+            "run_uuid": run.uuid,
+            "item_id": item_id,
+            # Null name = the tuned item has since been deleted.
+            "item_name": item_name,
+            "item_deleted": item_doc is None,
+            "user_id": getattr(run, "user_id", None),
+            "user_email": email_by_user.get(getattr(run, "user_id", None)),
+            "status": run.status,
+            "trigger": shadow_trigger,
+            "trigger_detail": options.get("shadow_trigger_detail") or {},
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "baseline_score": getattr(run, "baseline_default_score", None),
+            "optimized_score": getattr(run, "optimized_score", None),
+            "tied_with_baseline": tied,
+            "tokens_used": getattr(run, "tokens_used", 0),
+            "token_budget": getattr(run, "token_budget", 0),
+            "actual_cost_usd": getattr(run, "actual_cost_usd", None),
+            "stopped_reason": getattr(run, "stopped_reason", None),
+            "error_message": getattr(run, "error_message", None),
+            "error_code": getattr(run, "error_code", None),
+            "phase": getattr(run, "phase", None),
+            "progress_message": getattr(run, "progress_message", None),
+            "is_live": is_live,
+            "dismissed_at": dismissed_at.isoformat() if dismissed_at else None,
+        })
+
+    rows.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+
+    return {
+        "runs": rows[:limit],
+        "summary": {
+            "window_days": days,
+            "total": len(rows),
+            "by_status": by_status,
+            "by_surface": by_surface,
+            "auto_triggered": auto_triggered,
+            "user_launched": len(rows) - auto_triggered,
+            "failed": by_status.get("failed", 0),
+            "applied": applied_count,
+            "dismissed": dismissed_count,
+            # Completed candidates nobody has acted on — the backlog the
+            # support ticket was about.
+            "pending_review": pending_review,
+            "tokens_used": tokens_used_total,
+            "failure_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    failure_counts.items(), key=lambda kv: kv[1], reverse=True,
+                )
+            ],
+            # True when a per-surface fetch hit the cap, so the UI can say the
+            # summary is a floor rather than an exact fleet total.
+            "truncated": any(
+                len(runs) >= limit for runs in (kb_runs, ex_runs, wf_runs)
+            ),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # 19. GET /admin/teams/all  - All teams (admin management view)
 # ---------------------------------------------------------------------------
 

@@ -4,7 +4,7 @@ import {
   Lock, Globe, Zap,
   FileText, FolderTree,
   Mail, Award, KeyRound, PackageOpen,
-  BookOpen,
+  BookOpen, Sparkles,
 } from 'lucide-react'
 import { PageLayout } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
@@ -23,6 +23,7 @@ import { UsageTab } from '../components/admin/UsageTab'
 import { WorkflowsTab } from '../components/admin/WorkflowsTab'
 import { OrganizationsTab } from '../components/admin/OrganizationsTab'
 import { QualityTab } from '../components/admin/QualityTab'
+import { OptimizerTab } from '../components/admin/OptimizerTab'
 import { CertificationsTab } from '../components/admin/CertificationsTab'
 import { EmailAnalyticsTab } from '../components/admin/EmailAnalyticsTab'
 import { DemoTab } from '../components/admin/DemoTab'
@@ -31,7 +32,7 @@ import { TelemetryOptInBanner } from '../components/admin/TelemetryOptInBanner'
 import { ConfigTab } from '../components/admin/ConfigTab'
 import { getFeatureFlags } from '../api/config'
 
-type Tab = 'usage' | 'users' | 'teams' | 'organizations' | 'workflows' | 'quality' | 'knowledgebases' | 'compliance' | 'audit' | 'demo' | 'email' | 'certifications' | 'apikeys' | 'catalog' | 'telemetry' | 'config'
+type Tab = 'usage' | 'users' | 'teams' | 'organizations' | 'workflows' | 'quality' | 'optimizer' | 'knowledgebases' | 'compliance' | 'audit' | 'demo' | 'email' | 'certifications' | 'apikeys' | 'catalog' | 'telemetry' | 'config'
 
 const TABS: { key: Tab; label: string; icon: typeof BarChart3 }[] = [
   { key: 'usage', label: 'Usage', icon: BarChart3 },
@@ -40,6 +41,7 @@ const TABS: { key: Tab; label: string; icon: typeof BarChart3 }[] = [
   { key: 'organizations', label: 'Organizations', icon: FolderTree },
   { key: 'workflows', label: 'Workflows', icon: Workflow },
   { key: 'quality', label: 'Quality', icon: ShieldCheck },
+  { key: 'optimizer', label: 'Optimizer', icon: Sparkles },
   { key: 'knowledgebases', label: 'Knowledge Bases', icon: BookOpen },
   { key: 'compliance', label: 'Compliance', icon: Lock },
   { key: 'audit', label: 'Audit Log', icon: FileText },
@@ -89,7 +91,7 @@ export default function Admin() {
   // endpoints accept a team scope. Tabs whose backends require admin/staff (email,
   // plus everything in hiddenForNonAdmin) stay hidden so we never render a tab that
   // can only 403.
-  const hiddenForNonAdmin = ['config', 'catalog', 'quality', 'knowledgebases', 'compliance', 'demo', 'organizations', 'approvals', 'audit', 'certifications', 'apikeys', 'email', 'teams', 'telemetry']
+  const hiddenForNonAdmin = ['config', 'catalog', 'quality', 'optimizer', 'knowledgebases', 'compliance', 'demo', 'organizations', 'approvals', 'audit', 'certifications', 'apikeys', 'email', 'teams', 'telemetry']
   let visibleTabs = isGlobalAdmin
     ? TABS
     : isStaff
@@ -176,6 +178,7 @@ export default function Admin() {
           {activeTab === 'organizations' && (isGlobalAdmin || isStaff) && <OrganizationsTab />}
           {activeTab === 'workflows' && <WorkflowsTab />}
           {activeTab === 'quality' && <QualityTab />}
+          {activeTab === 'optimizer' && (isGlobalAdmin || isStaff) && <OptimizerTab />}
           {activeTab === 'knowledgebases' && (isGlobalAdmin || isStaff) && <KnowledgeBasesTab canEdit={isGlobalAdmin} />}
           {activeTab === 'compliance' && (isGlobalAdmin || isStaff) && <ComplianceTab />}
           {activeTab === 'audit' && (isGlobalAdmin || isStaff) && <AuditTab />}
