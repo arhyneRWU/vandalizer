@@ -35,6 +35,7 @@ from app.services.llm_service import (
     FIRST_SESSION_SYSTEM_PROMPT,
     HELP_CHAT_SYSTEM_PROMPT,
     KB_CHAT_SYSTEM_PROMPT,
+    NO_DOCUMENT_SYSTEM_PROMPT,
     VANDALIZER_CONTEXT,
 )
 
@@ -179,6 +180,53 @@ def _extract_event_content(event) -> tuple[str | None, bool]:
         if isinstance(event.delta, ThinkingPartDelta):
             return event.delta.content_delta or "", True
     return None, False
+
+
+def select_chat_system_prompt(
+    *,
+    kb_sources: list[dict],
+    have_context: bool,
+    kb_uuid: Optional[str],
+    is_first_session: bool,
+    include_onboarding_context: bool,
+    manifest_block: str = "",
+) -> str:
+    """Pick the system prompt for a chat turn from its context state.
+
+    Extracted from ``chat_stream`` so each branch is unit-testable: the choice
+    is pure, while the generator around it is not.
+
+    Ordered most-grounded first. Every branch returns a prompt that tells the
+    model what it does and does not have — none may return ``None``, because
+    ``create_chat_agent`` turns a falsey prompt into
+    ``DEFAULT_CHAT_SYSTEM_PROMPT``, which carries no grounding rule at all and
+    lets the model answer document-specific questions from invention.
+    """
+    if kb_sources:
+        # The manifest rides on the system prompt (re-sent every turn) so the
+        # model can distinguish "exists here but wasn't retrieved" from "not
+        # in this project" on follow-ups too.
+        return KB_CHAT_SYSTEM_PROMPT + manifest_block
+    if have_context:
+        return DOCUMENT_CHAT_SYSTEM_PROMPT
+    if kb_uuid:
+        # A project/KB chat was requested but retrieval returned nothing (empty KB,
+        # docs not indexed yet, or no match). Tell it the KB was empty for this
+        # query while still allowing general-knowledge answers.
+        return build_project_kb_empty_prompt(manifest_block)
+    if is_first_session:
+        # First-session onboarding: conversational value discovery.
+        # Do NOT inject VANDALIZER_CONTEXT here — it's a technical how-to dump
+        # that causes the LLM to skip the conversation and spit out directions.
+        # The FIRST_SESSION_SYSTEM_PROMPT already has everything it needs.
+        return FIRST_SESSION_SYSTEM_PROMPT
+    if include_onboarding_context:
+        return HELP_CHAT_SYSTEM_PROMPT
+    # Nothing attached at all — no documents, no attachments, no KB, no
+    # onboarding. The model must be told so explicitly rather than left with
+    # the generic prompt, which would let it answer "what is the total in this
+    # proposal?" as though a proposal were present.
+    return NO_DOCUMENT_SYSTEM_PROMPT
 
 
 async def chat_stream(
@@ -348,30 +396,15 @@ async def chat_stream(
     # must cite by filename, distinguish grounded answers from general knowledge,
     # and admit when the retrieved set doesn't actually contain the answer.
     have_context = bool(doc_segments or attachment_segments)
-    if kb_sources:
-        # The manifest rides on the system prompt (re-sent every turn) so the
-        # model can distinguish "exists here but wasn't retrieved" from "not
-        # in this project" on follow-ups too.
-        system_prompt: Optional[str] = (
-            KB_CHAT_SYSTEM_PROMPT + _build_manifest_block(kb_manifest)
-        )
-    elif have_context:
-        system_prompt = DOCUMENT_CHAT_SYSTEM_PROMPT
-    elif kb_uuid:
-        # A project/KB chat was requested but retrieval returned nothing (empty KB,
-        # docs not indexed yet, or no match). Do NOT fall through to system_prompt=None
-        # — that lets the model freely hallucinate document contents. Tell it the KB
-        # was empty for this query while still allowing general-knowledge answers.
-        system_prompt = build_project_kb_empty_prompt(
-            _build_manifest_block(kb_manifest)
-        )
-    elif is_first_session:
-        # First-session onboarding: conversational value discovery.
-        # Do NOT inject VANDALIZER_CONTEXT here — it's a technical how-to dump
-        # that causes the LLM to skip the conversation and spit out directions.
-        # The FIRST_SESSION_SYSTEM_PROMPT already has everything it needs.
-        system_prompt = FIRST_SESSION_SYSTEM_PROMPT
-    elif include_onboarding_context:
+    system_prompt: Optional[str] = select_chat_system_prompt(
+        kb_sources=kb_sources,
+        have_context=have_context,
+        kb_uuid=kb_uuid,
+        is_first_session=is_first_session,
+        include_onboarding_context=include_onboarding_context,
+        manifest_block=_build_manifest_block(kb_manifest),
+    )
+    if system_prompt == HELP_CHAT_SYSTEM_PROMPT:
         # Inject Vandalizer help context only when explicitly requested
         # (triggered by the placeholder pills in the chat UI).
         doc_segments.append(DocumentSegment(
@@ -382,9 +415,6 @@ async def chat_stream(
                 "--- END ONBOARDING CONTEXT ---"
             ),
         ))
-        system_prompt = HELP_CHAT_SYSTEM_PROMPT
-    else:
-        system_prompt = None  # uses default
 
     # Resolve the model's context window and compact oversize components.
     model_config = await get_llm_model_by_name(model_name)

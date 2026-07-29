@@ -298,3 +298,167 @@ class TestCitationPersistence:
         args, kwargs = conversation.add_message.await_args
         assert args[0] == ChatRole.ASSISTANT
         assert kwargs["citations"] == citations
+
+
+# ---------------------------------------------------------------------------
+# System prompt selection
+# ---------------------------------------------------------------------------
+
+
+class TestChatSystemPromptSelection:
+    """Every context state must resolve to a grounded prompt.
+
+    The no-context branch used to fall through to ``system_prompt=None``, which
+    ``create_chat_agent`` turns into ``DEFAULT_CHAT_SYSTEM_PROMPT`` — a prompt
+    carrying no grounding rule at all. That let "what is the total requested in
+    this proposal?" be answered from invention when no proposal was attached.
+    """
+
+    def _select(self, **overrides):
+        from app.services.chat_service import select_chat_system_prompt
+        kwargs = dict(
+            kb_sources=[],
+            have_context=False,
+            kb_uuid=None,
+            is_first_session=False,
+            include_onboarding_context=False,
+            manifest_block="",
+        )
+        kwargs.update(overrides)
+        return select_chat_system_prompt(**kwargs)
+
+    def test_no_context_selects_the_no_document_prompt(self):
+        from app.services.llm_service import NO_DOCUMENT_SYSTEM_PROMPT
+        assert self._select() == NO_DOCUMENT_SYSTEM_PROMPT
+
+    def test_no_context_never_resolves_to_the_ungrounded_default(self):
+        from app.services.llm_service import DEFAULT_CHAT_SYSTEM_PROMPT
+        selected = self._select()
+        assert selected
+        assert selected != DEFAULT_CHAT_SYSTEM_PROMPT
+
+    def test_retrieved_kb_sources_select_the_kb_prompt(self):
+        from app.services.llm_service import KB_CHAT_SYSTEM_PROMPT
+        assert self._select(kb_sources=[{"document_title": "budget.xlsx"}]) == (
+            KB_CHAT_SYSTEM_PROMPT
+        )
+
+    def test_kb_prompt_carries_the_manifest_block(self):
+        from app.services.llm_service import KB_CHAT_SYSTEM_PROMPT
+        # Deliberately not a realistic filename: KB_CHAT_SYSTEM_PROMPT cites
+        # "budget.xlsx" as an example, so asserting on that would pass even if
+        # the manifest were dropped entirely.
+        sentinel = "manifest-sentinel-9f3a2c.pdf"
+        selected = self._select(
+            kb_sources=[{"document_title": sentinel}],
+            manifest_block=f"\n--- FILES ---\n{sentinel}\n",
+        )
+        assert selected.startswith(KB_CHAT_SYSTEM_PROMPT)
+        assert sentinel in selected
+
+    def test_document_context_selects_the_document_prompt(self):
+        from app.services.llm_service import DOCUMENT_CHAT_SYSTEM_PROMPT
+        assert self._select(have_context=True) == DOCUMENT_CHAT_SYSTEM_PROMPT
+
+    def test_requested_kb_with_no_retrieval_selects_the_empty_kb_prompt(self):
+        from app.services.llm_service import build_project_kb_empty_prompt
+        assert self._select(kb_uuid="kb-1") == build_project_kb_empty_prompt("")
+
+    def test_first_session_selects_the_onboarding_prompt(self):
+        from app.services.llm_service import FIRST_SESSION_SYSTEM_PROMPT
+        assert self._select(is_first_session=True) == FIRST_SESSION_SYSTEM_PROMPT
+
+    def test_explicit_onboarding_selects_the_help_prompt(self):
+        from app.services.llm_service import HELP_CHAT_SYSTEM_PROMPT
+        assert self._select(include_onboarding_context=True) == HELP_CHAT_SYSTEM_PROMPT
+
+    def test_retrieved_sources_take_precedence_over_document_context(self):
+        from app.services.llm_service import KB_CHAT_SYSTEM_PROMPT
+        assert self._select(
+            kb_sources=[{"document_title": "a.pdf"}], have_context=True,
+        ) == KB_CHAT_SYSTEM_PROMPT
+
+    def test_document_context_takes_precedence_over_an_empty_kb(self):
+        from app.services.llm_service import DOCUMENT_CHAT_SYSTEM_PROMPT
+        assert self._select(have_context=True, kb_uuid="kb-1") == (
+            DOCUMENT_CHAT_SYSTEM_PROMPT
+        )
+
+    def test_an_empty_kb_still_outranks_onboarding_branches(self):
+        from app.services.llm_service import build_project_kb_empty_prompt
+        assert self._select(
+            kb_uuid="kb-1", is_first_session=True, include_onboarding_context=True,
+        ) == build_project_kb_empty_prompt("")
+
+
+class TestNoDocumentPromptContent:
+    """The no-document prompt must say the four things the branch depends on.
+
+    Asserted as behavioural clauses rather than exact strings so the wording can
+    be revised without breaking the suite.
+    """
+
+    def _prompt(self) -> str:
+        from app.services.llm_service import NO_DOCUMENT_SYSTEM_PROMPT
+        return NO_DOCUMENT_SYSTEM_PROMPT.lower()
+
+    def test_states_that_no_document_is_available(self):
+        assert "no document" in self._prompt()
+
+    def test_forbids_inventing_document_specific_content(self):
+        prompt = self._prompt()
+        assert "invent" in prompt or "fabricat" in prompt
+
+    def test_tells_the_model_to_ask_for_the_source(self):
+        assert "attach" in self._prompt()
+
+    def test_still_permits_general_knowledge_answers(self):
+        assert "general" in self._prompt()
+
+    def test_carries_the_shared_identity_preamble(self):
+        from app.services.llm_service import (
+            NO_DOCUMENT_SYSTEM_PROMPT,
+            VANDALIZER_IDENTITY_PREAMBLE,
+        )
+        assert NO_DOCUMENT_SYSTEM_PROMPT.startswith(VANDALIZER_IDENTITY_PREAMBLE)
+
+
+class TestNoDocumentGroundingEveryTurn:
+    """The no-document grounding must survive follow-up turns.
+
+    Same failure mode as TestChatAgentGroundingEveryTurn: a static
+    ``system_prompt`` is injected by pydantic-ai only when message_history is
+    empty, so a grounding rule delivered that way silently disappears on the
+    second question — exactly when a user follows up on a fabricated answer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_document_prompt_delivered_on_followup_turn(self, monkeypatch):
+        from pydantic_ai.models.function import FunctionModel
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from app.services import llm_service
+
+        seen: list = []
+
+        def fn(messages, info):
+            seen.append(getattr(messages[-1], "instructions", "NO_ATTR"))
+            return ModelResponse(parts=[TextPart("ok")])
+
+        monkeypatch.setattr(llm_service, "get_agent_model", lambda *a, **k: FunctionModel(fn))
+        monkeypatch.setattr(llm_service, "build_thinking_model_settings", lambda *a, **k: {})
+        agent = llm_service.create_chat_agent(
+            "test-model", system_prompt=llm_service.NO_DOCUMENT_SYSTEM_PROMPT,
+        )
+
+        first = await agent.run("what is the total requested in this proposal?")
+        await agent.run("what page did you get that from?", message_history=first.new_messages())
+
+        # pydantic-ai strips surrounding whitespace from instructions, so compare
+        # stripped rather than asserting the constant verbatim.
+        expected = llm_service.NO_DOCUMENT_SYSTEM_PROMPT.strip()
+        assert len(seen) == 2, f"expected two model requests; saw {len(seen)}"
+        assert seen[0] == expected, "grounding missing on the first turn"
+        assert seen[1] == expected, (
+            "grounding must persist onto the follow-up turn — this is the turn "
+            f"where a user challenges a fabricated answer; saw {seen[1]!r}"
+        )

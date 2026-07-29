@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Chat with nothing attached could present invented document contents as fact.** The system-prompt chain in `chat_stream` covered every grounded context — retrieved KB sources, document/attachment text, a requested-but-empty KB, first-session onboarding, explicit help — and then fell through to `system_prompt = None` for an ordinary chat with nothing attached. `create_chat_agent` turns a falsey prompt into `DEFAULT_CHAT_SYSTEM_PROMPT`, which carries no grounding rule at all, so "What is the total amount requested in this proposal?" could be answered with a specific figure and a line-item budget breakdown when no proposal existed in the conversation; the model disclosed it had no document only when asked for the source page. Reproduced on both an 8B and a 30B local model, so it was the prompt context rather than model capability. The no-context branch now selects a dedicated `NO_DOCUMENT_SYSTEM_PROMPT` that states no document is attached, forbids inventing document-specific figures, quotations, dates, citations or page references, and asks the user to attach the document or select a knowledge base — while still allowing general-knowledge answers, clearly marked as general. This mirrors the guard the adjacent empty-KB branch already had for exactly the same hazard. The selection chain moved into a pure `select_chat_system_prompt()` helper so every branch is unit-testable; behaviour for the KB, document, empty-KB, first-session and help branches is unchanged.
+
 ## [v4.9.0] - 2026-07-23
 
 ### Fixed
