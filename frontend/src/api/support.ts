@@ -84,6 +84,13 @@ export function editMessage(
   )
 }
 
+export function deleteMessage(ticketUuid: string, messageUuid: string) {
+  return apiFetch<SupportTicket>(
+    `/api/support/tickets/${ticketUuid}/messages/${messageUuid}`,
+    { method: 'DELETE' },
+  )
+}
+
 export async function addAttachment(
   ticketUuid: string,
   files: File | File[],

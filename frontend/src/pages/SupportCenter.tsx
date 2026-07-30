@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Navigate, useNavigate, useSearch } from '@tanstack/react-router'
 import {
   ArrowLeft, Check, MessageSquare, Send, Plus, Paperclip, Pencil, X, Loader2, Link2, Tag,
-  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles,
+  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles, Trash2,
 } from 'lucide-react'
 import { PageLayout } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
@@ -1037,6 +1037,22 @@ function ChatView({
     }
   }
 
+  const handleDeleteMessage = async (messageUuid: string) => {
+    if (!(await confirm({
+      title: 'Delete this comment?',
+      message: "This can't be undone.",
+      confirmLabel: 'Delete',
+      destructive: true,
+    }))) return
+    try {
+      const updated = await supportApi.deleteMessage(ticketUuid, messageUuid)
+      setTicket(updated)
+      toast('Message deleted', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete message', 'error')
+    }
+  }
+
   const startEditSubject = () => {
     if (!ticket) return
     setSubjectDraft(ticket.subject)
@@ -1317,6 +1333,9 @@ function ChatView({
             const isSupport = m.is_support_reply
             const isInternal = m.is_internal_note
             const isMine = m.user_id === user?.user_id
+            // Author or admin — regular support agents can't delete other
+            // people's messages (mirrors the backend gate).
+            const canDeleteMsg = !!user && (user.is_admin || m.user_id === user.user_id)
             const isEditing = editingMessageUuid === m.uuid
             const msgAttachments = ticket.attachments.filter((a) => a.message_uuid === m.uuid)
             // Internal notes get a distinct yellow card and span full width so
@@ -1433,21 +1452,41 @@ function ChatView({
                     {m.edited_at && <span style={{ marginLeft: 4, fontStyle: 'italic' }}>(edited)</span>}
                   </div>
                 </div>
-                {isMine && !isEditing && (
-                  <button
-                    onClick={() => startEdit(m)}
-                    title="Edit message"
-                    style={{
-                      marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 3,
-                      padding: '2px 6px', fontSize: 11, color: '#9ca3af',
-                      background: 'transparent', border: 'none', cursor: 'pointer',
-                      borderRadius: 4, fontFamily: 'inherit',
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#374151' }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
-                  >
-                    <Pencil size={10} /> Edit
-                  </button>
+                {(isMine || canDeleteMsg) && !isEditing && (
+                  <div style={{ marginTop: 2, display: 'flex', gap: 2 }}>
+                    {isMine && (
+                      <button
+                        onClick={() => startEdit(m)}
+                        title="Edit message"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '2px 6px', fontSize: 11, color: '#9ca3af',
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          borderRadius: 4, fontFamily: 'inherit',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#374151' }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
+                      >
+                        <Pencil size={10} /> Edit
+                      </button>
+                    )}
+                    {canDeleteMsg && (
+                      <button
+                        onClick={() => handleDeleteMessage(m.uuid)}
+                        title="Delete message"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '2px 6px', fontSize: 11, color: '#9ca3af',
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          borderRadius: 4, fontFamily: 'inherit',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#dc2626' }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
+                      >
+                        <Trash2 size={10} /> Delete
+                      </button>
+                    )}
+                  </div>
                 )}
                 {msgAttachments.length > 0 && (
                   <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6, alignItems: isSupport ? 'flex-end' : 'flex-start' }}>

@@ -593,6 +593,61 @@ async def edit_message(
     return await _ticket_to_dict(ticket), None
 
 
+async def delete_message(
+    ticket_uuid: str,
+    message_uuid: str,
+) -> tuple[dict | None, dict | None]:
+    """Remove a message from a ticket, along with any attachments that were
+    uploaded as part of it (and their on-disk blobs) — otherwise they'd
+    linger as orphan chips below the thread.
+
+    Returns ``(ticket_dict, message_meta)``. ``message_meta`` is the record
+    that was removed or ``None`` if it didn't exist. ``ticket_dict`` is
+    ``None`` if the ticket itself wasn't found. Authorization is the
+    router's job — it checks authorship/admin before calling this.
+    """
+    ticket = await SupportTicket.find_one(SupportTicket.uuid == ticket_uuid)
+    if not ticket:
+        return None, None
+
+    target: SupportMessage | None = None
+    remaining: list[SupportMessage] = []
+    for m in ticket.messages:
+        if m.uuid == message_uuid and target is None:
+            target = m
+        else:
+            remaining.append(m)
+    if target is None:
+        return await _ticket_to_dict(ticket), None
+
+    kept_attachments: list[SupportAttachment] = []
+    for a in ticket.attachments:
+        if a.message_uuid != message_uuid:
+            kept_attachments.append(a)
+            continue
+        # Best-effort blob cleanup, same contract as delete_attachment.
+        if a.file_path:
+            try:
+                p = Path(a.file_path)
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                logger.warning(
+                    "Failed to unlink support attachment file at %s", a.file_path
+                )
+
+    ticket.messages = remaining
+    ticket.attachments = kept_attachments
+    ticket.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    await ticket.save()
+
+    meta = {
+        "uuid": target.uuid,
+        "user_id": target.user_id,
+    }
+    return await _ticket_to_dict(ticket), meta
+
+
 def _support_attachments_dir() -> Path:
     """Return (and create) the directory for support ticket attachments."""
     from app.dependencies import get_settings
