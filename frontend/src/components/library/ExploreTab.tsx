@@ -487,6 +487,9 @@ export function ExploreTab() {
   // Data
   const [items, setItems] = useState<VerifiedCatalogItem[]>([])
   const [total, setTotal] = useState(0)
+  // Unfiltered catalog count for the "All Items" badge — `total` tracks the
+  // active query, so it shrinks whenever a kind/collection/search filter is on.
+  const [allTotal, setAllTotal] = useState<number | null>(null)
   const [collections, setCollections] = useState<VerifiedCollection[]>([])
   const [featuredCollections, setFeaturedCollections] = useState<VerifiedCollection[]>([])
   const [libraries, setLibraries] = useState<Library[]>([])
@@ -561,6 +564,11 @@ export function ExploreTab() {
       })
       setItems(data.items)
       setTotal(data.total)
+      // Sort doesn't change the result count, so any fetch without narrowing
+      // filters carries the true "all items" total.
+      if (!kindFilter && !debouncedSearch && !qualityFilter && !tagFilter && !selectedCollectionId) {
+        setAllTotal(data.total)
+      }
     } catch {
       setError('Failed to load catalog items. Please try again.')
     } finally {
@@ -697,7 +705,7 @@ export function ExploreTab() {
           >
             All Items
             <span className={`ml-1.5 text-xs ${!selectedCollectionId ? 'text-gray-300' : 'text-gray-500'}`}>
-              {total}
+              {allTotal ?? total}
             </span>
           </button>
 
