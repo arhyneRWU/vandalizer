@@ -266,8 +266,40 @@ class TestWorkflowEngineExecute:
         final, data = engine.execute()
         assert isinstance(final, dict)
         assert final.get("_approval_pause") is True
+        assert final.get("_paused_step_index") == 1
         # AddDocumentNode should NOT have executed
         assert all(d["name"] != "AddDocument" for d in data)
+
+    def test_second_approval_pause_reports_its_own_index(self):
+        """Two gates: resuming past the first must pause at the second and
+        report the second node's index, not the first's. All ApprovalNodes are
+        named "Approval", so the index is the only thing distinguishing them."""
+        engine = WorkflowEngine()
+        doc = DocumentNode({"doc_uuids": ["a"]})
+        first = ApprovalNode({"review_instructions": "First review"})
+        middle = AddDocumentNode({"doc_texts": ["between the gates"]})
+        second = ApprovalNode({"review_instructions": "Second review"})
+        tail = AddDocumentNode({"doc_texts": ["should not run"]})
+
+        for node in (doc, first, middle, second, tail):
+            engine.add_node(node)
+        engine.connect(doc, first)
+        engine.connect(first, middle)
+        engine.connect(middle, second)
+        engine.connect(second, tail)
+
+        final, _ = engine.execute()
+        assert final.get("_paused_step_index") == 1
+
+        # Resume past the first gate — the engine must stop again at index 3.
+        resumed, data = engine.execute(
+            start_index=2, initial_output={"output": "approved artifact"},
+        )
+        assert resumed.get("_approval_pause") is True
+        assert resumed.get("_review_instructions") == "Second review"
+        assert resumed.get("_paused_step_index") == 3
+        # Only the step between the gates ran; the tail is still pending.
+        assert [d["name"] for d in data] == ["AddDocument"]
 
     def test_resume_from_start_index(self):
         """Engine can resume from a specific step index with initial_output."""
