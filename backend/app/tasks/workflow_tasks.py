@@ -63,25 +63,21 @@ def _notify_approval_reviewers_sync(
     step_name: str, instructions: str, approval_uuid: str,
 ) -> None:
     """Create in-app notifications and send emails to assigned reviewers (sync context)."""
-    import secrets
-    from datetime import datetime, timezone
     from app.config import Settings
+    from app.services.notification_service import create_notification_sync
 
     settings = Settings()
-    now = datetime.now(timezone.utc)
 
     for user_id in assigned_user_ids:
         # In-app notification
-        db.notification.insert_one({
-            "uuid": secrets.token_urlsafe(12),
-            "user_id": user_id,
-            "kind": "approval_request",
-            "title": f"Approval needed: {workflow_name}",
-            "body": f"Step \"{step_name}\" is waiting for your review.",
-            "link": f"/reviews/{approval_uuid}",
-            "read": False,
-            "created_at": now,
-        })
+        create_notification_sync(
+            db,
+            user_id=user_id,
+            kind="approval_request",
+            title=f"Approval needed: {workflow_name}",
+            body=f'Step "{step_name}" is waiting for your review.',
+            link=f"/reviews/{approval_uuid}",
+        )
 
         # Email
         user_doc = db.user.find_one({"user_id": user_id})
@@ -296,9 +292,15 @@ def _classify_input_documents(db, workflow_doc: dict, doc_uuids: list[str]):
     return ready, processing, failed
 
 
-def _mark_workflow_failed(db, workflow_result_id, activity_id, error_msg, error_payload=None):
+def _mark_workflow_failed(
+    db, workflow_result_id, activity_id, error_msg, error_payload=None, notify=True,
+):
     """Flip a WorkflowResult (and its activity rail entry) to a failed state
-    with a user-facing message, matching the pre-flight oversize handler."""
+    with a user-facing message, matching the pre-flight oversize handler.
+
+    `notify=False` suppresses the bell entry for a failure Celery is still going
+    to retry — the run is not actually over yet.
+    """
     from bson import ObjectId
 
     update = {"status": "error", "error": error_msg}
@@ -307,6 +309,7 @@ def _mark_workflow_failed(db, workflow_result_id, activity_id, error_msg, error_
     db.workflow_result.update_one(
         {"_id": ObjectId(workflow_result_id)}, {"$set": update}
     )
+    activity = None
     if activity_id:
         from datetime import datetime, timezone
 
@@ -319,8 +322,36 @@ def _mark_workflow_failed(db, workflow_result_id, activity_id, error_msg, error_
                     "finished_at": datetime.now(timezone.utc),
                 }},
             )
+            activity = db.activity_event.find_one(
+                {"_id": ObjectId(activity_id)}, {"user_id": 1},
+            )
         except Exception:
             pass
+
+    if not notify:
+        return
+
+    # A run that fails after the user has navigated away leaves no trace they
+    # would see, so the bell is the only signal. Resolve the owner from the
+    # activity rail entry (which carries the user who launched it) and fall
+    # back to the workflow's owner for runs with no activity record.
+    try:
+        from app.services.failure_notifications import notify_workflow_failed
+
+        result_doc = db.workflow_result.find_one(
+            {"_id": ObjectId(workflow_result_id)}, {"workflow": 1},
+        ) or {}
+        workflow_doc = db.workflow.find_one({"_id": result_doc.get("workflow")}) or {}
+        notify_workflow_failed(
+            db,
+            workflow_doc=workflow_doc,
+            error=error_msg,
+            user_id=(activity or {}).get("user_id"),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify owner of workflow failure (result %s)", workflow_result_id,
+        )
 
 
 @celery_app.task(
@@ -614,27 +645,10 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 "suggested_action": "convert_to_kb",
                 "oversize_documents": [o.to_dict() for o in oversize],
             }
-            db.workflow_result.update_one(
-                {"_id": ObjectId(workflow_result_id)},
-                {"$set": {
-                    "status": "error",
-                    "error": error_msg,
-                    "error_payload": error_payload,
-                }},
+            _mark_workflow_failed(
+                db, workflow_result_id, activity_id, error_msg,
+                error_payload=error_payload,
             )
-            if activity_id:
-                from datetime import datetime, timezone
-                try:
-                    db.activity_event.update_one(
-                        {"_id": ObjectId(activity_id)},
-                        {"$set": {
-                            "status": "failed",
-                            "error": error_msg[:2000],
-                            "finished_at": datetime.now(timezone.utc),
-                        }},
-                    )
-                except Exception:
-                    pass
             logger.warning(
                 "Workflow %s aborted pre-flight: oversize docs %s for model=%s",
                 workflow_id, [o.uuid for o in oversize], model,
@@ -703,19 +717,12 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         return {"status": "canceled", "result_id": workflow_result_id}
     except Exception as e:
         logger.error("Workflow execution failed for %s: %s", workflow_id, e)
-        db.workflow_result.update_one(
-            {"_id": ObjectId(workflow_result_id)},
-            {"$set": {"status": "error", "error": str(e)}},
+        from app.services.failure_notifications import is_final_attempt
+
+        _mark_workflow_failed(
+            db, workflow_result_id, activity_id, str(e),
+            notify=is_final_attempt(self, e),
         )
-        if activity_id:
-            try:
-                from datetime import datetime, timezone
-                db.activity_event.update_one(
-                    {"_id": ObjectId(activity_id)},
-                    {"$set": {"status": "failed", "error": str(e)[:2000], "finished_at": datetime.now(timezone.utc)}},
-                )
-            except Exception:
-                pass
         raise
 
     # Check if workflow paused for approval. The handling below must run under a
@@ -733,19 +740,12 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 "Approval gate handling failed for workflow %s (result %s)",
                 workflow_id, workflow_result_id,
             )
-            db.workflow_result.update_one(
-                {"_id": ObjectId(workflow_result_id)},
-                {"$set": {"status": "error", "error": f"Approval gate failed: {e}"}},
+            from app.services.failure_notifications import is_final_attempt
+
+            _mark_workflow_failed(
+                db, workflow_result_id, activity_id, f"Approval gate failed: {e}",
+                notify=is_final_attempt(self, e),
             )
-            if activity_id:
-                try:
-                    from datetime import datetime, timezone
-                    db.activity_event.update_one(
-                        {"_id": ObjectId(activity_id)},
-                        {"$set": {"status": "failed", "error": str(e)[:2000], "finished_at": datetime.now(timezone.utc)}},
-                    )
-                except Exception:
-                    pass
             raise
 
     # Aggregate citations from every step that produced retrieved_sources so
@@ -1068,11 +1068,13 @@ def resume_workflow_after_approval(self, approval_uuid):
         allow_code_execution=is_admin,
     )
 
+    # Resolved before the try so the failure handler below can always reach it.
+    _act = db.activity_event.find_one(
+        {"workflow_result": ObjectId(workflow_result_id)}, {"_id": 1}
+    )
+
     try:
         from app.services.metering import metered
-        _act = db.activity_event.find_one(
-            {"workflow_result": ObjectId(workflow_result_id)}, {"_id": 1}
-        )
         with metered(
             "workflow",
             user_id=user_id,
@@ -1086,9 +1088,12 @@ def resume_workflow_after_approval(self, approval_uuid):
             )
     except Exception as e:
         logger.error("Workflow resume failed for %s: %s", workflow_id, e)
-        db.workflow_result.update_one(
-            {"_id": ObjectId(workflow_result_id)},
-            {"$set": {"status": "error", "error": str(e)}},
+        from app.services.failure_notifications import is_final_attempt
+
+        _mark_workflow_failed(
+            db, workflow_result_id,
+            str(_act["_id"]) if _act else None, str(e),
+            notify=is_final_attempt(self, e),
         )
         raise
 

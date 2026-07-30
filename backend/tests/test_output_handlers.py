@@ -36,6 +36,18 @@ class TestShouldSendNotification:
 
         assert should_send_notification({"status": "failed"}, {"conditions": "failure"}) is True
 
+    def test_failure_matches_error(self):
+        # WorkflowResult records a failed run as "error", not "failed". Matching
+        # only "failed" is why "notify me on failure" never fired for workflows.
+        from app.services.output_handlers import should_send_notification
+
+        assert should_send_notification({"status": "error"}, {"conditions": "failure"}) is True
+
+    def test_success_rejects_error(self):
+        from app.services.output_handlers import should_send_notification
+
+        assert should_send_notification({"status": "error"}, {"conditions": "success"}) is False
+
     def test_failure_rejects_completed(self):
         from app.services.output_handlers import should_send_notification
 

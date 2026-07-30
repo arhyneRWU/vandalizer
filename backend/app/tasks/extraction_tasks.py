@@ -259,6 +259,21 @@ def perform_extraction_task(
                     }
                 },
             )
+
+        # Only once Celery is done retrying — a mid-retry bell entry would
+        # report a failure for a run that is about to succeed.
+        from app.services.failure_notifications import (
+            is_final_attempt,
+            notify_extraction_failed,
+        )
+
+        if is_final_attempt(self, e):
+            notify_extraction_failed(
+                db,
+                user_id=(activity or {}).get("user_id"),
+                search_set_uuid=searchset_uuid,
+                error=e,
+            )
         raise
 
 
