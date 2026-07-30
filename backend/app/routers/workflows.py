@@ -1088,11 +1088,36 @@ async def _diagnose_step_mutation_failure(step_id: str, user: User) -> tuple[int
     return 500, "Failed to update step"
 
 
+async def _diagnose_task_mutation_failure(task_id: str, user: User) -> tuple[int, str]:
+    """Why did a task-scoped mutation return None/False?
+
+    Mirrors ``_diagnose_step_mutation_failure``: the service collapses "task
+    missing", "orphan workflow", and "user lacks permission" into the same
+    falsy return. Walk the same lookups to pick a clearer status + detail.
+    """
+    from app.models.workflow import WorkflowStepTask
+
+    try:
+        task = await WorkflowStepTask.get(PydanticObjectId(task_id))
+    except Exception:
+        return 404, "Task not found"
+    if not task:
+        return 404, "Task not found"
+    parent = await svc._get_workflow_for_task(task.id)
+    if not parent:
+        return 404, "Task's workflow not found"
+    team_access = await access_control.get_team_access_context(user)
+    if not access_control.can_manage_workflow(parent, user, team_access):
+        return 403, "You don't have permission to edit this workflow"
+    return 500, "Failed to update task"
+
+
 @router.patch("/tasks/{task_id}")
 async def update_task(task_id: str, req: UpdateTaskRequest, user: User = Depends(get_current_user)):
     task = await svc.update_task(task_id, user=user, name=req.name, data=req.data)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        status_code, detail = await _diagnose_task_mutation_failure(task_id, user)
+        raise HTTPException(status_code=status_code, detail=detail)
     # Flag stale verification on parent workflow
     from app.services.verification_service import check_and_flag_stale_verification
     wf = await svc._get_workflow_for_task(PydanticObjectId(task_id))
@@ -1105,7 +1130,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, user: User = Depends
 async def delete_task(task_id: str, user: User = Depends(get_current_user)):
     ok = await svc.delete_task(task_id, user=user)
     if not ok:
-        raise HTTPException(status_code=404, detail="Task not found")
+        status_code, detail = await _diagnose_task_mutation_failure(task_id, user)
+        raise HTTPException(status_code=status_code, detail=detail)
     return {"ok": True}
 
 
