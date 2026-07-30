@@ -36,7 +36,10 @@ vi.mock('../../shared/useConfirm', () => ({
 type ModelList = SystemConfigData['available_models']
 
 const MODELS: ModelList = [
-  { id: 'model-alpha', name: 'gpt-4o', tag: 'openai', external: true, thinking: false, api_protocol: 'openai', endpoint: 'https://api.openai.com/v1', context_window: 128000 },
+  // Tag deliberately differs from the OpenAI preset's default tag ('openai'):
+  // names and tags are one unique namespace (see modelIdentity.ts), so a
+  // fixture holding the preset's tag would make every wizard-add collide.
+  { id: 'model-alpha', name: 'gpt-4o', tag: 'gpt4o', external: true, thinking: false, api_protocol: 'openai', endpoint: 'https://api.openai.com/v1', context_window: 128000 },
   { id: 'model-beta', name: 'llama3.1', tag: 'ollama', external: false, thinking: false, api_protocol: 'ollama', endpoint: 'http://localhost:11434/v1', context_window: 32768 },
 ]
 
@@ -121,6 +124,20 @@ describe('ModelEditor — save path', () => {
     expect('default_model' in patch).toBe(false)
     await waitFor(() => expect(mockTestModel).toHaveBeenCalledWith('model-gamma'))
     expect(onReadinessChange).toHaveBeenCalled()
+  })
+
+  it('blocks a save whose name or tag collides with another model, before any request', async () => {
+    renderPanel()
+    fireEvent.click(screen.getByRole('button', { name: /Add Model/ }))
+    // The OpenAI preset fixes tag 'openai'; name it after model-alpha's tag
+    // to collide on the name→tag axis instead — either axis must block.
+    fireEvent.click(screen.getByRole('button', { name: /OpenAI GPT models from the OpenAI API\./ }))
+    fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'gpt4o' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(onError).toHaveBeenCalled())
+    expect(String(onError.mock.calls.at(-1)?.[0])).toMatch(/already used/)
+    expect(mockAddModel).not.toHaveBeenCalled()
   })
 
   it('updates an existing model by its stable id, not its position (plan 011)', async () => {
