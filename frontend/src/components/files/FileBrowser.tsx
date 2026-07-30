@@ -89,7 +89,7 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
     const idx = breadcrumbs.findIndex(b => b.uuid === rootFolder)
     return idx >= 0 ? breadcrumbs.slice(idx + 1) : breadcrumbs
   }, [breadcrumbs, rootFolder])
-  const { uploads, upload, lastUploadedUuid, clearLastUploaded } = useUpload(currentFolder, refresh)
+  const { uploads, upload, dismissUpload, lastUploadedUuid, clearLastUploaded } = useUpload(currentFolder, refresh)
 
   // Load watched folder UUIDs from automations
   const [watchedFolderUuids, setWatchedFolderUuids] = useState<Set<string>>(new Set())
@@ -520,7 +520,7 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
       onDrop={handlePanelDrop}
     >
       <UploadZone onFilesSelected={(files) => upload(files)} highlighted={panelDragOver} />
-      <UploadProgress uploads={uploads} />
+      <UploadProgress uploads={uploads} onDismiss={dismissUpload} />
 
       {/* + Add button with dropdown menu - matches Flask _add_button.html */}
       <div ref={addMenuRef} className="relative inline-block mt-4">
