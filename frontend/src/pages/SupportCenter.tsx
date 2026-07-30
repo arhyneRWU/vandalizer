@@ -945,12 +945,14 @@ function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }, [reply])
 
-  const loadTicket = useCallback(async () => {
+  // Error toasts persist until dismissed, so the 15s refresh stays silent on
+  // failure — only the initial load reports.
+  const loadTicket = useCallback(async (isPoll = false) => {
     try {
       const data = await supportApi.getTicket(ticketUuid)
       setTicket(data)
     } catch {
-      toast('Failed to load ticket', 'error')
+      if (!isPoll) toast('Failed to load ticket', 'error')
     } finally {
       setLoading(false)
     }
@@ -959,7 +961,7 @@ function ChatView({
   useEffect(() => {
     loadTicket()
     supportApi.markTicketRead(ticketUuid).catch(() => {})
-    const interval = setInterval(loadTicket, 15000)
+    const interval = setInterval(() => loadTicket(true), 15000)
     return () => clearInterval(interval)
   }, [loadTicket, ticketUuid])
 
