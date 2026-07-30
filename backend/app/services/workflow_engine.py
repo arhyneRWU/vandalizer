@@ -1553,8 +1553,12 @@ class WorkflowEngine:
 
             latest_output = output
 
-            # Check for approval pause signal
+            # Check for approval pause signal. Stamp the index of the node that
+            # paused: every ApprovalNode is named "Approval", so a workflow with
+            # more than one gate can't be resolved by name alone, and the caller
+            # needs the exact index to resume past *this* gate.
             if latest_output and latest_output.get("_approval_pause"):
+                latest_output["_paused_step_index"] = idx
                 return latest_output, data
 
             if workflow_result_updater:

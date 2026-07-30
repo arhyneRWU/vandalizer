@@ -129,12 +129,18 @@ def _bson_safe(value):
     return str(value)
 
 
-def _pause_for_approval(db, final_output, engine, workflow_id, workflow_result_id):
+def _pause_for_approval(db, final_output, engine, workflow_id, workflow_result_id,
+                        search_from=0):
     """Persist the approval request and flip the run to ``pending_approval``.
 
     Extracted from :func:`execute_workflow_task` so the whole sequence runs
     under a single guard in the caller: any failure here must surface as an
     error status instead of silently freezing the run.
+
+    Args:
+        search_from: Index the current execution pass started at. Used only as
+            the floor for the legacy name-scan fallback; the engine normally
+            stamps the exact paused index on the sentinel.
     """
     import uuid as uuid_mod
     from datetime import datetime, timedelta, timezone
@@ -146,13 +152,21 @@ def _pause_for_approval(db, final_output, engine, workflow_id, workflow_result_i
         resolve_assignees_sync,
     )
 
-    # Find the step index (count of executed steps)
-    nodes = engine.get_topological_order()
-    step_index = 0
-    for idx, node in enumerate(nodes):
-        if node.name == "Approval":
-            step_index = idx
-            break
+    # Which step paused. The engine stamps the exact index on the sentinel;
+    # fall back to a name scan bounded below by ``search_from`` for sentinels
+    # produced before that stamp existed. The floor matters: all Approval nodes
+    # share the name "Approval", so an unbounded scan on the *second* gate would
+    # return the first gate's index and resume would replay it forever.
+    stamped = final_output.get("_paused_step_index")
+    if isinstance(stamped, int):
+        step_index = stamped
+    else:
+        nodes = engine.get_topological_order()
+        step_index = search_from
+        for idx, node in enumerate(nodes):
+            if idx >= search_from and node.name == "Approval":
+                step_index = idx
+                break
 
     approval_uuid = str(uuid_mod.uuid4())
     workflow_doc = db.workflow.find_one({"_id": ObjectId(workflow_id)})
@@ -1077,6 +1091,28 @@ def resume_workflow_after_approval(self, approval_uuid):
             {"$set": {"status": "error", "error": str(e)}},
         )
         raise
+
+    # A workflow may have more than one approval gate. Resuming past the first
+    # one can land on another, so the resume path needs the same pause handling
+    # as the initial run — without it the second gate's sentinel was treated as
+    # a normal final output and the run was marked "completed" with no review
+    # ever created for the second reviewer.
+    if isinstance(final_output, dict) and final_output.get("_approval_pause"):
+        try:
+            return _pause_for_approval(
+                db, final_output, engine, workflow_id, workflow_result_id,
+                search_from=step_index + 1,
+            )
+        except Exception as e:
+            logger.exception(
+                "Approval gate handling failed on resume for workflow %s (result %s)",
+                workflow_id, workflow_result_id,
+            )
+            db.workflow_result.update_one(
+                {"_id": ObjectId(workflow_result_id)},
+                {"$set": {"status": "error", "error": f"Approval gate failed: {e}"}},
+            )
+            raise
 
     db.workflow_result.update_one(
         {"_id": ObjectId(workflow_result_id)},
