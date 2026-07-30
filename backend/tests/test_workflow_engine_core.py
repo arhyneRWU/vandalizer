@@ -366,6 +366,24 @@ class TestWorkflowStepFailure:
         assert "steps_output.API" in persisted
         assert persisted["steps_output.API"]["error"] == "Blocked URL: nope"
 
+    def test_step_error_survives_celery_json_reconstruction(self):
+        """Celery's JSON result backend rebuilds a task's exception as
+        cls(*args). If args were a single pre-formatted string, reconstruction
+        would TypeError and degrade to a mangled generic Exception — exactly
+        what the Test Step poll endpoint would then show the user."""
+        original = WorkflowStepError("APINode", "Blocked URL: nope")
+        rebuilt = WorkflowStepError(*original.args)
+        assert rebuilt.step_name == "APINode"
+        assert rebuilt.message == "Blocked URL: nope"
+        assert str(rebuilt) == "APINode step failed: Blocked URL: nope"
+
+    def test_step_error_carries_step_output_for_in_process_callers(self):
+        engine = self._engine_with_failing_middle_step()
+        with pytest.raises(WorkflowStepError) as exc_info:
+            engine.execute()
+        assert exc_info.value.step_output is not None
+        assert exc_info.value.step_output.get("error") == "Blocked URL: nope"
+
     def test_error_free_run_unaffected(self):
         engine = WorkflowEngine()
         doc = DocumentNode({"doc_uuids": ["a"]})

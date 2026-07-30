@@ -1487,10 +1487,21 @@ class WorkflowStepError(Exception):
     result (including any request preview) is persisted to steps_output
     before this is raised, so the run record keeps the debugging detail."""
 
-    def __init__(self, step_name: str, message: str) -> None:
+    def __init__(self, step_name: str, message: str, step_output: dict | None = None) -> None:
         self.step_name = step_name
         self.message = message
-        super().__init__(f"{step_name} step failed: {message}")
+        # Not part of args: it exists for in-process callers (e.g. Test Step)
+        # that want the full step result — request preview and all — without
+        # it having to survive a result-backend round trip.
+        self.step_output = step_output
+        # args must stay exactly the constructor's required arguments: Celery's
+        # JSON result backend reconstructs exceptions as cls(*args), so a
+        # single pre-formatted string here would make reconstruction fall back
+        # to a mangled generic Exception on every poll of a failed task.
+        super().__init__(step_name, message)
+
+    def __str__(self) -> str:
+        return f"{self.step_name} step failed: {self.message}"
 
 
 class WorkflowEngine:
@@ -1594,7 +1605,7 @@ class WorkflowEngine:
             # preview etc.) was persisted to steps_output just above.
             step_error = latest_output.get("error") if isinstance(latest_output, dict) else None
             if isinstance(step_error, str) and step_error:
-                raise WorkflowStepError(node.name, step_error)
+                raise WorkflowStepError(node.name, step_error, step_output=latest_output)
 
             entry = {
                 "name": node.name,

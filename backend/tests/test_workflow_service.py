@@ -806,6 +806,28 @@ class TestGetTestStatus:
         status = get_test_status("task-123")
         assert status["status"] == "PENDING"
 
+    @patch("app.services.workflow_service.AsyncResult")
+    def test_step_failure_returned_by_task_reports_failed_with_clean_message(self, mock_async_result_cls):
+        """A deterministic step failure is *returned* (not raised) by the test
+        task; the poll must surface it as failed with the step's message and
+        keep the step output for diagnostics."""
+        from app.services.workflow_service import get_test_status
+
+        mock_result = MagicMock()
+        mock_result.ready.return_value = True
+        mock_result.successful.return_value = True
+        mock_result.result = {
+            "step_test_failed": True,
+            "error": "APINode step failed: Blocked URL: nope",
+            "output": {"error": "Blocked URL: nope", "output": "--- Request sent ---"},
+        }
+        mock_async_result_cls.return_value = mock_result
+
+        status = get_test_status("task-123")
+        assert status["status"] == "failed"
+        assert status["error"] == "APINode step failed: Blocked URL: nope"
+        assert status["output"]["output"] == "--- Request sent ---"
+
 
 # ---------------------------------------------------------------------------
 # save_expected_output

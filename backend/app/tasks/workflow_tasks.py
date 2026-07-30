@@ -857,6 +857,7 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
         ResearchNode,
         WebsiteNode,
         WorkflowEngine,
+        WorkflowStepError,
     )
 
     db = _get_db()
@@ -931,7 +932,21 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
     for i in range(1, len(nodes)):
         engine.connect(nodes[i - 1], nodes[i])
 
-    final_output, _ = engine.execute()
+    try:
+        final_output, _ = engine.execute()
+    except WorkflowStepError as e:
+        # Deterministic config/user error (blocked URL, HTTP failure, bad
+        # headers…). Return a structured failure instead of raising: the task
+        # then neither retries nor produces a Sentry error event, the poll
+        # endpoint gets the clean message without a result-backend exception
+        # round-trip, and the step's full output (request preview included)
+        # stays available for debugging — Test Step has no
+        # workflow_result_updater to persist it anywhere else.
+        return {
+            "step_test_failed": True,
+            "error": str(e),
+            "output": e.step_output,
+        }
     return final_output
 
 

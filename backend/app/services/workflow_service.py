@@ -835,7 +835,16 @@ def get_test_status(task_id: str) -> dict:
     if not result.ready():
         return {"status": result.state}
     if result.successful():
-        return {"status": "completed", "result": result.result}
+        payload = result.result
+        # A deterministic step failure is returned (not raised) by the test
+        # task so it doesn't retry or land in Sentry — surface it as a failure.
+        if isinstance(payload, dict) and payload.get("step_test_failed"):
+            return {
+                "status": "failed",
+                "error": payload.get("error") or "Test failed",
+                "output": payload.get("output"),
+            }
+        return {"status": "completed", "result": payload}
     payload = result.result
     if isinstance(payload, WorkflowStepError):
         # Step failures carry a user-facing message already — no class prefix.

@@ -522,6 +522,8 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
         }
 
     except Exception as e:
+        from app.services.workflow_engine import WorkflowStepError
+
         logger.error("Passive execution failed for event %s: %s", event.get("uuid"), e)
 
         # Mark the run's WorkflowResult failed too (when it got created) so it
@@ -559,12 +561,15 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
             }},
         )
 
-        # Check retry
+        # Check retry. A WorkflowStepError is a deterministic failure (blocked
+        # URL, bad config, HTTP error the step itself reported) — re-running
+        # cannot succeed and each attempt would mint another failed
+        # WorkflowResult, so it skips straight to the failure callback.
         retry_cfg = (workflow.get("resource_config") or {}).get("retry", {})
         max_retries = retry_cfg.get("max_retries", 3)
         attempt = event.get("attempt_number", 1)
 
-        if attempt < max_retries:
+        if not isinstance(e, WorkflowStepError) and attempt < max_retries:
             retry_delay = retry_cfg.get("retry_delay_seconds", 300)
             next_retry = datetime.now(timezone.utc) + timedelta(seconds=retry_delay)
             db.workflow_trigger_event.update_one(
