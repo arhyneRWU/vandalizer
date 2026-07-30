@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import {
   ArrowUpDown, Loader2, BookOpen, ShieldCheck, Sparkles, Tag,
-  MessageSquare, Pencil, Trash2, Bookmark, BookmarkCheck, Pin, PinOff,
+  MessageSquare, Pencil, Trash2, Bookmark, BookmarkCheck, Pin, PinOff, Copy,
 } from 'lucide-react'
 import { useScopedKnowledgeBases } from '../../hooks/useKnowledgeBases'
 import type { KBScope, KnowledgeBase } from '../../types/knowledge'
@@ -69,13 +69,14 @@ interface KBGridCardProps {
   onEdit?: (uuid: string) => void
   onDelete?: (uuid: string) => void
   onAdopt?: (uuid: string) => void
+  onClone?: (uuid: string) => void
   onRemoveRef?: (refUuid: string) => void
   pinned?: boolean
   onTogglePin?: (canonicalUuid: string) => void
 }
 
 function KBGridCard({
-  kb, allOrgs, onSelect, onChat, onEdit, onDelete, onAdopt, onRemoveRef, pinned, onTogglePin,
+  kb, allOrgs, onSelect, onChat, onEdit, onDelete, onAdopt, onClone, onRemoveRef, pinned, onTogglePin,
 }: KBGridCardProps) {
   const badge = STATUS_BADGE[kb.status] || STATUS_BADGE.empty
   const isReady = kb.status === 'ready'
@@ -246,7 +247,7 @@ function KBGridCard({
       )}
 
       {/* Actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'auto', paddingTop: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 'auto', paddingTop: 4 }}>
         {isReady && (
           <button
             onClick={(e) => { e.stopPropagation(); onChat(isReference ? kb.source_kb_uuid! : kb.uuid, kb.title) }}
@@ -288,6 +289,21 @@ function KBGridCard({
           >
             <Bookmark size={11} />
             Add to My KBs
+          </button>
+        )}
+        {onClone && !isUnavailable && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onClone(canonicalUuid) }}
+            title="Make an editable copy of this knowledge base"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '4px 10px', fontSize: 11, fontWeight: 600, fontFamily: 'inherit',
+              color: '#ccc', backgroundColor: 'transparent',
+              border: `1px solid ${C.border}`, borderRadius: 4, cursor: 'pointer',
+            }}
+          >
+            <Copy size={11} />
+            Clone
           </button>
         )}
         {isReference && onRemoveRef && kb.reference_uuid && (
@@ -334,6 +350,7 @@ interface KBGridViewProps {
   onEdit?: (uuid: string) => void
   onDelete?: (uuid: string) => void
   onAdopt?: (uuid: string) => void
+  onClone?: (uuid: string) => void
   onRemoveRef?: (refUuid: string) => void
   emptyMessage?: string
   emptyComponent?: ReactNode
@@ -347,7 +364,7 @@ interface KBGridViewProps {
 
 export function KBGridView({
   scope, search, allOrgs,
-  onSelect, onChat, onEdit, onDelete, onAdopt, onRemoveRef,
+  onSelect, onChat, onEdit, onDelete, onAdopt, onClone, onRemoveRef,
   emptyMessage = 'No knowledge bases found.',
   emptyComponent,
   filterUuids, pinnedUuids, onTogglePin,
@@ -424,6 +441,7 @@ export function KBGridView({
             onEdit={onEdit}
             onDelete={onDelete}
             onAdopt={onAdopt}
+            onClone={onClone}
             onRemoveRef={onRemoveRef}
             pinned={pinnedUuids?.has(kb.is_reference ? (kb.source_kb_uuid || kb.uuid) : kb.uuid)}
             onTogglePin={onTogglePin}

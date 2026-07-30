@@ -238,6 +238,24 @@ export function KnowledgePanel() {
     }
   }
 
+  // Clone lands an owned, editable copy in My KBs (sources re-ingest in the
+  // background, so it opens in 'building' status).
+  const handleClone = async (uuid: string) => {
+    try {
+      const clone = await api.cloneKnowledgeBase(uuid)
+      const newUuid = (clone as { uuid?: string }).uuid
+      toast('Knowledge base cloned — sources are re-indexing', 'success')
+      refresh()
+      if (newUuid) {
+        setActiveTab('mine')
+        loadDetail(newUuid)
+      }
+    } catch (err) {
+      console.error('Failed to clone KB:', err)
+      toast(err instanceof Error ? err.message : 'Failed to clone knowledge base', 'error')
+    }
+  }
+
   const handleSharedDeleteChoice = async (choice: SharedKBDeleteChoice) => {
     const kb = sharedDeleteTarget
     if (!kb) return
@@ -635,6 +653,9 @@ export function KnowledgePanel() {
     // hit "You don't have permission to manage this knowledge base." on submit.
     const canManageKB = selectedKB.can_manage !== false
     const noManageReason = "You don't have permission to manage this knowledge base."
+    // A ready KB with zero indexed chunks has nothing to retrieve — chatting
+    // with it only produces a misleading "still indexing" reply.
+    const canChatKB = selectedKB.status === 'ready' && selectedKB.total_chunks > 0
     return (
       <>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#1e1e1e', position: 'relative' }}>
@@ -959,16 +980,19 @@ export function KnowledgePanel() {
               </button>
               <button
                 onClick={handleChat}
-                disabled={selectedKB.status !== 'ready'}
+                disabled={!canChatKB}
+                title={!canChatKB && selectedKB.status === 'ready'
+                  ? 'This knowledge base has no indexed content yet'
+                  : undefined}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
-                  color: selectedKB.status === 'ready' ? 'var(--highlight-text-color, #000)' : '#666',
-                  backgroundColor: selectedKB.status === 'ready' ? 'var(--highlight-color, #eab308)' : '#2a2a2a',
-                  border: selectedKB.status === 'ready' ? 'none' : '1px solid #3a3a3a',
+                  color: canChatKB ? 'var(--highlight-text-color, #000)' : '#666',
+                  backgroundColor: canChatKB ? 'var(--highlight-color, #eab308)' : '#2a2a2a',
+                  border: canChatKB ? 'none' : '1px solid #3a3a3a',
                   borderRadius: 6,
-                  cursor: selectedKB.status === 'ready' ? 'pointer' : 'default',
-                  opacity: selectedKB.status === 'ready' ? 1 : 0.5,
+                  cursor: canChatKB ? 'pointer' : 'default',
+                  opacity: canChatKB ? 1 : 0.5,
                 }}
               >
                 <MessageSquare size={13} />
@@ -1710,6 +1734,7 @@ export function KnowledgePanel() {
             onChat={(uuid, title) => activateKB(uuid, title)}
             onEdit={loadDetail}
             onDelete={activeTab === 'mine' ? handleDelete : undefined}
+            onClone={handleClone}
             onAdopt={activeTab === 'team'
               ? async (uuid) => {
                   try {
