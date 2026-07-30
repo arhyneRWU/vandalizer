@@ -10,26 +10,10 @@ import {
   getUsageStats, getUsageTimeseries,
 } from '../../api/admin'
 import type { UsageStats, TimeseriesResponse } from '../../api/admin'
-import { formatNumber } from './shared/format'
+import { downloadCSV, formatNumber } from './shared/format'
 import { TrendDelta, KpiCard, ExportButton, TimeRangeSelector } from './shared/primitives'
 
 const CHART_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4']
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 export function UsageTab() {
   const [stats, setStats] = useState<UsageStats | null>(null)

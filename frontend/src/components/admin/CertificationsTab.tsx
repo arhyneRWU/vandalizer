@@ -4,35 +4,8 @@ import {
   getCertificationProgressList, setCertificationUnlock,
   type CertificationProgressItem,
 } from '../../api/admin'
-import { formatNumber } from './shared/format'
+import { downloadCSV, formatDate, formatNumber } from './shared/format'
 import { ExportButton, SearchInput, UserAvatar } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 export function CertificationsTab() {
   const [items, setItems] = useState<CertificationProgressItem[]>([])

@@ -14,23 +14,8 @@ import {
   type QualityTimelinePoint, type RegressionResult, type SystemConfigData,
 } from '../../api/admin'
 import { relativeTime } from '../../utils/time'
+import { downloadCSV } from './shared/format'
 import { ExportButton, KpiCard, SortableHeader } from './shared/primitives'
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 export function QualityTab() {
   const [summary, setSummary] = useState<QualitySummary | null>(null)

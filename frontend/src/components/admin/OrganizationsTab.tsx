@@ -227,28 +227,99 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
   )
 }
 
-function parseCSV(text: string): { name: string; parent_name: string; org_type: string }[] {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+/**
+ * Tokenize one CSV record into fields, honoring RFC 4180 quoting basics: a
+ * double-quoted field may contain commas, and a doubled quote (`""`) inside a
+ * quoted field is a literal quote. Unquoted fields are trimmed; the interior
+ * spacing of quoted fields is preserved.
+ *
+ * Known limitation: this is a per-line tokenizer, so it does NOT support a
+ * newline embedded inside a quoted field — that would require tokenizing the
+ * whole document rather than one line at a time. Not attempted here.
+ */
+function splitCsvLine(line: string): string[] {
+  const fields: string[] = []
+  const len = line.length
+  let i = 0
+  while (i <= len) {
+    while (i < len && (line[i] === ' ' || line[i] === '\t')) i++
+    if (line[i] === '"') {
+      i++ // consume opening quote
+      let field = ''
+      while (i < len) {
+        if (line[i] === '"') {
+          if (line[i + 1] === '"') { field += '"'; i += 2; continue }
+          i++ // consume closing quote
+          break
+        }
+        field += line[i]
+        i++
+      }
+      // discard anything between the closing quote and the next comma
+      while (i < len && line[i] !== ',') i++
+      fields.push(field)
+    } else {
+      const start = i
+      while (i < len && line[i] !== ',') i++
+      fields.push(line.slice(start, i).trim())
+    }
+    if (i < len && line[i] === ',') { i++; continue }
+    break
+  }
+  return fields
+}
+
+export function parseCSV(text: string): { name: string; parent_name: string; org_type: string }[] {
+  // Strip a trailing \r explicitly (Windows line endings) before tokenizing,
+  // rather than relying on incidental whole-line trimming.
+  const rawLines = text.split('\n').map(l => l.replace(/\r$/, ''))
+  const lines = rawLines.filter(l => l.trim().length > 0)
   if (lines.length < 2) return []
-  const header = lines[0].toLowerCase().split(',').map(h => h.trim())
+  const header = splitCsvLine(lines[0]).map(h => h.trim().toLowerCase())
   const nameIdx = header.findIndex(h => h === 'name')
   const parentIdx = header.findIndex(h => h === 'parent' || h === 'parent_name')
   if (nameIdx < 0) return []
 
-  const rows: { name: string; parent_name: string; org_type: string }[] = []
-  // Build depth map for auto-type assignment
-  const depthOf: Record<string, number> = {}
-
+  // Phase 1: collect raw rows (name + parent_name) in file order, with no
+  // depth computation yet — CSV row order is not guaranteed to be
+  // topological (a child row may appear before its parent).
+  const raw: { name: string; parent_name: string }[] = []
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim())
+    const cols = splitCsvLine(lines[i])
     const name = cols[nameIdx] || ''
     const parent = parentIdx >= 0 ? (cols[parentIdx] || '') : ''
     if (!name) continue
-    const parentDepth = parent ? (depthOf[parent] ?? 0) : -1
-    const myDepth = parentDepth + 1
-    depthOf[name] = myDepth
+    raw.push({ name, parent_name: parent })
+  }
+
+  // Phase 2: resolve each row's depth order-independently by walking up the
+  // parent chain, memoizing as we go. A dangling parent reference (a name
+  // that never appears as any row's `name`) is treated as depth 0, matching
+  // today's fallback behavior. The walk is capped at the number of rows and
+  // tracks the names currently being resolved, so a cyclic reference
+  // (A -> B -> A) cannot recurse forever.
+  const parentOf: Record<string, string> = {}
+  for (const r of raw) if (r.parent_name) parentOf[r.name] = r.parent_name
+
+  const depthCache: Record<string, number> = {}
+  const cap = raw.length
+  const resolveDepth = (name: string, visiting: Set<string>): number => {
+    if (name in depthCache) return depthCache[name]
+    if (visiting.has(name) || visiting.size >= cap) return 0
+    const parent = parentOf[name]
+    if (!parent) { depthCache[name] = 0; return 0 }
+    visiting.add(name)
+    const depth = resolveDepth(parent, visiting) + 1
+    visiting.delete(name)
+    depthCache[name] = depth
+    return depth
+  }
+
+  const rows: { name: string; parent_name: string; org_type: string }[] = []
+  for (const r of raw) {
+    const myDepth = resolveDepth(r.name, new Set())
     const autoType = DEPTH_TYPE_DEFAULTS[Math.min(myDepth, DEPTH_TYPE_DEFAULTS.length - 1)]
-    rows.push({ name, parent_name: parent, org_type: autoType })
+    rows.push({ name: r.name, parent_name: r.parent_name, org_type: autoType })
   }
   return rows
 }
@@ -264,12 +335,21 @@ function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported
     if (!file) return
     const reader = new FileReader()
     reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      const parsed = parseCSV(text)
-      if (parsed.length === 0) { setError('No valid rows found. CSV must have a "name" column.'); return }
+      const result = ev.target?.result
+      if (typeof result !== 'string') {
+        setError('Could not read the file as text.')
+        return
+      }
+      const lines = result.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim().length > 0)
+      if (lines.length === 0) { setError('The CSV file is empty.'); return }
+      const header = splitCsvLine(lines[0]).map(h => h.trim().toLowerCase())
+      if (!header.includes('name')) { setError('CSV must have a "name" column.'); return }
+      const parsed = parseCSV(result)
+      if (parsed.length === 0) { setError('CSV has a "name" column but no data rows.'); return }
       setError(null)
       setRows(parsed)
     }
+    reader.onerror = () => { setError('Failed to read the file.') }
     reader.readAsText(file)
   }
 
