@@ -22,7 +22,7 @@ from app.models.search_set import SearchSet, SearchSetItem
 from app.models.system_config import SystemConfig
 from app.models.team import Team
 from app.models.workflow import Workflow, WorkflowStep, WorkflowStepTask
-from app.services import access_control
+from app.services import access_control, audit_service
 
 if TYPE_CHECKING:
     from app.models.user import User
@@ -301,8 +301,21 @@ async def remove_item(library_id: str, item_id: str, user: User) -> bool:
     await lib.save()
 
     item = await LibraryItem.get(item_oid)
+    item_name = None
+    detail: dict = {"library": lib.title, "library_scope": lib.scope.value}
     if item:
+        deref = await _dereference_item(item)
+        item_name = (deref or {}).get("name") or None
+        detail["kind"] = item.kind.value
         await item.delete()
+    await audit_service.log_event(
+        action="library_item.remove",
+        actor_user_id=user.user_id,
+        resource_type="library_item",
+        resource_id=item_id,
+        resource_name=item_name,
+        detail=detail,
+    )
     return True
 
 

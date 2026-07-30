@@ -25,7 +25,7 @@ from app.models.knowledge import (
     KnowledgeBaseUsage,
 )
 from app.models.user import User
-from app.services import access_control, name_conflicts
+from app.services import access_control, audit_service, name_conflicts
 from app.services.document_manager import DocumentManager
 from app.utils.fetch_errors import describe_fetch_error
 from app.utils.url_validation import normalize_crawl_url as _normalize_crawl_url
@@ -481,6 +481,19 @@ async def delete_knowledge_base(
         KnowledgeBaseReference.source_kb_uuid == kb.uuid,
     ).delete()
     await kb.delete()
+    await audit_service.log_event(
+        action="knowledge_base.delete",
+        actor_user_id=user.user_id,
+        resource_type="knowledge_base",
+        resource_id=kb.uuid,
+        resource_name=kb.title,
+        team_id=kb.team_id,
+        detail={
+            "shared_with_team": kb.shared_with_team,
+            "verified": kb.verified,
+            "total_sources": kb.total_sources,
+        },
+    )
     return True
 
 

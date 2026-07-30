@@ -34,7 +34,7 @@ from app.schemas.chat import (
     TruncateContextRequest,
 )
 from app.services import access_control, organization_service
-from app.services import activity_service
+from app.services import activity_service, audit_service
 from app.services.chat_service import chat_stream
 
 logger = logging.getLogger(__name__)
@@ -596,6 +596,8 @@ async def delete_chat_history(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    message_count = len(conversation.messages or [])
+
     # Delete messages
     if conversation.messages:
         await ChatMessage.find({"_id": {"$in": conversation.messages}}).delete()
@@ -611,6 +613,15 @@ async def delete_chat_history(
         ).delete()
 
     await conversation.delete()
+    await audit_service.log_event(
+        action="chat.delete",
+        actor_user_id=user.user_id,
+        resource_type="chat",
+        resource_id=conversation_uuid,
+        resource_name=conversation.title,
+        team_id=conversation.team_id,
+        detail={"messages_deleted": message_count},
+    )
     return {"success": True, "message": "Conversation deleted successfully"}
 
 

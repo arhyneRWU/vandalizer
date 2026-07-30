@@ -29,6 +29,10 @@ export function AuditTab() {
     'extraction.run': '#dbeafe', 'workflow.run': '#f3e8ff',
     'workflow.approve': '#dcfce7', 'workflow.reject': '#fee2e2',
     'user.login': '#f3f4f6', 'config.update': '#ffedd5',
+    'folder.delete': '#fee2e2', 'knowledge_base.delete': '#fee2e2',
+    'credential.delete': '#fee2e2', 'extraction.delete': '#fee2e2',
+    'automation.delete': '#fee2e2', 'chat.delete': '#fee2e2',
+    'library_item.remove': '#fee2e2',
   }
   const totalPages = Math.ceil(total / limit)
 
@@ -47,8 +51,8 @@ export function AuditTab() {
         <select value={resourceTypeFilter} onChange={e => { setResourceTypeFilter(e.target.value); setPage(0) }}
           style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13, fontFamily: 'inherit' }}>
           <option value="">All resources</option>
-          {['document','workflow','extraction','user','team','config','organization','approval'].map(r => (
-            <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+          {['document','folder','workflow','extraction','knowledge_base','credential','automation','chat','library_item','user','team','config','organization','approval'].map(r => (
+            <option key={r} value={r}>{r.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}</option>
           ))}
         </select>
       </div>

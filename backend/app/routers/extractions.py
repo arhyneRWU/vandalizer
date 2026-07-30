@@ -20,7 +20,7 @@ from app.dependencies import get_api_key_user, get_current_user
 from app.rate_limit import limiter
 from app.models.activity import ActivityStatus, ActivityType
 from app.models.user import User
-from app.services import access_control, activity_service
+from app.services import access_control, activity_service, audit_service
 from app.schemas.extractions import (
     BuildFromDocumentRequest,
     CreateSearchSetRequest,
@@ -208,10 +208,18 @@ async def update_search_set(uuid: str, req: UpdateSearchSetRequest, user: User =
 
 @router.delete("/search-sets/{uuid}")
 async def delete_search_set(uuid: str, user: User = Depends(get_current_user)):
-    await _get_search_set_or_404(uuid, user, manage=True)
+    ss = await _get_search_set_or_404(uuid, user, manage=True)
     ok = await svc.delete_search_set(uuid)
     if not ok:
         raise HTTPException(status_code=404, detail="SearchSet not found")
+    await audit_service.log_event(
+        action="extraction.delete",
+        actor_user_id=user.user_id,
+        resource_type="extraction",
+        resource_id=uuid,
+        resource_name=ss.title,
+        team_id=ss.team_id,
+    )
     return {"ok": True}
 
 
