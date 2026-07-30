@@ -38,6 +38,10 @@ def normalize_results(results, expected_keys: list[str] | None = None) -> dict[s
             if not isinstance(item, dict):
                 continue
             for k, v in item.items():
+                # Reserved source-tracking sidecar (dict-valued — unhashable,
+                # and not a field value anyway).
+                if k == "_field_sources":
+                    continue
                 if v in (None, "", [], {}):
                     continue
                 if v in seen[k]:

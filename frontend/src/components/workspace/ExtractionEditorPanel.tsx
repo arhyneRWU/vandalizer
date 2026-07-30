@@ -34,7 +34,7 @@ import {
 } from '../../api/extractions'
 import { RunHistoryTab } from './RunHistoryTab'
 import { ApiError } from '../../api/client'
-import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry } from '../../api/extractions'
+import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap } from '../../api/extractions'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
 import { ExtractionAutovalidatePanel } from '../extractions/ExtractionAutovalidatePanel'
@@ -103,7 +103,7 @@ interface ExtractionConfig {
 
 export function ExtractionEditorPanel() {
   const queryClient = useQueryClient()
-  const { openExtractionId, extractionOpenSignal, openExtraction, closeExtraction, selectedDocUuids, selectedDocNames, setHighlightTerms, bumpActivitySignal, consumeExtractionResults, activeProjectUuid, activeProjectRootFolder } = useWorkspace()
+  const { openExtractionId, extractionOpenSignal, openExtraction, closeExtraction, selectedDocUuids, selectedDocNames, setHighlightTerms, viewDocument, bumpActivitySignal, consumeExtractionResults, activeProjectUuid, activeProjectRootFolder } = useWorkspace()
   const { toast } = useToast()
   const { user } = useAuth()
   const shareLink = useShareLink()
@@ -116,11 +116,14 @@ export function ExtractionEditorPanel() {
   const [newTerm, setNewTerm] = useState('')
   const [running, setRunning] = useState(false)
   const [resultSets, setResultSets] = useState<Record<string, string>[]>([])
+  // Per-field source info, index-aligned with resultSets.
+  const [resultSourceSets, setResultSourceSets] = useState<ExtractionSourceMap[]>([])
   const [resultDocNames, setResultDocNames] = useState<string[]>([])
   const [activeResultIdx, setActiveResultIdx] = useState(0)
   const [combinedContext, setCombinedContext] = useState(false)
 
   const results = resultSets[activeResultIdx] ?? {}
+  const resultSources = resultSourceSets[activeResultIdx] ?? {}
   const [attachingTemplate, setAttachingTemplate] = useState(false)
   const [generatingTemplate, setGeneratingTemplate] = useState(false)
   const [exportingPdf, setExportingPdf] = useState(false)
@@ -169,7 +172,8 @@ export function ExtractionEditorPanel() {
     if (!openExtractionId) return
     setLoading(true)
     const pending = consumeExtractionResults()
-    setResultSets(pending ? [pending] : [])
+    setResultSets(pending ? [pending.values] : [])
+    setResultSourceSets(pending ? [pending.sources ?? {}] : [])
     setResultDocNames([])
     setActiveResultIdx(0)
     setActiveTab('design')
@@ -260,18 +264,21 @@ export function ExtractionEditorPanel() {
         document_uuids: docUuids,
         combined_context: combinedContext,
       })
-      // Build result sets — one per entity object returned
+      // Build result sets — one per entity object returned. `sources` from
+      // the backend is index-aligned with `results`.
       const sets: Record<string, string>[] = []
+      const srcSets: ExtractionSourceMap[] = []
       if (resp.results && resp.results.length > 0) {
-        for (const entity of resp.results) {
+        resp.results.forEach((entity, i) => {
           if (typeof entity === 'object' && entity !== null) {
             const map: Record<string, string> = {}
             for (const [k, v] of Object.entries(entity as Record<string, unknown>)) {
               map[k] = v === null ? 'N/A' : String(v)
             }
             sets.push(map)
+            srcSets.push(resp.sources?.[i] ?? {})
           }
-        }
+        })
       }
       const finalSets = sets.length > 0 ? sets : [{}]
       if (sets.length === 0) {
@@ -280,6 +287,7 @@ export function ExtractionEditorPanel() {
         toast('Extraction finished but returned no values — see the History tab for details', 'info')
       }
       setResultSets(finalSets)
+      setResultSourceSets(sets.length > 0 ? srcSets : [{}])
       setResultDocNames(finalSets.map((_, i) => runDocNames[i] ?? `Result ${i + 1}`))
       setActiveResultIdx(0)
     } catch (err) {
@@ -289,12 +297,13 @@ export function ExtractionEditorPanel() {
         // land here instead of only in the History tab.
         const run = await recoverRunFromHistory(openExtractionId)
         if (run?.status === 'completed') {
-          const snap = run.result_snapshot as { normalized?: Record<string, unknown> } | undefined
+          const snap = run.result_snapshot as { normalized?: Record<string, unknown>; sources?: ExtractionSourceMap } | undefined
           const map: Record<string, string> = {}
           for (const [k, v] of Object.entries(snap?.normalized ?? {})) {
             map[k] = v === null ? 'N/A' : String(v)
           }
           setResultSets([map])
+          setResultSourceSets([snap?.sources ?? {}])
           // The history snapshot merges all documents into one value map, so
           // a multi-doc run recovers as a single combined result set.
           setResultDocNames([docUuids.length > 1 ? `Combined (${docUuids.length} docs)` : runDocNames[0] ?? 'Result 1'])
@@ -311,6 +320,38 @@ export function ExtractionEditorPanel() {
       setRunning(false)
       bumpActivitySignal()
     }
+  }
+
+  // --- Click-to-source ---
+  // Clicking a value copies it and shows where in the document it came from.
+  // With source tracking, that means the verified verbatim passage on its
+  // page; without it (older runs), fall back to a plain text search.
+  const handleValueClick = (field: string, value: string) => {
+    navigator.clipboard.writeText(value)
+      .then(() => toast('Copied to clipboard', 'success'))
+      .catch(() => toast('Failed to copy to clipboard', 'error'))
+
+    const src: ExtractionFieldSource | undefined = resultSources[field]
+    if (src && src.verified && src.quote) {
+      const highlight = { terms: [src.quote], page: src.page ?? null }
+      if (src.document_uuid) {
+        // Routes through the open-document request so this works even when
+        // the source document isn't the one currently in the viewer.
+        viewDocument(src.document_uuid, src.document_title ?? 'Document', highlight)
+      } else {
+        setHighlightTerms(highlight.terms, highlight.page)
+      }
+      return
+    }
+    if (src) {
+      // The backend couldn't trace this answer back to the document text.
+      setHighlightTerms([])
+      toast("No source found — this value couldn't be traced back to the document, so double-check it before relying on it", 'info')
+      return
+    }
+    // Legacy run without source data — search for the value's own wording,
+    // minus any markdown emphasis the model wrapped it in.
+    setHighlightTerms([value.replace(/^[\s*_`]+|[\s*_`]+$/g, '')])
   }
 
   // --- Export ---
@@ -763,7 +804,8 @@ export function ExtractionEditorPanel() {
           onUpdateItem={update}
           onReorder={reorder}
           searchSetUuid={openExtractionId ?? undefined}
-          onHighlightValue={setHighlightTerms}
+          onValueClick={handleValueClick}
+          sources={resultSources}
           resultSets={resultSets}
           activeResultIdx={activeResultIdx}
           onSetActiveResultIdx={setActiveResultIdx}
@@ -1069,7 +1111,8 @@ function DesignTab({
   onUpdateItem,
   onReorder,
   searchSetUuid,
-  onHighlightValue,
+  onValueClick,
+  sources,
   resultSets,
   activeResultIdx,
   onSetActiveResultIdx,
@@ -1089,12 +1132,12 @@ function DesignTab({
   onUpdateItem: (id: string, data: { searchphrase?: string; title?: string; is_optional?: boolean; enum_values?: string[] }) => void
   onReorder: (itemIds: string[]) => void
   searchSetUuid?: string
-  onHighlightValue: (terms: string[]) => void
+  onValueClick: (field: string, value: string) => void
+  sources: ExtractionSourceMap
   resultSets: Record<string, string>[]
   activeResultIdx: number
   onSetActiveResultIdx: (idx: number) => void
 }) {
-  const { toast } = useToast()
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [overIdx, setOverIdx] = useState<number | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -1546,39 +1589,68 @@ function DesignTab({
                     <X style={{ width: 14, height: 14 }} aria-hidden="true" />
                   </button>
                 </div>
-                {resultVal !== undefined && (
-                  <div
-                    onClick={() => {
-                      if (resultVal && resultVal !== 'N/A') {
-                        onHighlightValue([resultVal])
-                        navigator.clipboard.writeText(resultVal)
-                          .then(() => toast('Copied to clipboard', 'success'))
-                          .catch(() => toast('Failed to copy to clipboard', 'error'))
-                      }
-                    }}
-                    style={{
-                      marginTop: 4,
-                      marginLeft: 42,
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: '#202124',
-                      cursor: resultVal && resultVal !== 'N/A' ? 'pointer' : 'default',
-                      borderRadius: 4,
-                      padding: '2px 4px',
-                      transition: 'background-color 0.15s',
-                    }}
-                    onMouseEnter={e => {
-                      if (resultVal && resultVal !== 'N/A')
-                        (e.currentTarget as HTMLElement).style.backgroundColor = '#fef9c3'
-                    }}
-                    onMouseLeave={e => {
-                      (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent'
-                    }}
-                    title={resultVal && resultVal !== 'N/A' ? 'Click to highlight in PDF' : undefined}
-                  >
-                    {resultVal}
-                  </div>
-                )}
+                {resultVal !== undefined && (() => {
+                  const src = sources[item.searchphrase]
+                  const clickable = !!resultVal && resultVal !== 'N/A'
+                  const hasSource = !!src?.verified && !!src?.quote
+                  const noSource = !!src && !hasSource
+                  const clickTitle = !clickable
+                    ? undefined
+                    : hasSource
+                      ? `Click to show the source passage${src?.page != null ? ` (page ${src.page})` : ''}`
+                      : noSource
+                        ? 'No source found for this value — click to copy'
+                        : 'Click to highlight in PDF'
+                  return (
+                    <div
+                      onClick={() => {
+                        if (clickable) onValueClick(item.searchphrase, resultVal)
+                      }}
+                      style={{
+                        marginTop: 4,
+                        marginLeft: 42,
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: '#202124',
+                        cursor: clickable ? 'pointer' : 'default',
+                        borderRadius: 4,
+                        padding: '2px 4px',
+                        transition: 'background-color 0.15s',
+                      }}
+                      onMouseEnter={e => {
+                        if (clickable)
+                          (e.currentTarget as HTMLElement).style.backgroundColor = '#fef9c3'
+                      }}
+                      onMouseLeave={e => {
+                        (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent'
+                      }}
+                      title={clickTitle}
+                    >
+                      {resultVal}
+                      {clickable && hasSource && src?.page != null && (
+                        <span style={{
+                          marginLeft: 6, fontSize: 10, fontWeight: 500, color: '#1d4ed8',
+                          background: '#eff6ff', borderRadius: 3, padding: '1px 4px',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          p. {src.page}
+                        </span>
+                      )}
+                      {clickable && noSource && (
+                        <span
+                          title="This value couldn't be traced back to the document — double-check it before relying on it"
+                          style={{
+                            marginLeft: 6, fontSize: 10, fontWeight: 500, color: '#92400e',
+                            background: '#fef3c7', borderRadius: 3, padding: '1px 4px',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          no source
+                        </span>
+                      )}
+                    </div>
+                  )
+                })()}
                 {expandedSettingsId === item.id && (
                   <div id={`field-settings-${item.id}`} style={{
                     marginTop: 6,

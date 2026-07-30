@@ -1,9 +1,24 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useTeams } from '../hooks/useTeams'
+import type { ExtractionSourceMap } from '../api/extractions'
 
 type RightTab = 'assistant' | 'library'
 export type WorkspaceMode = 'chat' | 'files' | 'automations' | 'knowledge' | 'projects'
+
+// Cross-panel "open this document" request; `highlight` optionally carries
+// terms + page to apply once the viewer opens (extraction source tracking),
+// instead of the default highlight-clearing behavior.
+export interface ViewDocumentRequest {
+  uuid: string
+  title: string
+  highlight?: { terms: string[]; page: number | null }
+}
+
+export interface PendingExtractionResults {
+  values: Record<string, string>
+  sources?: ExtractionSourceMap
+}
 
 // ---------------------------------------------------------------------------
 // 1. Navigation Context — URL-synced panels, mode, tab
@@ -24,9 +39,9 @@ interface NavigationContextValue {
   // runs of the same workflow in the Activity rail).
   workflowOpenSignal: number
   openExtractionId: string | null
-  openExtraction: (uuid: string, initialResults?: Record<string, string>) => void
+  openExtraction: (uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap) => void
   closeExtraction: () => void
-  consumeExtractionResults: () => Record<string, string> | null
+  consumeExtractionResults: () => PendingExtractionResults | null
   // Same as workflowOpenSignal, for the extraction panel.
   extractionOpenSignal: number
   openAutomationId: string | null
@@ -111,11 +126,15 @@ interface UIStateContextValue {
   panelSplit: number
   setPanelSplit: (pct: number, skipPersist?: boolean) => void
   highlightTerms: string[]
-  setHighlightTerms: (terms: string[]) => void
+  // Page hint for the current highlight terms (1-based, from extraction
+  // source tracking) — lets the viewer jump to the right page even when the
+  // passage itself can't be text-matched.
+  highlightPage: number | null
+  setHighlightTerms: (terms: string[], page?: number | null) => void
   activitySignal: number
   bumpActivitySignal: () => void
-  viewDocumentRequest: { uuid: string; title: string } | null
-  viewDocument: (uuid: string, title: string) => void
+  viewDocumentRequest: ViewDocumentRequest | null
+  viewDocument: (uuid: string, title: string, highlight?: ViewDocumentRequest['highlight']) => void
   clearViewDocumentRequest: () => void
 }
 
@@ -233,7 +252,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [newChatSignal, setNewChatSignal] = useState(0)
   const [focusChatSignal, setFocusChatSignal] = useState(0)
   const [pendingChatMessage, setPendingChatMessage] = useState<PendingChatMessage | null>(null)
-  const [highlightTerms, setHighlightTerms] = useState<string[]>([])
+  const [highlightTerms, _setHighlightTerms] = useState<string[]>([])
+  const [highlightPage, setHighlightPage] = useState<number | null>(null)
+  // Terms and their page hint always move together — a stale page from a
+  // previous highlight must never survive a new set/clear.
+  const setHighlightTerms = useCallback((terms: string[], page?: number | null) => {
+    _setHighlightTerms(terms)
+    setHighlightPage(page ?? null)
+  }, [])
   const [activitySignal, setActivitySignal] = useState(0)
   const [processingDoc, setProcessingDoc] = useState<{ title: string; status: string | null } | null>(null)
   const [selectedDocsProcessing, _setSelectedDocsProcessing] = useState<Array<{ uuid: string; title: string; status: string | null }>>([])
@@ -259,8 +285,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeProjectRootFolder, setActiveProjectRootFolder] = useState<string | null>(null)
   const [activeProjectTeamId, setActiveProjectTeamId] = useState<string | null>(null)
   const [activeProjectRole, setActiveProjectRole] = useState<string | null>(null)
-  const [viewDocumentRequest, setViewDocumentRequest] = useState<{ uuid: string; title: string } | null>(null)
-  const pendingExtractionResultsRef = useRef<Record<string, string> | null>(null)
+  const [viewDocumentRequest, setViewDocumentRequest] = useState<ViewDocumentRequest | null>(null)
+  const pendingExtractionResultsRef = useRef<PendingExtractionResults | null>(null)
   const pendingWorkflowSessionRef = useRef<string | null>(null)
   const [workflowOpenSignal, setWorkflowOpenSignal] = useState(0)
   const [extractionOpenSignal, setExtractionOpenSignal] = useState(0)
@@ -309,13 +335,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return s
   }, [])
 
-  const openExtraction = useCallback((uuid: string, initialResults?: Record<string, string>) => {
-    pendingExtractionResultsRef.current = initialResults ?? null
+  const openExtraction = useCallback((uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap) => {
+    pendingExtractionResultsRef.current = initialResults
+      ? { values: initialResults, sources: initialSources }
+      : null
     setExtractionOpenSignal(prev => prev + 1)
     updateSearch((prev) => ({ ...prev, extraction: uuid, workflow: undefined, automation: undefined }))
   }, [updateSearch])
 
-  const consumeExtractionResults = useCallback((): Record<string, string> | null => {
+  const consumeExtractionResults = useCallback((): PendingExtractionResults | null => {
     const r = pendingExtractionResultsRef.current
     pendingExtractionResultsRef.current = null
     return r
@@ -349,7 +377,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setActiveProjectRootFolder(null)
     setActiveProjectTeamId(null)
     setActiveProjectRole(null)
-  }, [updateSearch])
+  }, [updateSearch, setHighlightTerms])
 
   // ── Chat callbacks ──────────────────────────────────────────────────────
 
@@ -607,8 +635,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const viewDocument = useCallback((uuid: string, title: string) => {
-    setViewDocumentRequest({ uuid, title })
+  const viewDocument = useCallback((uuid: string, title: string, highlight?: ViewDocumentRequest['highlight']) => {
+    setViewDocumentRequest({ uuid, title, highlight })
   }, [])
 
   const clearViewDocumentRequest = useCallback(() => {
@@ -666,14 +694,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     selectedFolderUuids, setSelectedFolderUuids,
     railDocked, toggleRailDocked,
     panelSplit, setPanelSplit,
-    highlightTerms, setHighlightTerms,
+    highlightTerms, highlightPage, setHighlightTerms,
     activitySignal, bumpActivitySignal,
     viewDocumentRequest, viewDocument, clearViewDocumentRequest,
   }), [
     selectedDocUuids, selectedDocNames, selectedFolderUuids,
     railDocked, toggleRailDocked,
     panelSplit, setPanelSplit,
-    highlightTerms, activitySignal, bumpActivitySignal,
+    highlightTerms, highlightPage, setHighlightTerms,
+    activitySignal, bumpActivitySignal,
     viewDocumentRequest, viewDocument, clearViewDocumentRequest,
   ])
 
