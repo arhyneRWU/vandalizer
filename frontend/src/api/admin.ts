@@ -170,9 +170,17 @@ export interface UserLeaderboardItem {
   last_active: string | null
 }
 
-export function getUserLeaderboard(days?: number) {
-  const url = days ? `/api/admin/users?days=${days}` : '/api/admin/users'
-  return apiFetch<UserLeaderboardItem[]>(url)
+export interface UserLeaderboardResponse {
+  items: UserLeaderboardItem[]
+  total: number
+  capped: boolean
+}
+
+export function getUserLeaderboard(days?: number, limit: number = 500) {
+  const params = new URLSearchParams()
+  if (days) params.set('days', String(days))
+  params.set('limit', String(limit))
+  return apiFetch<UserLeaderboardResponse>(`/api/admin/users?${params.toString()}`)
 }
 
 // Teams
@@ -188,9 +196,17 @@ export interface TeamLeaderboardItem {
   avg_latency_ms: number | null
 }
 
-export function getTeamLeaderboard(days?: number) {
-  const url = days ? `/api/admin/teams?days=${days}` : '/api/admin/teams'
-  return apiFetch<TeamLeaderboardItem[]>(url)
+export interface TeamLeaderboardResponse {
+  items: TeamLeaderboardItem[]
+  total: number
+  capped: boolean
+}
+
+export function getTeamLeaderboard(days?: number, limit: number = 500) {
+  const params = new URLSearchParams()
+  if (days) params.set('days', String(days))
+  params.set('limit', String(limit))
+  return apiFetch<TeamLeaderboardResponse>(`/api/admin/teams?${params.toString()}`)
 }
 
 // Team Detail
@@ -340,7 +356,7 @@ export interface SystemConfigData {
   quality_config: Record<string, unknown>
   auth_methods: string[]
   oauth_providers: Record<string, unknown>[]
-  available_models: { name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null }[]
+  available_models: { id: string; name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null }[]
   default_model: string
   ocr_endpoint: string
   ocr_api_key: string
@@ -379,14 +395,26 @@ export interface AdminTeamItem {
   is_default: boolean
 }
 
+export interface AdminTeamListResponse {
+  items: AdminTeamItem[]
+  total: number
+  capped: boolean
+}
+
 export interface IsolatedUserItem {
   user_id: string
   name: string | null
   email: string | null
 }
 
-export function adminListAllTeams() {
-  return apiFetch<AdminTeamItem[]>('/api/admin/teams/all')
+export interface IsolatedUsersResponse {
+  items: IsolatedUserItem[]
+  total: number
+  capped: boolean
+}
+
+export function adminListAllTeams(limit: number = 500) {
+  return apiFetch<AdminTeamListResponse>(`/api/admin/teams/all?limit=${limit}`)
 }
 
 export function adminCreateTeam(name: string) {
@@ -404,8 +432,8 @@ export function adminRemoveUserFromTeam(teamUuid: string, userId: string) {
   return apiFetch<{ ok: boolean }>(`/api/admin/teams/${teamUuid}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' })
 }
 
-export function getIsolatedUsers() {
-  return apiFetch<IsolatedUserItem[]>('/api/admin/users/isolated')
+export function getIsolatedUsers(limit: number = 500) {
+  return apiFetch<IsolatedUsersResponse>(`/api/admin/users/isolated?limit=${limit}`)
 }
 
 export function updateUserRoles(userId: string, roles: { is_admin?: boolean; is_staff?: boolean; is_examiner?: boolean }) {
@@ -443,8 +471,8 @@ export function addModel(data: ModelFormData) {
   })
 }
 
-export function updateModel(index: number, data: ModelFormData) {
-  return apiFetch<{ status: string; models: SystemConfigData['available_models'] }>(`/api/admin/config/models/${index}`, {
+export function updateModel(modelId: string, data: ModelFormData) {
+  return apiFetch<{ status: string; models: SystemConfigData['available_models'] }>(`/api/admin/config/models/${encodeURIComponent(modelId)}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   })
@@ -462,7 +490,7 @@ export function probeModel(data: {
   endpoint?: string
   api_protocol?: string
   api_key?: string
-  existing_model_index?: number | null
+  existing_model_id?: string | null
 }) {
   return apiFetch<ProbeModelResult>('/api/admin/config/probe-model', {
     method: 'POST',
@@ -470,8 +498,8 @@ export function probeModel(data: {
   })
 }
 
-export function deleteModel(index: number) {
-  return apiFetch<{ status: string; default_model?: string }>(`/api/admin/config/models/${index}`, { method: 'DELETE' })
+export function deleteModel(modelId: string) {
+  return apiFetch<{ status: string; default_model?: string }>(`/api/admin/config/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' })
 }
 
 export function setDefaultModel(name: string) {
@@ -514,8 +542,8 @@ export type ModelTestResult = {
   summary: string
 }
 
-export function testModel(index: number) {
-  return apiFetch<ModelTestResult>(`/api/admin/config/test-model/${index}`, { method: 'POST' })
+export function testModel(modelId: string) {
+  return apiFetch<ModelTestResult>(`/api/admin/config/test-model/${encodeURIComponent(modelId)}`, { method: 'POST' })
 }
 
 // System readiness — the admin setup checklist
@@ -566,12 +594,12 @@ export function addOAuthProvider(data: Record<string, string>) {
   return apiFetch<{ status: string }>('/api/admin/config/auth/providers', { method: 'POST', body: JSON.stringify(data) })
 }
 
-export function updateOAuthProvider(index: number, data: Record<string, string>) {
-  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${index}`, { method: 'PUT', body: JSON.stringify(data) })
+export function updateOAuthProvider(providerId: string, data: Record<string, string>) {
+  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${encodeURIComponent(providerId)}`, { method: 'PUT', body: JSON.stringify(data) })
 }
 
-export function deleteOAuthProvider(index: number) {
-  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${index}`, { method: 'DELETE' })
+export function deleteOAuthProvider(providerId: string) {
+  return apiFetch<{ status: string }>(`/api/admin/config/auth/providers/${encodeURIComponent(providerId)}`, { method: 'DELETE' })
 }
 
 export function updateAuthMethods(methods: string[]) {
@@ -771,8 +799,14 @@ export interface CertificationProgressDetail extends CertificationProgressItem {
   }>
 }
 
-export function getCertificationProgressList() {
-  return apiFetch<CertificationProgressItem[]>('/api/admin/certifications')
+export interface CertificationProgressListResponse {
+  items: CertificationProgressItem[]
+  total: number
+  capped: boolean
+}
+
+export function getCertificationProgressList(limit: number = 500) {
+  return apiFetch<CertificationProgressListResponse>(`/api/admin/certifications?limit=${limit}`)
 }
 
 export function getCertificationProgressDetail(userId: string) {

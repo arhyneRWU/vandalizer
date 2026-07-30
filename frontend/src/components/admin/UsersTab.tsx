@@ -34,12 +34,17 @@ function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void 
   const [savingRoles, setSavingRoles] = useState(false)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    getUserDetail(userId, days).then(setData).catch(e => setError(e?.message || 'Failed to load')).finally(() => setLoading(false))
+    getUserDetail(userId, days)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [userId, days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const prev = data?.previous_period
 
@@ -396,6 +401,7 @@ function UserActivityHistory({ userId, email }: { userId: string; email: string 
 
 export function UsersTab() {
   const [users, setUsers] = useState<UserLeaderboardItem[]>([])
+  const [capped, setCapped] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -404,13 +410,18 @@ export function UsersTab() {
   const [days, setDays] = useState<DayOption>('all')
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
     const arg = typeof days === 'number' ? days : undefined
-    getUserLeaderboard(arg).then(setUsers).catch(e => setError(e?.message || 'Failed to load users')).finally(() => setLoading(false))
+    getUserLeaderboard(arg)
+      .then(res => { if (!cancelled) { setUsers(res.items); setCapped(res.capped) } })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load users') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const handleSort = (key: string) => {
     setSort(prev => ({
@@ -441,7 +452,7 @@ export function UsersTab() {
     return sorted
   }, [users, search, sort])
 
-  const maxTokens = users.length > 0 ? Math.max(...users.map(u => u.tokens_total), 1) : 1
+  const maxTokens = users.reduce((max, u) => Math.max(max, u.tokens_total), 1)
 
   const handleExport = () => {
     downloadCSV('users.csv',
@@ -475,6 +486,11 @@ export function UsersTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           User Leaderboard ({filtered.length}) {days !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {days} days</span>}
         </div>
+        {capped && (
+          <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertCircle size={14} /> Showing the top {users.length} users by token usage — this list is truncated. Sorting and export cover only these loaded rows, not the full user base.
+          </div>
+        )}
         {error && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,

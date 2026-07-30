@@ -4,6 +4,7 @@ import datetime
 import logging
 import math
 import re
+import uuid
 from typing import Literal, Optional
 
 from bson import ObjectId as BsonObjectId
@@ -14,7 +15,7 @@ from app.config import Settings
 from app.dependencies import get_current_user, get_settings
 from app.models.activity import ActivityEvent
 from app.models.audit_log import AdminAuditLog
-from app.models.system_config import SystemConfig
+from app.models.system_config import SystemConfig, ensure_stable_ids
 from app.services import audit_service
 from app.services.llm_service import clear_agent_caches, get_agent_model
 from app.services.version_service import get_update_status
@@ -31,6 +32,14 @@ router = APIRouter()
 # realistic ad-hoc reporting need without letting callers ask for wildly
 # unbounded scans.
 MAX_ANALYTICS_DAYS = 730
+
+# Ceiling for the `limit` query param on the admin list endpoints (user/team
+# leaderboards, all-teams, isolated-users, certification progress). These
+# build a Python list in memory after scoping, so an unbounded response is
+# both a large JSON payload and thousands of re-sorted DOM rows client-side.
+# 2000 is generous relative to any current deployment's row counts while
+# still bounding the worst case.
+MAX_LIST_LIMIT = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +71,29 @@ def _sanitize_providers(providers: list[dict]) -> list[dict]:
             p_copy["client_secret"] = "***" if decrypt_value(secret) else ""
         sanitized.append(p_copy)
     return sanitized
+
+
+async def _ensure_config_ids(cfg: SystemConfig) -> None:
+    """Backfill stable `id`s for models/providers and persist if any changed.
+
+    Existing deployments have `available_models`/`oauth_providers` entries
+    with no `id` (they used to be addressed by array index). This assigns one
+    lazily the first time the config is touched after upgrading, and never
+    regenerates an `id` once assigned. Call this before addressing any entry
+    by id, and on the GET path too, so the client always has ids to send back.
+    """
+    changed = ensure_stable_ids(cfg.available_models)
+    changed = ensure_stable_ids(cfg.oauth_providers) or changed
+    if changed:
+        await cfg.save()
+
+
+def _find_by_id(entries: list[dict], entry_id: str) -> int:
+    """Return the index of the dict in `entries` whose `id` matches, or -1."""
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("id") == entry_id:
+            return i
+    return -1
 
 
 def _sanitize_models(models: list[dict]) -> list[dict]:
@@ -172,6 +204,12 @@ class UserLeaderboardItem(BaseModel):
     last_active: Optional[datetime.datetime] = None
 
 
+class UserLeaderboardResponse(BaseModel):
+    items: list[UserLeaderboardItem]
+    total: int
+    capped: bool
+
+
 class TeamLeaderboardItem(BaseModel):
     team_id: str
     name: str
@@ -181,6 +219,12 @@ class TeamLeaderboardItem(BaseModel):
     active_users: int = 0
     member_count: int = 0
     avg_latency_ms: Optional[float] = None
+
+
+class TeamLeaderboardResponse(BaseModel):
+    items: list[TeamLeaderboardItem]
+    total: int
+    capped: bool
 
 
 class WorkflowEventItem(BaseModel):
@@ -241,6 +285,12 @@ class AdminTeamItem(BaseModel):
     is_default: bool
 
 
+class AdminTeamListResponse(BaseModel):
+    items: list[AdminTeamItem]
+    total: int
+    capped: bool
+
+
 class AdminCreateTeamRequest(BaseModel):
     name: str
 
@@ -254,6 +304,12 @@ class IsolatedUserItem(BaseModel):
     user_id: str
     name: Optional[str] = None
     email: Optional[str] = None
+
+
+class IsolatedUsersResponse(BaseModel):
+    items: list[IsolatedUserItem]
+    total: int
+    capped: bool
 
 
 class ModelAddRequest(BaseModel):
@@ -554,9 +610,10 @@ async def usage_timeseries(
 # 2. GET /users  - User leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/users", response_model=list[UserLeaderboardItem])
+@router.get("/users", response_model=UserLeaderboardResponse)
 async def user_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -591,7 +648,7 @@ async def user_leaderboard(
     # Fetch user records — scope to team members when team-scoped
     if team_scope:
         if not scoped_team:
-            return []
+            return UserLeaderboardResponse(items=[], total=0, capped=False)
         team_memberships = await TeamMembership.find(
             TeamMembership.team == scoped_team.id
         ).to_list()
@@ -654,16 +711,19 @@ async def user_leaderboard(
 
     # Sort by tokens desc
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return UserLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
 # 3. GET /teams  - Team leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/teams", response_model=list[TeamLeaderboardItem])
+@router.get("/teams", response_model=TeamLeaderboardResponse)
 async def team_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -738,7 +798,9 @@ async def team_leaderboard(
         )
 
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return TeamLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -1392,6 +1454,7 @@ async def get_config(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     return {
         "extraction_config": cfg.get_extraction_config(),
         "quality_config": cfg.get_quality_config(),
@@ -1530,9 +1593,11 @@ async def add_model(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     was_empty = len(cfg.available_models) == 0
     cfg.available_models.append(
         {
+            "id": str(uuid.uuid4()),
             "name": body.name,
             "tag": body.tag,
             "external": body.external,
@@ -1570,7 +1635,8 @@ async def add_model(
 # ---------------------------------------------------------------------------
 # 7b. PUT /config/models/default  - Set (or clear) the system default model
 # ---------------------------------------------------------------------------
-# Defined before PUT /config/models/{index} so "default" isn't parsed as an int.
+# Defined before PUT /config/models/{model_id} so this literal path wins over
+# the parameterized route (FastAPI matches by registration order).
 
 class DefaultModelRequest(BaseModel):
     name: str = ""
@@ -1605,20 +1671,22 @@ async def set_default_model(
 
 
 # ---------------------------------------------------------------------------
-# 7c. PUT /config/models/{index}  - Update an existing model
+# 7c. PUT /config/models/{model_id}  - Update an existing model
 # ---------------------------------------------------------------------------
 
-@router.put("/config/models/{index}")
+@router.put("/config/models/{model_id}")
 async def update_model(
-    index: int,
+    model_id: str,
     body: ModelAddRequest,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
 
     # If the client sends '***', preserve the existing (encrypted) key
     new_api_key = body.api_key or ""
@@ -1629,6 +1697,7 @@ async def update_model(
 
     prev_name = cfg.available_models[index].get("name", "")
     cfg.available_models[index] = {
+        "id": model_id,
         "name": body.name,
         "tag": body.tag,
         "external": body.external,
@@ -1655,25 +1724,27 @@ async def update_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "update_model", f"Updated model at index {index}: {body.tag}")
+    await _audit(user, "update_model", f"Updated model {model_id}: {body.tag}")
 
     return {"status": "ok", "models": _sanitize_models(cfg.available_models), "default_model": cfg.default_model or ""}
 
 
 # ---------------------------------------------------------------------------
-# 8. DELETE /config/models/{index}  - Remove a model by index
+# 8. DELETE /config/models/{model_id}  - Remove a model by id
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/models/{index}")
+@router.delete("/config/models/{model_id}")
 async def delete_model(
-    index: int,
+    model_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
 
     removed = cfg.available_models.pop(index)
     # Clear default_model if we just deleted it.
@@ -1683,7 +1754,7 @@ async def delete_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "delete_model", f"Deleted model at index {index}: {removed.get('tag', '?')}")
+    await _audit(user, "delete_model", f"Deleted model {model_id}: {removed.get('tag', '?')}")
 
     return {"status": "ok", "removed": removed, "models": cfg.available_models, "default_model": cfg.default_model or ""}
 
@@ -1717,7 +1788,9 @@ async def add_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = str(uuid.uuid4())
     provider_dict["enabled"] = True
     if provider_dict.get("client_secret"):
         provider_dict["client_secret"] = encrypt_value(provider_dict["client_secret"])
@@ -1781,12 +1854,12 @@ async def parse_saml_metadata(
 
 
 # ---------------------------------------------------------------------------
-# 10. PUT /config/auth/providers/{index}  - Update OAuth provider
+# 10. PUT /config/auth/providers/{provider_id}  - Update OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.put("/config/auth/providers/{index}")
+@router.put("/config/auth/providers/{provider_id}")
 async def update_oauth_provider(
-    index: int,
+    provider_id: str,
     body: OAuthProviderRequest,
     user: User = Depends(get_current_user),
 ):
@@ -1794,10 +1867,13 @@ async def update_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = provider_id
     # If the client sends '***', preserve the existing (encrypted) secret
     if provider_dict.get("client_secret") == "***":
         provider_dict["client_secret"] = cfg.oauth_providers[index].get("client_secret", "")
@@ -1807,31 +1883,33 @@ async def update_oauth_provider(
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "update_oauth_provider", f"Updated OAuth provider at index {index}: {body.provider}")
+    await _audit(user, "update_oauth_provider", f"Updated OAuth provider {provider_id}: {body.provider}")
 
     return {"status": "ok", "providers": _sanitize_providers(cfg.oauth_providers)}
 
 
 # ---------------------------------------------------------------------------
-# 11. DELETE /config/auth/providers/{index}  - Remove OAuth provider
+# 11. DELETE /config/auth/providers/{provider_id}  - Remove OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/auth/providers/{index}")
+@router.delete("/config/auth/providers/{provider_id}")
 async def delete_oauth_provider(
-    index: int,
+    provider_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     removed = cfg.oauth_providers.pop(index)
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider at index {index}: {removed.get('provider', '?')}")
+    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider {provider_id}: {removed.get('provider', '?')}")
 
     return {"status": "ok", "removed": removed, "providers": cfg.oauth_providers}
 
@@ -2282,8 +2360,11 @@ async def optimizer_activity(
 # 19. GET /admin/teams/all  - All teams (admin management view)
 # ---------------------------------------------------------------------------
 
-@router.get("/teams/all", response_model=list[AdminTeamItem])
-async def admin_list_all_teams(user: User = Depends(get_current_user)):
+@router.get("/teams/all", response_model=AdminTeamListResponse)
+async def admin_list_all_teams(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     cfg = await SystemConfig.get_config()
@@ -2295,7 +2376,7 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         key = str(m.team)
         member_counts[key] = member_counts.get(key, 0) + 1
 
-    return [
+    items = [
         AdminTeamItem(
             team_id=str(t.id),
             uuid=t.uuid,
@@ -2306,6 +2387,9 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         )
         for t in all_teams
     ]
+    total = len(items)
+    capped = total > limit
+    return AdminTeamListResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2409,8 +2493,11 @@ async def admin_remove_user_from_team(
 # 23. GET /admin/users/isolated  - Users with no shared team
 # ---------------------------------------------------------------------------
 
-@router.get("/users/isolated", response_model=list[IsolatedUserItem])
-async def isolated_users(user: User = Depends(get_current_user)):
+@router.get("/users/isolated", response_model=IsolatedUsersResponse)
+async def isolated_users(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     all_memberships = await TeamMembership.find().limit(100000).to_list()
@@ -2430,13 +2517,16 @@ async def isolated_users(user: User = Depends(get_current_user)):
     ]
 
     if not isolated_ids:
-        return []
+        return IsolatedUsersResponse(items=[], total=0, capped=False)
 
     users = await User.find({"user_id": {"$in": isolated_ids}}).to_list()
-    return [
+    items = [
         IsolatedUserItem(user_id=u.user_id, name=u.name, email=u.email)
         for u in users
     ]
+    total = len(items)
+    capped = total > limit
+    return IsolatedUsersResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2585,19 +2675,27 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
         raise HTTPException(status_code=502, detail=f"OCR test failed: {e}")
 
 
-@router.post("/config/test-model/{index}")
-async def test_model(index: int, user: User = Depends(get_current_user)):
+@router.post("/config/test-model/{model_id}")
+async def test_model(model_id: str, user: User = Depends(get_current_user)):
     """Run a real round-trip against a model and return full diagnostics.
 
     Returns HTTP 200 with ``ok`` true/false (in-band, like the Prompt
     Playground) so the UI can render a step-by-step breakdown — on success why
     the model is healthy, on failure a classified error with a suggested fix —
     instead of a bare error toast. A genuinely missing model still 404s.
+
+    Addressed by stable id, not array index — see PUT/DELETE
+    /config/models/{model_id} for the position-shift bug this avoids: without
+    it, another admin's edit between page load and this request could make
+    the badge for model X actually reflect a live test of model Y's
+    credentials.
     """
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
         raise HTTPException(status_code=404, detail="Model not found")
 
     from app.services.system_diagnostics import diagnose_model
@@ -2696,9 +2794,12 @@ class ModelProbeRequest(BaseModel):
     api_protocol: Optional[str] = ""
     api_key: Optional[str] = ""
     # When editing an existing model, the form sends api_key="***" to
-    # preserve the stored credential. Pass that model's index so we can
-    # decrypt and use it.
-    existing_model_index: Optional[int] = None
+    # preserve the stored credential. Pass that model's stable id so we can
+    # decrypt and use it — addressed by id, not array index, for the same
+    # reason PUT/DELETE /config/models/{model_id} are: an index resolved
+    # against a list that has since shifted would decrypt and use a
+    # different model's credential against this endpoint.
+    existing_model_id: Optional[str] = None
 
 
 @router.post("/config/probe-model")
@@ -2717,10 +2818,11 @@ async def probe_model(
     from app.services.model_probe import probe_context_window
 
     api_key = (body.api_key or "").strip()
-    if (api_key == "***" or not api_key) and body.existing_model_index is not None:
+    if (api_key == "***" or not api_key) and body.existing_model_id:
         cfg = await SystemConfig.get_config()
-        idx = body.existing_model_index
-        if 0 <= idx < len(cfg.available_models):
+        await _ensure_config_ids(cfg)
+        idx = _find_by_id(cfg.available_models, body.existing_model_id)
+        if idx != -1:
             stored = cfg.available_models[idx].get("api_key", "")
             if stored:
                 api_key = decrypt_value(stored) or ""
@@ -2990,8 +3092,17 @@ class CertificationProgressDetail(CertificationProgressItem):
     modules: dict
 
 
-@router.get("/certifications", response_model=list[CertificationProgressItem])
-async def list_certification_progress(user: User = Depends(get_current_user)):
+class CertificationProgressListResponse(BaseModel):
+    items: list[CertificationProgressItem]
+    total: int
+    capped: bool
+
+
+@router.get("/certifications", response_model=CertificationProgressListResponse)
+async def list_certification_progress(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     """List all users who have started the certification program with progress summary."""
     await _require_admin(user)
 
@@ -3000,7 +3111,7 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
 
     progresses = await CertificationProgress.find().to_list()
     if not progresses:
-        return []
+        return CertificationProgressListResponse(items=[], total=0, capped=False)
 
     user_ids = [p.user_id for p in progresses]
     users = await User.find({"user_id": {"$in": user_ids}}).to_list()
@@ -3030,7 +3141,9 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
         )
 
     items.sort(key=lambda i: (i.modules_completed, i.total_xp), reverse=True)
-    return items
+    total = len(items)
+    capped = total > limit
+    return CertificationProgressListResponse(items=items[:limit], total=total, capped=capped)
 
 
 @router.get("/certifications/{user_id}", response_model=CertificationProgressDetail)

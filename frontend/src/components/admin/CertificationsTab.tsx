@@ -11,6 +11,7 @@ import { ExportButton, SearchInput, UserAvatar } from './shared/primitives'
 export function CertificationsTab() {
   const { toast } = useToast()
   const [items, setItems] = useState<CertificationProgressItem[]>([])
+  const [capped, setCapped] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -21,7 +22,8 @@ export function CertificationsTab() {
     setError(null)
     try {
       const data = await getCertificationProgressList()
-      setItems(data)
+      setItems(data.items)
+      setCapped(data.capped)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load certification progress')
     } finally {
@@ -98,6 +100,11 @@ export function CertificationsTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           Certification Progress ({filtered.length})
         </div>
+        {capped && (
+          <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertCircle size={14} /> Showing the top {items.length} users by progress — this list is truncated. Search and export cover only these loaded rows, not every user.
+          </div>
+        )}
         {error && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,

@@ -69,7 +69,7 @@ vi.mock('../../contexts/ToastContext', () => ({
 }))
 
 beforeEach(() => {
-  mockGetUserLeaderboard.mockReset().mockResolvedValue([leaderboardItem])
+  mockGetUserLeaderboard.mockReset().mockResolvedValue({ items: [leaderboardItem], total: 1, capped: false })
   mockGetUserDetail.mockReset().mockResolvedValue(userDetail)
   mockGetUserHistory.mockReset().mockResolvedValue({ items: [], total: 0, capped: false })
   mockUpdateUserRoles.mockReset()
