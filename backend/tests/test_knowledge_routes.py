@@ -505,6 +505,55 @@ class TestKnowledgeListEndpoints:
         assert len(items) == 1
         assert items[0]["title"] == "Raw KB Title"
 
+    @pytest.mark.asyncio
+    async def test_list_v2_broken_reference_surfaces_as_unavailable_stub(self, client):
+        """A bookmark whose source KB no longer resolves (deleted, un-verified,
+        retired from the catalog, or org-scoped away) renders as an
+        'unavailable' stub with the reference uuid intact — not silently
+        dropped — so the user sees what happened and can remove it."""
+        user = _make_user()
+        cookies, headers = _auth()
+        ref = MagicMock()
+        ref.uuid = "ref-broken"
+        ref.source_kb_uuid = "kb-gone"
+        ref.created_at = datetime.datetime(2026, 7, 1, tzinfo=datetime.timezone.utc)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.list_knowledge_bases = AsyncMock(return_value=([], 0))
+            mock_svc.list_references = AsyncMock(return_value=[ref])
+            mock_svc.resolve_reference = AsyncMock(return_value=None)
+            mock_svc.get_kb_usage_map = AsyncMock(return_value={})
+            MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+            MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+
+            resp = await client.get(
+                "/api/knowledge/list/v2?scope=mine",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        stub = items[0]
+        assert stub["status"] == "unavailable"
+        assert stub["is_reference"] is True
+        assert stub["reference_uuid"] == "ref-broken"
+        assert stub["source_kb_uuid"] == "kb-gone"
+        assert stub["can_manage"] is False
+        assert stub["title"] == "Knowledge base no longer available"
+        # The stub counts toward the total like any other reference row.
+        assert resp.json()["total"] == 1
+
 
 class TestKnowledgeCRUD:
     """Cover create, get-detail, update, delete, share endpoints."""

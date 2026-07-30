@@ -995,3 +995,98 @@ class TestClonePreservesValidation:
             assert captured_tcs[0]["expected_values"] == {"field1": "answer1"}
             assert captured_tcs[0]["user_id"] == "new-user"
             assert captured_tcs[0]["search_set_uuid"] == captured_ss["uuid"]
+
+
+# ---------------------------------------------------------------------------
+# _clone_underlying_object — knowledge_base kind
+# ---------------------------------------------------------------------------
+
+
+class TestCloneKnowledgeBaseKind:
+    """knowledge_base library items historically raised 'unsupported kind',
+    breaking both Duplicate and Send-to-team for KBs. The clone must delegate
+    to knowledge_service.clone_knowledge_base and stamp the destination."""
+
+    def _kb_item(self):
+        from app.models.library import LibraryItemKind
+
+        item = _make_library_item(kind_value="knowledge_base")
+        item.kind = LibraryItemKind.KNOWLEDGE_BASE
+        return item
+
+    def _clone_mock(self, *, team_id, shared_with_team):
+        clone = MagicMock()
+        clone.id = PydanticObjectId()
+        clone.team_id = team_id
+        clone.shared_with_team = shared_with_team
+        clone.save = AsyncMock()
+        return clone
+
+    @pytest.mark.asyncio
+    async def test_kb_share_to_team_stamps_destination_team(self):
+        from app.services.library_service import _clone_underlying_object
+
+        item = self._kb_item()
+        original = MagicMock()
+        # clone_knowledge_base stamps the user's current team, unshared —
+        # the library share must override both for the destination team.
+        clone = self._clone_mock(team_id="current-team", shared_with_team=False)
+        user = _make_user()
+
+        with (
+            patch("app.models.knowledge.KnowledgeBase") as MockKB,
+            patch(
+                "app.services.knowledge_service.clone_knowledge_base",
+                AsyncMock(return_value=clone),
+            ) as mock_clone,
+        ):
+            MockKB.get = AsyncMock(return_value=original)
+            new_id = await _clone_underlying_object(
+                item, user.user_id, team_id="team-9", user=user
+            )
+
+        assert new_id == clone.id
+        mock_clone.assert_awaited_once_with(original, user)
+        assert clone.team_id == "team-9"
+        assert clone.shared_with_team is True
+        clone.save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_kb_clone_to_personal_clears_team_scope(self):
+        from app.services.library_service import _clone_underlying_object
+
+        item = self._kb_item()
+        clone = self._clone_mock(team_id="current-team", shared_with_team=False)
+        user = _make_user()
+
+        with (
+            patch("app.models.knowledge.KnowledgeBase") as MockKB,
+            patch(
+                "app.services.knowledge_service.clone_knowledge_base",
+                AsyncMock(return_value=clone),
+            ),
+        ):
+            MockKB.get = AsyncMock(return_value=MagicMock())
+            new_id = await _clone_underlying_object(
+                item, user.user_id, team_id=None, user=user
+            )
+
+        assert new_id == clone.id
+        assert clone.team_id is None
+        assert clone.shared_with_team is False
+        clone.save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_kb_clone_missing_source_raises_clone_source_missing(self):
+        from app.services.library_service import (
+            CloneSourceMissingError,
+            _clone_underlying_object,
+        )
+
+        item = self._kb_item()
+        with patch("app.models.knowledge.KnowledgeBase") as MockKB:
+            MockKB.get = AsyncMock(return_value=None)
+            with pytest.raises(CloneSourceMissingError):
+                await _clone_underlying_object(
+                    item, "user-1", team_id=None, user=_make_user()
+                )

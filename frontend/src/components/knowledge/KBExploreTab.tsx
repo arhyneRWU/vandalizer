@@ -9,6 +9,7 @@ import {
   listVerifiedItems, browseCollections, listFeaturedCollections,
 } from '../../api/library'
 import { adoptKnowledgeBase } from '../../api/knowledge'
+import { ApiError } from '../../api/client'
 import type {
   VerifiedCatalogItem, VerifiedCollection, AuthorRef,
 } from '../../types/library'
@@ -395,8 +396,13 @@ export function KBExploreTab({ onAdopted }: KBExploreTabProps) {
       await adoptKnowledgeBase(kbUuid)
       toast('Added to your knowledge bases', 'success')
       onAdopted?.()
-    } catch {
-      toast('Already in your knowledge bases', 'info')
+    } catch (err) {
+      // A true re-adopt returns 200 with the existing bookmark, so any error
+      // here is a real failure — never report it as "already added".
+      const message = err instanceof ApiError && err.message
+        ? err.message
+        : 'Could not add this knowledge base — please try again.'
+      toast(message, 'error')
     }
   }
 

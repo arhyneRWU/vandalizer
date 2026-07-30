@@ -308,7 +308,13 @@ async def list_knowledge_bases_v2(
 
     # Pre-load latest ValidationRun for every KB we'll render (including those
     # reached via references), so the AI-trust chip renders in one pass.
+    # A reference whose source KB no longer resolves (deleted, un-verified,
+    # retired from the catalog, or org-scoped away) is kept as a "broken"
+    # bookmark and rendered as an unavailable stub rather than silently
+    # dropped — otherwise the KB vanishes from My KBs with no explanation and
+    # the orphaned bookmark can never be cleaned up from the UI.
     ref_kbs: list = []
+    broken_refs: list = []
     if scope in (None, "mine"):
         for ref in await svc.list_references(user.user_id, team_id=team_id):
             source_kb = await svc.resolve_reference(
@@ -316,6 +322,8 @@ async def list_knowledge_bases_v2(
             )
             if source_kb:
                 ref_kbs.append((ref, source_kb))
+            else:
+                broken_refs.append(ref)
 
     # The Explore tab renders the catalog's curated display name
     # (VerifiedItemMetadata.display_name) over the KB's own title, so adopted
@@ -360,6 +368,25 @@ async def list_knowledge_bases_v2(
         resp.source_kb_uuid = ref.source_kb_uuid
         resp.reference_uuid = ref.uuid
         items.append(resp)
+
+    for ref in broken_refs:
+        # Deliberately no title lookup on the source KB: the user may have
+        # lost view access, and echoing the title would leak it.
+        items.append(KBResponse(
+            uuid=ref.source_kb_uuid,
+            title="Knowledge base no longer available",
+            description=(
+                "This bookmark points to a knowledge base that was removed "
+                "from the catalog or is no longer shared with you."
+            ),
+            status="unavailable",
+            scope="reference",
+            is_reference=True,
+            source_kb_uuid=ref.source_kb_uuid,
+            reference_uuid=ref.uuid,
+            can_manage=False,
+            created_at=ref.created_at.isoformat() if ref.created_at else None,
+        ))
 
     return KBListResponse(items=items, total=total + len([i for i in items if i.is_reference]))
 

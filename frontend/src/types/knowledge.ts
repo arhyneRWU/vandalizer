@@ -4,7 +4,9 @@ export interface KnowledgeBase {
   uuid: string
   title: string
   description: string
-  status: 'empty' | 'building' | 'ready' | 'error'
+  // 'unavailable' appears only on reference rows whose source KB no longer
+  // resolves (deleted, retired from the catalog, or no longer shared).
+  status: 'empty' | 'building' | 'ready' | 'error' | 'unavailable'
   shared_with_team: boolean
   team_owned: boolean
   verified: boolean

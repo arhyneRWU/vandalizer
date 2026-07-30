@@ -426,7 +426,7 @@ async def clone_to_personal(item_id: str, user: User) -> dict | None:
         return None
 
     try:
-        new_obj_id = await _clone_underlying_object(item, user.user_id, team_id=None)
+        new_obj_id = await _clone_underlying_object(item, user.user_id, team_id=None, user=user)
     except CloneSourceMissingError as exc:
         logger.warning("Clone-to-personal source missing: %s", exc)
         return None
@@ -489,7 +489,7 @@ async def share_to_team(
 
     try:
         new_obj_id = await _clone_underlying_object(
-            item, user.user_id, team_id=team_id, copy_number=prior_shares + 1
+            item, user.user_id, team_id=team_id, copy_number=prior_shares + 1, user=user
         )
     except CloneSourceMissingError as exc:
         logger.warning("Share-to-team source missing for item %s: %s", item.id, exc)
@@ -819,9 +819,14 @@ async def _attach_author(item: dict | None) -> dict | None:
 
 
 async def _clone_underlying_object(
-    item: LibraryItem, user_id: str, *, team_id: str | None = None, copy_number: int = 1
+    item: LibraryItem,
+    user_id: str,
+    *,
+    team_id: str | None = None,
+    copy_number: int = 1,
+    user: "User | None" = None,
 ) -> PydanticObjectId:
-    """Clone the workflow or extraction backing a LibraryItem.
+    """Clone the workflow, extraction, or knowledge base backing a LibraryItem.
 
     ``copy_number`` numbers repeat clones of the same source ("X (Copy 2)")
     so deliberate duplicates stay distinguishable in library listings.
@@ -949,6 +954,33 @@ async def _clone_underlying_object(
             await new_tc.insert()
 
         return new_ss.id
+
+    elif item.kind == LibraryItemKind.KNOWLEDGE_BASE:
+        from app.models.knowledge import KnowledgeBase
+        from app.models.user import User as UserModel
+        from app.services import knowledge_service
+
+        original = await KnowledgeBase.get(item.item_id)
+        if not original:
+            raise CloneSourceMissingError(
+                f"KnowledgeBase {item.item_id} not found for library item {item.id}"
+            )
+        # clone_knowledge_base needs the full User (name-conflict checks run
+        # against the user's current team). Callers pass it; the user_id
+        # fallback covers direct invocations.
+        owner = user or await UserModel.find_one(UserModel.user_id == user_id)
+        if not owner:
+            raise CloneSourceMissingError(
+                f"User {user_id} not found while cloning library item {item.id}"
+            )
+        clone = await knowledge_service.clone_knowledge_base(original, owner)
+        # The library flows carry an explicit destination: a personal copy has
+        # no team scope, a team share must be visible to the destination team.
+        if clone.team_id != team_id or bool(team_id) != clone.shared_with_team:
+            clone.team_id = team_id
+            clone.shared_with_team = bool(team_id)
+            await clone.save()
+        return clone.id
 
     raise CloneSourceMissingError(
         f"Library item {item.id} has unsupported kind: {item.kind!r}"

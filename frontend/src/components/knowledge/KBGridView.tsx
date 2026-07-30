@@ -24,6 +24,9 @@ const STATUS_BADGE: Record<string, { label: string; color: string; bg: string }>
   building: { label: 'Building', color: '#d97706', bg: '#fef3c7' },
   ready: { label: 'Ready', color: '#15803d', bg: '#dcfce7' },
   error: { label: 'Error', color: '#b91c1c', bg: '#fef2f2' },
+  // Broken bookmark: the referenced KB was deleted, retired from the catalog,
+  // or is no longer shared with this user. The card offers only Remove.
+  unavailable: { label: 'Unavailable', color: '#b91c1c', bg: '#fef2f2' },
 }
 
 // Dark palette (matches KBExploreTab)
@@ -77,21 +80,26 @@ function KBGridCard({
   const badge = STATUS_BADGE[kb.status] || STATUS_BADGE.empty
   const isReady = kb.status === 'ready'
   const isReference = kb.is_reference
+  // A broken bookmark has no underlying KB to open — the card is inert except
+  // for its Remove button.
+  const isUnavailable = kb.status === 'unavailable'
   // The id a project pins is the canonical KB uuid — for a reference card that's
   // the original it points at, matching what onChat uses.
   const canonicalUuid = isReference ? (kb.source_kb_uuid || kb.uuid) : kb.uuid
 
   return (
     <button
-      onClick={() => onSelect(kb.uuid)}
+      onClick={() => { if (!isUnavailable) onSelect(kb.uuid) }}
       style={{
         display: 'flex', flexDirection: 'column', textAlign: 'left',
         padding: 14, borderRadius: 12,
         backgroundColor: C.card,
         border: isReference ? '1px solid rgba(37, 99, 235, 0.3)' : `1px solid ${C.border}`,
-        cursor: 'pointer', transition: 'all 0.15s', fontFamily: 'inherit',
+        cursor: isUnavailable ? 'default' : 'pointer',
+        opacity: isUnavailable ? 0.65 : 1,
+        transition: 'all 0.15s', fontFamily: 'inherit',
       }}
-      onMouseEnter={e => { e.currentTarget.style.backgroundColor = C.cardHover }}
+      onMouseEnter={e => { if (!isUnavailable) e.currentTarget.style.backgroundColor = C.cardHover }}
       onMouseLeave={e => { e.currentTarget.style.backgroundColor = C.card }}
     >
       {/* Title row */}
@@ -196,11 +204,13 @@ function KBGridCard({
         </p>
       )}
 
-      {/* Stats */}
-      <div style={{ display: 'flex', gap: 12, fontSize: 11, color: C.textFaint, marginBottom: 8 }}>
-        <span>{kb.total_sources} source{kb.total_sources !== 1 ? 's' : ''}</span>
-        <span>{kb.total_chunks.toLocaleString()} chunk{kb.total_chunks !== 1 ? 's' : ''}</span>
-      </div>
+      {/* Stats (meaningless for a broken bookmark — the source KB is gone) */}
+      {!isUnavailable && (
+        <div style={{ display: 'flex', gap: 12, fontSize: 11, color: C.textFaint, marginBottom: 8 }}>
+          <span>{kb.total_sources} source{kb.total_sources !== 1 ? 's' : ''}</span>
+          <span>{kb.total_chunks.toLocaleString()} chunk{kb.total_chunks !== 1 ? 's' : ''}</span>
+        </div>
+      )}
 
       {/* Org badges */}
       {(kb.organization_ids?.length ?? 0) > 0 && (
