@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, within, waitFor } from '@testing-library/react'
+import { render, screen, within, waitFor, fireEvent } from '@testing-library/react'
 import Admin from './Admin'
 
 // ---------------------------------------------------------------------------
 // This suite is the behavior-preservation proof for plan 008: it verifies the
 // derived `canSee` predicate reproduces the exact truth table the old
-// `hiddenForNonAdmin` array + three-way branch used to encode (16 / 14 / 3
-// tabs for admin / staff / team-admin), and that the `?tab=` deep link no
-// longer lands on a tab whose content is fully gated.
+// `hiddenForNonAdmin` array + three-way branch used to encode (17 / 15 / 3
+// tabs for admin / staff / team-admin, including the Optimizer tab added on
+// main), and that the `?tab=` deep link no longer lands on a tab whose
+// content is fully gated.
 //
 // Tab components are stubbed to trivial text so assertions are about
 // visibility, not tab internals. Several tabs are lazy-loaded (see Admin.tsx),
@@ -77,6 +78,9 @@ vi.mock('../components/admin/WorkflowsTab', () => ({
 vi.mock('../components/admin/QualityTab', () => ({
   QualityTab: () => <div>QualityTab Stub</div>,
 }))
+vi.mock('../components/admin/OptimizerTab', () => ({
+  OptimizerTab: () => <div>OptimizerTab Stub</div>,
+}))
 vi.mock('../components/admin/KnowledgeBasesTab', () => ({
   KnowledgeBasesTab: () => <div>KnowledgeBasesTab Stub</div>,
 }))
@@ -108,9 +112,9 @@ vi.mock('../components/admin/ConfigTab', () => ({
   ConfigTab: () => <div>ConfigTab Stub</div>,
 }))
 
-const ALL_16_LABELS = [
+const ALL_17_LABELS = [
   'Usage', 'Users', 'Teams', 'Organizations', 'Workflows', 'Quality',
-  'Knowledge Bases', 'Compliance', 'Audit Log', 'Demo', 'Email',
+  'Optimizer', 'Knowledge Bases', 'Compliance', 'Audit Log', 'Demo', 'Email',
   'Certifications', 'API Keys', 'Catalog', 'Telemetry', 'Config',
 ]
 
@@ -128,17 +132,17 @@ beforeEach(() => {
 })
 
 describe('Admin — tab visibility truth table', () => {
-  it('1. is_admin with both flags on sees all 16 tabs', async () => {
+  it('1. is_admin with both flags on sees all 17 tabs', async () => {
     mockUser = { is_admin: true, is_staff: false }
     render(<Admin />)
-    await waitFor(() => expect(getSidebarLabels()).toHaveLength(16))
-    expect(getSidebarLabels()).toEqual(ALL_16_LABELS)
+    await waitFor(() => expect(getSidebarLabels()).toHaveLength(17))
+    expect(getSidebarLabels()).toEqual(ALL_17_LABELS)
   })
 
-  it('2. is_staff (not admin) with both flags on sees 14; config and catalog absent', async () => {
+  it('2. is_staff (not admin) with both flags on sees 15; config and catalog absent', async () => {
     mockUser = { is_admin: false, is_staff: true }
     render(<Admin />)
-    await waitFor(() => expect(getSidebarLabels()).toHaveLength(14))
+    await waitFor(() => expect(getSidebarLabels()).toHaveLength(15))
     const labels = getSidebarLabels()
     expect(labels).not.toContain('Config')
     expect(labels).not.toContain('Catalog')
@@ -156,7 +160,7 @@ describe('Admin — tab visibility truth table', () => {
     mockUser = { is_admin: true, is_staff: false }
     mockGetAuthConfig.mockResolvedValue({ trial_system_enabled: false })
     render(<Admin />)
-    await waitFor(() => expect(getSidebarLabels()).toHaveLength(15))
+    await waitFor(() => expect(getSidebarLabels()).toHaveLength(16))
     expect(getSidebarLabels()).not.toContain('Demo')
   })
 
@@ -164,7 +168,7 @@ describe('Admin — tab visibility truth table', () => {
     mockUser = { is_admin: true, is_staff: false }
     mockGetFeatureFlags.mockResolvedValue({ telemetry_collector_enabled: false })
     render(<Admin />)
-    await waitFor(() => expect(getSidebarLabels()).toHaveLength(15))
+    await waitFor(() => expect(getSidebarLabels()).toHaveLength(16))
     expect(getSidebarLabels()).not.toContain('Telemetry')
   })
 
@@ -184,5 +188,20 @@ describe('Admin — tab visibility truth table', () => {
     // A usable tab (the default, Usage) renders instead of a blank pane.
     expect(await screen.findByText('UsageTab Stub')).toBeInTheDocument()
     expect(screen.queryByText('ConfigTab Stub')).not.toBeInTheDocument()
+  })
+
+  it('8. after a ?tab= deep link is applied, clicking another tab navigates away and stays there', async () => {
+    mockUser = { is_admin: true, is_staff: false }
+    window.history.pushState({}, '', '/admin?tab=catalog')
+    render(<Admin />)
+    // Deep link is honored first…
+    expect(await screen.findByText('CatalogTab Stub')).toBeInTheDocument()
+    // …and consumed: the param is gone so later visibility recomputes can't
+    // re-apply it.
+    expect(new URLSearchParams(window.location.search).get('tab')).toBeNull()
+
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Users' }))
+    expect(await screen.findByText('UsersTab Stub')).toBeInTheDocument()
+    expect(screen.queryByText('CatalogTab Stub')).not.toBeInTheDocument()
   })
 })

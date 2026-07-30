@@ -121,10 +121,21 @@ export default function Admin() {
   // tab the current user can actually see is honored — an unreachable request
   // (e.g. ?tab=config for a team admin) leaves activeTab at its default
   // instead of landing on a tab whose content is fully gated (a blank pane).
+  // The effect re-runs whenever visibility recomputes (so a flag-gated tab
+  // like ?tab=demo can still be honored once its flag resolves), which is why
+  // applying must be one-shot: the param is dropped from the URL on apply, or
+  // every later re-run would yank the user back to the deep-linked tab.
   useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get('tab')
+    const params = new URLSearchParams(window.location.search)
+    const requested = params.get('tab')
     if (requested && visibleTabs.some(t => t.key === requested)) {
       setActiveTab(requested as Tab)
+      params.delete('tab')
+      const qs = params.toString()
+      window.history.replaceState(
+        window.history.state, '',
+        window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash,
+      )
     }
   }, [visibleTabs])
 
