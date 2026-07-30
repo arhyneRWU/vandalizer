@@ -332,6 +332,7 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
 
     from app.services.workflow_engine import (
         WorkflowCancelled,
+        WorkflowStepError,
         build_workflow_engine,
         sanitize_step_name,
     )
@@ -687,6 +688,13 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 pass
         # Clean terminal stop — do not re-raise (no retry).
         return {"status": "canceled", "result_id": workflow_result_id}
+    except WorkflowStepError as e:
+        # A step failed (blocked URL, HTTP error, bad config, ...). This is a
+        # deterministic, user-facing failure: mark the run failed and stop —
+        # no re-raise, so it neither retries nor lands in Sentry as a crash.
+        logger.warning("Workflow %s failed: %s", workflow_id, e)
+        _mark_workflow_failed(db, workflow_result_id, activity_id, str(e))
+        return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:
         logger.error("Workflow execution failed for %s: %s", workflow_id, e)
         db.workflow_result.update_one(
@@ -939,7 +947,7 @@ def resume_workflow_after_approval(self, approval_uuid):
     """Resume a workflow after an approval request has been approved."""
     from bson import ObjectId
 
-    from app.services.workflow_engine import build_workflow_engine
+    from app.services.workflow_engine import WorkflowStepError, build_workflow_engine
 
     db = _get_db()
 
@@ -1070,6 +1078,14 @@ def resume_workflow_after_approval(self, approval_uuid):
                 start_index=step_index + 1,
                 initial_output=initial_output,
             )
+    except WorkflowStepError as e:
+        # Deterministic step failure — mark the run failed, don't retry.
+        logger.warning("Workflow %s failed after resume: %s", workflow_id, e)
+        db.workflow_result.update_one(
+            {"_id": ObjectId(workflow_result_id)},
+            {"$set": {"status": "error", "error": str(e)}},
+        )
+        return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:
         logger.error("Workflow resume failed for %s: %s", workflow_id, e)
         db.workflow_result.update_one(

@@ -370,6 +370,7 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
 
     now = datetime.now(timezone.utc)
     sys_config = db.system_config.find_one() or {}
+    result_id = None
 
     try:
         # Mark running
@@ -522,6 +523,14 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
 
     except Exception as e:
         logger.error("Passive execution failed for event %s: %s", event.get("uuid"), e)
+
+        # Mark the run's WorkflowResult failed too (when it got created) so it
+        # doesn't sit in "running" forever in the run history.
+        if result_id is not None:
+            db.workflow_result.update_one(
+                {"_id": result_id},
+                {"$set": {"status": "error", "error": str(e)}},
+            )
 
         completed_at = datetime.now(timezone.utc)
         started_at = event.get("started_at") or now

@@ -19,9 +19,26 @@ from app.services.workflow_engine import (
     Node,
     UsageAccumulator,
     WorkflowEngine,
+    WorkflowStepError,
     build_workflow_engine,
     sanitize_step_name,
 )
+
+
+class _FailingNode(Node):
+    """Stub node that reports a step failure via the ``error`` key."""
+
+    def __init__(self, name="FailingNode", message="Blocked URL: nope"):
+        super().__init__(name)
+        self.message = message
+
+    def process(self, inputs):
+        return {
+            "output": self.message,
+            "error": self.message,
+            "input": inputs.get("output"),
+            "step_name": self.name,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +321,63 @@ class TestWorkflowEngineExecute:
 
 
 # ---------------------------------------------------------------------------
+# Step failure semantics
+# ---------------------------------------------------------------------------
+
+class TestWorkflowStepFailure:
+    def _engine_with_failing_middle_step(self):
+        """Document -> failing step -> AddDocument (must never run)."""
+        engine = WorkflowEngine()
+        doc = DocumentNode({"doc_uuids": ["a"]})
+        fail = MultiTaskNode("API")
+        fail.add_task(_FailingNode())
+        downstream = AddDocumentNode({"doc_texts": ["should not run"]})
+        engine.add_node(doc)
+        engine.add_node(fail)
+        engine.add_node(downstream)
+        engine.connect(doc, fail)
+        engine.connect(fail, downstream)
+        return engine
+
+    def test_step_error_raises_and_halts(self):
+        engine = self._engine_with_failing_middle_step()
+        with pytest.raises(WorkflowStepError) as exc_info:
+            engine.execute()
+        assert exc_info.value.step_name == "API"
+        assert "Blocked URL: nope" in str(exc_info.value)
+
+    def test_step_error_does_not_run_downstream_steps(self):
+        engine = self._engine_with_failing_middle_step()
+        updates = []
+        with pytest.raises(WorkflowStepError):
+            engine.execute(workflow_result_updater=lambda u: updates.append(u))
+        started = [u.get("current_step_name") for u in updates if "current_step_name" in u]
+        assert "AddDocument" not in started
+
+    def test_failing_step_output_still_persisted(self):
+        """The failing step's result (with its diagnostics) lands in
+        steps_output before the run is failed."""
+        engine = self._engine_with_failing_middle_step()
+        updates = []
+        with pytest.raises(WorkflowStepError):
+            engine.execute(workflow_result_updater=lambda u: updates.append(u))
+        persisted = {k: v for u in updates for k, v in u.items()
+                     if k.startswith("steps_output.")}
+        assert "steps_output.API" in persisted
+        assert persisted["steps_output.API"]["error"] == "Blocked URL: nope"
+
+    def test_error_free_run_unaffected(self):
+        engine = WorkflowEngine()
+        doc = DocumentNode({"doc_uuids": ["a"]})
+        add = AddDocumentNode({"doc_texts": ["fine"]})
+        engine.add_node(doc)
+        engine.add_node(add)
+        engine.connect(doc, add)
+        final, data = engine.execute()
+        assert final == "fine"
+
+
+# ---------------------------------------------------------------------------
 # MultiTaskNode
 # ---------------------------------------------------------------------------
 
@@ -325,6 +399,32 @@ class TestMultiTaskNode:
         assert result["_approval_pause"] is True
         assert result["_review_instructions"] == "Review this"
         assert result["output"] == "pending review"
+
+    def test_error_propagates_through_wrapper(self):
+        multi = MultiTaskNode("API Step")
+        multi.add_task(_FailingNode(message="HTTP error: 500"))
+        result = multi.process({"output": "prev"})
+        assert result["error"] == "HTTP error: 500"
+
+    def test_request_preview_propagates_through_wrapper(self):
+        class _RequestNode(Node):
+            def process(self, inputs):
+                return {
+                    "output": "ok",
+                    "request": {"method": "GET", "url": "https://x.test"},
+                    "step_name": self.name,
+                }
+
+        multi = MultiTaskNode("API Step")
+        multi.add_task(_RequestNode("APINode"))
+        result = multi.process({"output": "prev"})
+        assert result["request"] == {"method": "GET", "url": "https://x.test"}
+
+    def test_no_error_key_when_tasks_succeed(self):
+        multi = MultiTaskNode("Step")
+        multi.add_task(AddDocumentNode({"doc_texts": ["fine"]}))
+        result = multi.process({"output": "prev"})
+        assert "error" not in result
 
     def test_multiple_tasks_parallel(self):
         """Multiple tasks execute in parallel and outputs are collected."""

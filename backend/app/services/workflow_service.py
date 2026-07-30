@@ -829,13 +829,18 @@ async def test_step(task_name: str, task_data: dict, document_uuids: list[str], 
 
 def get_test_status(task_id: str) -> dict:
     """Poll a step test Celery task."""
+    from app.services.workflow_engine import WorkflowStepError
+
     result = AsyncResult(task_id, app=celery_app)
     if not result.ready():
         return {"status": result.state}
     if result.successful():
         return {"status": "completed", "result": result.result}
     payload = result.result
-    if isinstance(payload, BaseException):
+    if isinstance(payload, WorkflowStepError):
+        # Step failures carry a user-facing message already — no class prefix.
+        error_text = str(payload)
+    elif isinstance(payload, BaseException):
         error_text = f"{type(payload).__name__}: {payload}"
     else:
         error_text = str(payload) if payload else "Test failed"

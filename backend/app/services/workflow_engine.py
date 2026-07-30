@@ -422,17 +422,25 @@ class MultiTaskNode(Node):
         task_step_name = self.name
         merged_sources: list[dict] = []
         warnings: list[str] = []
+        errors: list[str] = []
+        request_preview = None
         for result in results:
             if result.get("_approval_pause"):
                 return result
-            # Citations and warnings must survive the wrapper even when a task
-            # produced no output (e.g. a failed KB lookup reports a warning).
+            # Citations, warnings, errors, and the API request preview must
+            # survive the wrapper even when a task produced no output (e.g. a
+            # failed KB lookup reports a warning, a blocked API call an error).
             sources = result.get("retrieved_sources")
             if isinstance(sources, list):
                 merged_sources.extend(sources)
             warning = result.get("warning")
             if isinstance(warning, str) and warning:
                 warnings.append(warning)
+            error = result.get("error")
+            if isinstance(error, str) and error:
+                errors.append(error)
+            if isinstance(result.get("request"), dict):
+                request_preview = result["request"]
             result_output = result.get("output")
             if result_output is None:
                 continue
@@ -452,6 +460,10 @@ class MultiTaskNode(Node):
             out["retrieved_sources"] = merged_sources
         if warnings:
             out["warning"] = " | ".join(warnings)
+        if errors:
+            out["error"] = " | ".join(errors)
+        if request_preview is not None:
+            out["request"] = request_preview
         return out
 
 
@@ -587,16 +599,22 @@ class WebsiteNode(Node):
         from app.services.web_fetcher import fetch_url_sync
 
         self.report_progress(f"Fetching {url}")
+        error = None
         try:
             result = fetch_url_sync(url)
             text = result.text
         except ValueError as e:
-            text = f"Blocked URL: {e}"
+            error = f"Blocked URL: {e}"
+            text = error
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             from app.utils.fetch_errors import describe_fetch_error
 
-            text = f"Could not fetch {url}: {describe_fetch_error(e)}"
-        return {"output": text, "input": inputs.get("output"), "step_name": self.name}
+            error = f"Could not fetch {url}: {describe_fetch_error(e)}"
+            text = error
+        out = {"output": text, "input": inputs.get("output"), "step_name": self.name}
+        if error:
+            out["error"] = error
+        return out
 
 
 class AddDocumentNode(Node):
@@ -657,6 +675,7 @@ class CodeExecutionNode(Node):
         except (ValueError, SyntaxError) as e:
             return {
                 "output": f"Code rejected: {e}",
+                "error": f"Code rejected: {e}",
                 "input": inputs.get("output"),
                 "step_name": self.name,
             }
@@ -668,8 +687,10 @@ class CodeExecutionNode(Node):
         )
 
         if result.get("timed_out"):
+            timeout_msg = f"Code execution timed out after {self.CODE_TIMEOUT_SECONDS} seconds"
             return {
-                "output": f"Code execution timed out after {self.CODE_TIMEOUT_SECONDS} seconds",
+                "output": timeout_msg,
+                "error": timeout_msg,
                 "input": inputs.get("output"),
                 "step_name": self.name,
             }
@@ -677,6 +698,7 @@ class CodeExecutionNode(Node):
         if "error" in result:
             return {
                 "output": f"Code execution error: {result['error']}",
+                "error": f"Code execution error: {result['error']}",
                 "input": inputs.get("output"),
                 "step_name": self.name,
             }
@@ -705,7 +727,12 @@ class CrawlerNode(Node):
         try:
             validate_outbound_url(start_url)
         except ValueError as e:
-            return {"output": f"Blocked URL: {e}", "input": inputs.get("output"), "step_name": self.name}
+            return {
+                "output": f"Blocked URL: {e}",
+                "error": f"Blocked URL: {e}",
+                "input": inputs.get("output"),
+                "step_name": self.name,
+            }
 
         from app.utils.bot_challenge import looks_like_bot_challenge
         from app.utils.crawl_scope import parse_crawl_scope, url_in_crawl_scope
@@ -896,6 +923,19 @@ class APICallNode(Node):
         super().__init__("APINode")
         self.data = data
 
+    def _error_result(self, message: str, inputs, *, output=None, request=None) -> dict:
+        """A failed-step result: ``error`` carries the concise failure message
+        (becomes the run's error), ``output`` the full diagnostic text."""
+        result = {
+            "output": output if output is not None else message,
+            "error": message,
+            "input": inputs.get("output"),
+            "step_name": self.name,
+        }
+        if request is not None:
+            result["request"] = request
+        return result
+
     def process(self, inputs):
         from app.utils import templating
 
@@ -914,7 +954,7 @@ class APICallNode(Node):
                 self.data.get("headers", ""), inputs, json_encode=False
             )
         except templating.TemplateError as e:
-            return {"output": str(e), "input": inputs.get("output"), "step_name": self.name}
+            return self._error_result(str(e), inputs)
         body_raw = self.data.get("body", "")
         if not url:
             return {"output": "", "input": inputs.get("output"), "step_name": self.name}
@@ -924,7 +964,7 @@ class APICallNode(Node):
         try:
             validate_outbound_url(url)
         except ValueError as e:
-            return {"output": f"Blocked URL: {e}", "input": inputs.get("output"), "step_name": self.name}
+            return self._error_result(f"Blocked URL: {e}", inputs)
 
         self.report_progress(f"{method} {url}")
         headers: dict[str, str] = {}
@@ -932,33 +972,25 @@ class APICallNode(Node):
             try:
                 parsed = json.loads(headers_raw)
             except json.JSONDecodeError as e:
-                return {
-                    "output": (
-                        f"Invalid Headers JSON: {e}. "
-                        "Check for smart quotes or other invisible characters."
-                    ),
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(
+                    f"Invalid Headers JSON: {e}. "
+                    "Check for smart quotes or other invisible characters.",
+                    inputs,
+                )
             if not isinstance(parsed, dict):
-                return {
-                    "output": (
-                        "Invalid Headers JSON: expected an object like "
-                        '{"x-api-key": "..."}'
-                    ),
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(
+                    'Invalid Headers JSON: expected an object like {"x-api-key": "..."}',
+                    inputs,
+                )
             headers = {str(k): str(v) for k, v in parsed.items()}
 
         # Apply credential-based auth (overrides any conflicting header).
         if auth_strategy != "none":
             if not credential_id:
-                return {
-                    "output": f"API Node auth_strategy {auth_strategy!r} requires credential_id",
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(
+                    f"API Node auth_strategy {auth_strategy!r} requires credential_id",
+                    inputs,
+                )
             from app.services import credentials_service
 
             try:
@@ -966,34 +998,19 @@ class APICallNode(Node):
                 cred_doc = credentials_service.fetch_credential_sync(db, credential_id)
             except Exception as e:
                 logger.exception("Credential lookup failed")
-                return {
-                    "output": f"Credential lookup failed: {e}",
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(f"Credential lookup failed: {e}", inputs)
             if not cred_doc:
-                return {
-                    "output": f"Credential {credential_id!r} not found",
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(f"Credential {credential_id!r} not found", inputs)
             if cred_doc.get("type") != auth_strategy:
-                return {
-                    "output": (
-                        f"Credential type {cred_doc.get('type')!r} does not match "
-                        f"auth_strategy {auth_strategy!r}"
-                    ),
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(
+                    f"Credential type {cred_doc.get('type')!r} does not match "
+                    f"auth_strategy {auth_strategy!r}",
+                    inputs,
+                )
             try:
                 credentials_service.apply_auth(credential_doc=cred_doc, headers=headers)
             except credentials_service.CredentialError as e:
-                return {
-                    "output": f"Auth setup failed: {e}",
-                    "input": inputs.get("output"),
-                    "step_name": self.name,
-                }
+                return self._error_result(f"Auth setup failed: {e}", inputs)
 
         body = None
         body_is_json = False
@@ -1005,11 +1022,7 @@ class APICallNode(Node):
                 try:
                     rendered_body = templating.render(body_raw, inputs, json_encode=True)
                 except templating.TemplateError as e:
-                    return {
-                        "output": str(e),
-                        "input": inputs.get("output"),
-                        "step_name": self.name,
-                    }
+                    return self._error_result(str(e), inputs)
                 try:
                     parsed = json.loads(rendered_body)
                 except json.JSONDecodeError:
@@ -1062,25 +1075,21 @@ class APICallNode(Node):
                 resp = client.request(method, url, headers=headers, json=body if isinstance(body, (dict, list)) else None, content=body if isinstance(body, str) else None)
                 resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            return {
-                "output": (
-                    f"HTTP error: {e.response.status_code} {e.response.text[:500]}\n\n"
-                    f"--- Request sent ---\n{_format_request_preview(request_preview)}"
-                ),
-                "input": inputs.get("output"),
-                "step_name": self.name,
-                "request": request_preview,
-            }
+            message = f"HTTP error: {e.response.status_code} {e.response.text[:500]}"
+            return self._error_result(
+                message,
+                inputs,
+                output=f"{message}\n\n--- Request sent ---\n{_format_request_preview(request_preview)}",
+                request=request_preview,
+            )
         except httpx.RequestError as e:
-            return {
-                "output": (
-                    f"Request error: {e}\n\n"
-                    f"--- Request sent ---\n{_format_request_preview(request_preview)}"
-                ),
-                "input": inputs.get("output"),
-                "step_name": self.name,
-                "request": request_preview,
-            }
+            message = f"Request error: {e}"
+            return self._error_result(
+                message,
+                inputs,
+                output=f"{message}\n\n--- Request sent ---\n{_format_request_preview(request_preview)}",
+                request=request_preview,
+            )
 
         try:
             output = resp.json()
@@ -1469,6 +1478,21 @@ class WorkflowCancelled(Exception):
     ``canceled``), not an error, and must not retry the task."""
 
 
+class WorkflowStepError(Exception):
+    """Raised inside execute() when a step reports a failure via the ``error``
+    key on its result dict (blocked URL, HTTP failure, bad config, ...).
+
+    Callers should mark the run failed with this message and must not retry
+    the task — the failure is deterministic, not transient. The step's full
+    result (including any request preview) is persisted to steps_output
+    before this is raised, so the run record keeps the debugging detail."""
+
+    def __init__(self, step_name: str, message: str) -> None:
+        self.step_name = step_name
+        self.message = message
+        super().__init__(f"{step_name} step failed: {message}")
+
+
 class WorkflowEngine:
     def __init__(self) -> None:
         self.nodes: list[Node] = []
@@ -1564,6 +1588,14 @@ class WorkflowEngine:
                     "num_steps_completed": idx,
                 })
 
+            # A step that reported a failure halts the run. Its error text must
+            # not flow downstream as step input or become the deliverable — the
+            # run fails with the step's message. The full step result (request
+            # preview etc.) was persisted to steps_output just above.
+            step_error = latest_output.get("error") if isinstance(latest_output, dict) else None
+            if isinstance(step_error, str) and step_error:
+                raise WorkflowStepError(node.name, step_error)
+
             entry = {
                 "name": node.name,
                 "output": latest_output.get("output"),
@@ -1637,6 +1669,8 @@ def _output_looks_empty_or_error(output: dict | None) -> bool:
     obviously dead outputs so we don't pay a retry on every borderline run.
     """
     if not output:
+        return True
+    if output.get("error"):
         return True
     val = output.get("output")
     if val is None:
