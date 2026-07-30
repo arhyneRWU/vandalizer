@@ -399,6 +399,7 @@ class TestWebsiteNode:
         node = WebsiteNode({"url": "http://metadata.google.internal"})
         result = node.process({"output": "prev"})
         assert "Blocked URL" in result["output"]
+        assert "Blocked URL" in result["error"]
 
     @patch("app.services.web_fetcher.fetch_url_sync")
     def test_http_error(self, mock_fetch):
@@ -490,6 +491,7 @@ class TestCodeExecutionNode:
         node = CodeExecutionNode({"code": "import os"})
         result = node.process({"output": "data"})
         assert "Code rejected" in result["output"]
+        assert "Code rejected" in result["error"]
 
     @patch("app.utils.code_sandbox.validate_sandbox_code",
            side_effect=SyntaxError("invalid syntax"))
@@ -804,6 +806,57 @@ class TestAPICallNode:
         node = APICallNode({"url": "http://internal"})
         result = node.process({"output": "prev"})
         assert "Blocked URL" in result["output"]
+        assert "Blocked URL" in result["error"]
+
+    @patch("app.utils.url_validation.validate_outbound_url", return_value="ok")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_http_error_sets_error_and_request_preview(self, mock_client_cls, _mock_validate):
+        import httpx
+
+        request = httpx.Request("GET", "https://api.example.com/data")
+        response = httpx.Response(500, request=request, text="server exploded")
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "boom", request=request, response=response,
+        )
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.request.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        node = APICallNode({"url": "https://api.example.com/data", "method": "GET"})
+        result = node.process({"output": "prev"})
+        assert result["error"].startswith("HTTP error: 500")
+        # The full output keeps the request preview for debugging.
+        assert "--- Request sent ---" in result["output"]
+        assert result["request"]["url"] == "https://api.example.com/data"
+
+    @patch("app.utils.url_validation.validate_outbound_url", return_value="ok")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_request_error_sets_error(self, mock_client_cls, _mock_validate):
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.request.side_effect = httpx.ConnectError("connection refused")
+        mock_client_cls.return_value = mock_client
+
+        node = APICallNode({"url": "https://api.example.com/data", "method": "GET"})
+        result = node.process({"output": "prev"})
+        assert result["error"].startswith("Request error:")
+        assert result["request"]["url"] == "https://api.example.com/data"
+
+    @patch("app.utils.url_validation.validate_outbound_url", return_value="ok")
+    def test_invalid_headers_json_sets_error(self, _mock_validate):
+        node = APICallNode({
+            "url": "https://api.example.com/data",
+            "method": "GET",
+            "headers": "{not json",
+        })
+        result = node.process({"output": "prev"})
+        assert "Invalid Headers JSON" in result["error"]
 
     @patch("app.utils.url_validation.validate_outbound_url")
     @patch("app.services.workflow_engine.httpx.Client")

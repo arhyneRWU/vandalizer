@@ -166,6 +166,47 @@ class TestExecuteWorkflowTask:
 
     @patch("app.tasks.workflow_tasks._get_db")
     @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_step_failure_marks_run_failed_without_retry(self, mock_build, mock_get_db):
+        """A failed step (blocked URL, HTTP error, ...) must fail the run —
+        not surface the error text as a completed deliverable — and must not
+        re-raise (deterministic failure, no Celery retry)."""
+        from app.services.workflow_engine import WorkflowStepError
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id, result_id = _fake_oid(), _fake_oid()
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+        )
+        mock_get_db.return_value = db
+
+        mock_engine = MagicMock()
+        mock_engine.execute.side_effect = WorkflowStepError(
+            "API", "Blocked URL: URL resolves to blocked IP range: 127.0.0.1",
+        )
+        mock_build.return_value = mock_engine
+
+        result = execute_workflow_task(
+            workflow_result_id=str(result_id),
+            workflow_id=str(wf_id),
+            trigger_step_data={"doc_uuids": []},
+            model="gpt-4o",
+        )
+
+        assert result["status"] == "error"
+        error_calls = [c for c in db.workflow_result.update_one.call_args_list
+                       if c[0][1].get("$set", {}).get("status") == "error"]
+        assert len(error_calls) == 1
+        error_msg = error_calls[0][0][1]["$set"]["error"]
+        assert "API step failed" in error_msg
+        assert "blocked IP range" in error_msg
+        # Never marked completed, and no final_output written.
+        completed_calls = [c for c in db.workflow_result.update_one.call_args_list
+                           if c[0][1].get("$set", {}).get("status") == "completed"]
+        assert completed_calls == []
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
     def test_approval_pause(self, mock_build, mock_get_db):
         from app.tasks.workflow_tasks import execute_workflow_task
 
