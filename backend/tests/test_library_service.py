@@ -256,7 +256,7 @@ class TestAddItem:
 
             from app.services.library_service import add_item
 
-            result = await add_item(str(lib.id), user, item_id, "workflow")
+            await add_item(str(lib.id), user, item_id, "workflow")
             mock_item.insert.assert_awaited_once()
             lib.save.assert_awaited_once()
             assert lib.items[-1] == mock_item.id
@@ -394,6 +394,131 @@ class TestRemoveItem:
             lib.save.assert_awaited_once()
             assert item.id not in lib.items
 
+    @pytest.mark.asyncio
+    async def test_delete_underlying_workflow_cascades(self):
+        from app.models.library import LibraryItemKind
+
+        item = _make_library_item(kind_value="workflow")
+        item.kind = LibraryItemKind.WORKFLOW
+        lib = _make_library(items=[item.id])
+        user = _make_user()
+        wf = MagicMock()
+        wf.name = "NSF Proposal Extractor"
+        wf.team_id = None
+        with (
+            patch("app.services.library_service.access_control") as mock_ac,
+            patch("app.services.library_service.LibraryItem") as MockItem,
+            patch("app.services.library_service.Library") as MockLib,
+            patch("app.services.library_service.Workflow") as MockWf,
+            patch("app.services.library_service.audit_service") as mock_audit,
+            patch("app.services.workflow_service.delete_workflow", new_callable=AsyncMock) as mock_delete,
+        ):
+            mock_ac.get_authorized_library = AsyncMock(return_value=lib)
+            MockItem.get = AsyncMock(return_value=item)
+            MockItem.find.return_value.to_list = AsyncMock(return_value=[item])
+            MockLib.find.return_value.update = AsyncMock()
+            MockWf.get = AsyncMock(return_value=wf)
+            mock_audit.log_event = AsyncMock()
+            mock_delete.return_value = True
+
+            from app.services.library_service import remove_item
+
+            result = await remove_item(str(lib.id), str(item.id), user, delete_underlying=True)
+
+            assert result is True
+            mock_delete.assert_awaited_once_with(str(item.item_id), user)
+            # Every bookmark pointing at the deleted workflow is purged
+            item.delete.assert_awaited_once()
+            MockLib.find.return_value.update.assert_awaited_with({"$pull": {"items": item.id}})
+            mock_audit.log_event.assert_awaited_once()
+            assert mock_audit.log_event.await_args.kwargs["action"] == "workflow.delete"
+
+    @pytest.mark.asyncio
+    async def test_delete_underlying_forbidden_deletes_nothing(self):
+        from app.models.library import LibraryItemKind
+        from app.services.library_service import UnderlyingDeleteError, remove_item
+
+        item = _make_library_item(kind_value="workflow")
+        item.kind = LibraryItemKind.WORKFLOW
+        lib = _make_library(items=[item.id])
+        user = _make_user()
+        with (
+            patch("app.services.library_service.access_control") as mock_ac,
+            patch("app.services.library_service.LibraryItem") as MockItem,
+            patch("app.services.library_service.Workflow") as MockWf,
+            patch("app.services.workflow_service.delete_workflow", new_callable=AsyncMock) as mock_delete,
+        ):
+            mock_ac.get_authorized_library = AsyncMock(return_value=lib)
+            MockItem.get = AsyncMock(return_value=item)
+            MockWf.get = AsyncMock(return_value=MagicMock())
+            mock_delete.return_value = False
+
+            with pytest.raises(UnderlyingDeleteError) as exc:
+                await remove_item(str(lib.id), str(item.id), user, delete_underlying=True)
+
+            assert exc.value.code == "forbidden"
+            item.delete.assert_not_awaited()
+            lib.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delete_underlying_search_set_cascades(self):
+        from app.models.library import LibraryItemKind
+
+        item = _make_library_item(kind_value="search_set")
+        item.kind = LibraryItemKind.SEARCH_SET
+        lib = _make_library(items=[item.id])
+        user = _make_user()
+        ss = MagicMock()
+        ss.uuid = "ss-uuid-1"
+        ss.title = "Budget Fields"
+        ss.team_id = None
+        with (
+            patch("app.services.library_service.access_control") as mock_ac,
+            patch("app.services.library_service.LibraryItem") as MockItem,
+            patch("app.services.library_service.Library") as MockLib,
+            patch("app.services.library_service.SearchSet") as MockSS,
+            patch("app.services.library_service.audit_service") as mock_audit,
+            patch("app.services.search_set_service.delete_search_set", new_callable=AsyncMock) as mock_delete,
+        ):
+            mock_ac.get_authorized_library = AsyncMock(return_value=lib)
+            mock_ac.get_authorized_search_set_by_id = AsyncMock(return_value=ss)
+            MockItem.get = AsyncMock(return_value=item)
+            MockItem.find.return_value.to_list = AsyncMock(return_value=[item])
+            MockLib.find.return_value.update = AsyncMock()
+            MockSS.get = AsyncMock(return_value=ss)
+            mock_audit.log_event = AsyncMock()
+
+            from app.services.library_service import remove_item
+
+            result = await remove_item(str(lib.id), str(item.id), user, delete_underlying=True)
+
+            assert result is True
+            mock_delete.assert_awaited_once_with("ss-uuid-1")
+            item.delete.assert_awaited_once()
+            assert mock_audit.log_event.await_args.kwargs["action"] == "extraction.delete"
+
+    @pytest.mark.asyncio
+    async def test_delete_underlying_unsupported_kind(self):
+        from app.models.library import LibraryItemKind
+        from app.services.library_service import UnderlyingDeleteError, remove_item
+
+        item = _make_library_item(kind_value="knowledge_base")
+        item.kind = LibraryItemKind.KNOWLEDGE_BASE
+        lib = _make_library(items=[item.id])
+        user = _make_user()
+        with (
+            patch("app.services.library_service.access_control") as mock_ac,
+            patch("app.services.library_service.LibraryItem") as MockItem,
+        ):
+            mock_ac.get_authorized_library = AsyncMock(return_value=lib)
+            MockItem.get = AsyncMock(return_value=item)
+
+            with pytest.raises(UnderlyingDeleteError) as exc:
+                await remove_item(str(lib.id), str(item.id), user, delete_underlying=True)
+
+            assert exc.value.code == "unsupported"
+            item.delete.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # update_item
@@ -419,7 +544,7 @@ class TestUpdateItem:
 
             from app.services.library_service import update_item
 
-            result = await update_item(str(item.id), user, note="updated", tags=["a", "b"])
+            await update_item(str(item.id), user, note="updated", tags=["a", "b"])
             item.set.assert_awaited_once()
             assert item.note == "updated"
             assert item.tags == ["a", "b"]

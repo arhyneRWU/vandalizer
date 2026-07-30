@@ -38,7 +38,7 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import type { VerifiedCollection } from '../../types/library'
+import type { LibraryItem, VerifiedCollection } from '../../types/library'
 import { useLibraryFolders } from '../../hooks/useLibrary'
 
 type ScopeTab = 'mine' | 'team' | 'explore'
@@ -198,6 +198,11 @@ export function LibraryTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorOpen])
 
+  // Delete-choice dialog: set when the user can permanently delete the
+  // underlying workflow/extraction (not just remove the bookmark).
+  const [deleteTarget, setDeleteTarget] = useState<LibraryItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
   // Actions
   const handlePin = async (itemId: string, pinned: boolean) => {
     await update(itemId, { pinned })
@@ -255,22 +260,60 @@ export function LibraryTab() {
       toast(msg, 'error')
     }
   }
+  // Prompts/formatters are search_set items — label them by set_type.
+  const itemKindLabel = (item: { kind: string; set_type: string | null }) =>
+    item.kind === 'search_set' ? (item.set_type || 'extraction') : (KIND_LABEL[item.kind] ?? 'item')
+
   const handleRemove = async (itemId: string) => {
     const item = items.find((i) => i.id === itemId)
-    const kindLabel = item ? (KIND_LABEL[item.kind] ?? 'item') : 'item'
+    // Removing a bookmark leaves the underlying workflow/extraction alive (and
+    // its name reserved). When the user may delete the real object, open the
+    // choice dialog; otherwise be honest that only the bookmark goes away.
+    if (item?.can_delete_underlying) {
+      setDeleteTarget(item)
+      return
+    }
+    const kindLabel = item ? itemKindLabel(item) : 'item'
     const ok = await confirm({
-      title: `Delete ${kindLabel}?`,
+      title: `Remove ${kindLabel} from library?`,
       message: (
         <>
-          Are you sure you want to delete <strong>{item?.name ?? 'this item'}</strong>? This action cannot be undone.
+          Remove <strong>{item?.name ?? 'this item'}</strong> from this library? Only the
+          bookmark is removed — the {kindLabel} itself is kept by its owner.
         </>
       ),
-      confirmLabel: 'Delete',
+      confirmLabel: 'Remove',
       destructive: true,
     })
     if (!ok) return
-    await remove(itemId)
-    refreshFolders()
+    try {
+      await remove(itemId)
+      refreshFolders()
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'Failed to remove from library', 'error')
+    }
+  }
+
+  const handleDeleteChoice = async (deleteUnderlying: boolean) => {
+    if (!deleteTarget || deleting) return
+    const { id, name } = deleteTarget
+    const kindLabel = itemKindLabel(deleteTarget)
+    setDeleting(true)
+    try {
+      await remove(id, deleteUnderlying ? { deleteUnderlying: true } : undefined)
+      setDeleteTarget(null)
+      refreshFolders()
+      toast(
+        deleteUnderlying
+          ? `Deleted "${name}" permanently`
+          : `Removed "${name}" from library — the ${kindLabel} itself was kept`,
+        'success',
+      )
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : `Failed to delete ${kindLabel}`, 'error')
+    } finally {
+      setDeleting(false)
+    }
   }
   const handleMoveToFolder = async (itemId: string, folderUuid: string | null) => {
     await moveFolderItems([itemId], folderUuid)
@@ -1296,6 +1339,101 @@ export function LibraryTab() {
           </div>
         </div>
       </div>
+      )}
+
+      {/* Delete-choice Modal: remove bookmark vs. permanently delete the object */}
+      {deleteTarget && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 2000,
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            paddingTop: '8%',
+            backgroundColor: 'rgba(0,0,0,0.4)',
+          }}
+          onClick={() => { if (!deleting) setDeleteTarget(null) }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${itemKindLabel(deleteTarget)}?`}
+            style={{
+              backgroundColor: '#fff',
+              borderRadius: 'var(--ui-radius, 12px)',
+              padding: '28px 32px',
+              width: '90%',
+              maxWidth: 480,
+              boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+            }}
+          >
+            <h2 style={{ margin: '0 0 12px', fontSize: 20, fontWeight: 600, color: '#202124', textAlign: 'left' }}>
+              Delete {itemKindLabel(deleteTarget)}?
+            </h2>
+            <p style={{ margin: '0 0 20px', fontSize: 14, color: '#5f6368', lineHeight: 1.5 }}>
+              <strong style={{ color: '#202124' }}>{deleteTarget.name}</strong> can be removed from
+              this library only — it still exists, keeps its name, and can be added back later.
+              Or delete it permanently, which removes the {itemKindLabel(deleteTarget)} and its run
+              history everywhere and cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => handleDeleteChoice(true)}
+                disabled={deleting}
+                style={{
+                  padding: '10px 20px',
+                  fontSize: 14,
+                  fontWeight: 700,
+                  fontFamily: 'inherit',
+                  borderRadius: 8,
+                  border: 'none',
+                  backgroundColor: '#dc2626',
+                  color: '#fff',
+                  cursor: deleting ? 'not-allowed' : 'pointer',
+                  opacity: deleting ? 0.5 : 1,
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Delete permanently'}
+              </button>
+              <button
+                onClick={() => handleDeleteChoice(false)}
+                disabled={deleting}
+                style={{
+                  padding: '10px 20px',
+                  fontSize: 14,
+                  fontFamily: 'inherit',
+                  borderRadius: 8,
+                  border: '1px solid #dadce0',
+                  backgroundColor: '#fff',
+                  color: '#202124',
+                  cursor: deleting ? 'not-allowed' : 'pointer',
+                  opacity: deleting ? 0.5 : 1,
+                }}
+              >
+                Remove from library only
+              </button>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                style={{
+                  padding: '10px 20px',
+                  fontSize: 14,
+                  fontFamily: 'inherit',
+                  borderRadius: 8,
+                  border: 'none',
+                  backgroundColor: 'transparent',
+                  color: '#5f6368',
+                  cursor: deleting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Creation Modal (workflow / extraction / prompt / formatter) */}

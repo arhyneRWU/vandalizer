@@ -3,6 +3,7 @@ import {
   listLibraries,
   listItems,
   cloneToPersonal,
+  removeItem,
   shareToTeam,
   listCollections,
   submitForVerification,
@@ -50,6 +51,20 @@ describe('Library API', () => {
     const url = mockFetch.mock.calls[0][0]
     expect(url).toContain('kind=workflow')
     expect(url).toContain('search=budget')
+  })
+
+  it('removeItem sends DELETE without params by default', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }))
+    await removeItem('lib-1', 'item-1')
+    const call = mockFetch.mock.calls[0]
+    expect(call[1].method).toBe('DELETE')
+    expect(call[0]).toBe('/api/library/lib-1/items/item-1')
+  })
+
+  it('removeItem passes delete_underlying for permanent deletes', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }))
+    await removeItem('lib-1', 'item-1', { deleteUnderlying: true })
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/library/lib-1/items/item-1?delete_underlying=true')
   })
 
   it('cloneToPersonal sends POST with item_id', async () => {

@@ -274,9 +274,23 @@ async def list_items(
 async def remove_item(
     library_id: str,
     item_id: str,
+    delete_underlying: bool = Query(False),
     user: User = Depends(get_current_user),
 ):
-    ok = await svc.remove_item(library_id, item_id, user)
+    try:
+        ok = await svc.remove_item(
+            library_id, item_id, user, delete_underlying=delete_underlying,
+        )
+    except svc.UnderlyingDeleteError as e:
+        if e.code == "unsupported":
+            raise HTTPException(
+                status_code=400,
+                detail="This item type can only be removed from the library, not permanently deleted.",
+            )
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to permanently delete this item.",
+        )
     if not ok:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"ok": True}
