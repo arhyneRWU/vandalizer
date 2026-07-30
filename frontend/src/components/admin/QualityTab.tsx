@@ -13,11 +13,13 @@ import {
   type QualityAlert, type QualityItem, type QualityItemDetail, type QualitySummary,
   type QualityTimelinePoint, type RegressionResult, type SystemConfigData,
 } from '../../api/admin'
+import { useToast } from '../../contexts/ToastContext'
 import { relativeTime } from '../../utils/time'
 import { downloadCSV } from './shared/format'
 import { ExportButton, KpiCard, SortableHeader } from './shared/primitives'
 
 export function QualityTab() {
+  const { toast } = useToast()
   const [summary, setSummary] = useState<QualitySummary | null>(null)
   const [timeline, setTimeline] = useState<QualityTimelinePoint[]>([])
   const [days, setDays] = useState(90)
@@ -26,6 +28,7 @@ export function QualityTab() {
   const [regressionRunning, setRegressionRunning] = useState(false)
   const [regressionModel, setRegressionModel] = useState('')
   const [cfg, setCfg] = useState<SystemConfigData | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   // Alert feed state
   const [alerts, setAlerts] = useState<QualityAlert[]>([])
@@ -38,36 +41,51 @@ export function QualityTab() {
 
   const load = useCallback(() => {
     setLoading(true)
+    setError(null)
     Promise.all([
       getQualitySummary(),
       getQualityTimeline(days),
-      getSystemConfig(),
       getQualityAlerts(50, false),
       getQualityItems('score', 'asc', 100),
-    ]).then(([s, t, c, a, qi]) => {
+    ]).then(([s, t, a, qi]) => {
       setSummary(s)
       setTimeline(t.timeline)
-      setCfg(c)
       setAlerts(a.alerts)
       setQualityItems(qi.items)
-    }).finally(() => setLoading(false))
+    }).catch(e => setError(e?.message || 'Failed to load quality data'))
+      .finally(() => setLoading(false))
   }, [days])
 
   useEffect(() => { load() }, [load])
+
+  // Config is fetched separately and tolerantly: it's superadmin-only
+  // (`GET /api/admin/config` calls `_require_superadmin`), so staff users
+  // reject it. It only feeds the optional model <select> in the regression
+  // panel below, which degrades to an empty/default-only list when cfg is
+  // null — it must not block the tab's real payload (the four calls above).
+  useEffect(() => {
+    getSystemConfig().then(setCfg).catch(() => {})
+  }, [])
 
   const handleRunRegression = async () => {
     setRegressionRunning(true)
     try {
       const result = await runRegressionSuite(regressionModel || undefined)
       setRegressionResult(result)
+    } catch (e) {
+      toast(`Failed to run regression suite: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setRegressionRunning(false)
     }
   }
 
   const handleAcknowledgeAlert = async (uuid: string) => {
-    await acknowledgeAlert(uuid)
-    setAlerts(prev => prev.filter(a => a.uuid !== uuid))
+    try {
+      await acknowledgeAlert(uuid)
+      setAlerts(prev => prev.filter(a => a.uuid !== uuid))
+    } catch (e) {
+      toast(`Failed to acknowledge alert: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const handleExpandItem = async (kind: string, id: string) => {
@@ -106,7 +124,14 @@ export function QualityTab() {
     return list
   }, [qualityItems, itemSort])
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading quality data...</div>
+  if (loading && !summary) return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading quality data...</div>
+
+  if (error && !summary) return (
+    <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>
+      <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+      <div style={{ fontSize: 14, color: '#374151' }}>{error}</div>
+    </div>
+  )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>

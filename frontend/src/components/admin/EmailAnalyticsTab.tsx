@@ -17,11 +17,14 @@ export function EmailAnalyticsTab() {
   const [data, setData] = useState<EmailAnalyticsResponse | null>(null)
   const [days, setDays] = useState(30)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
+    setError(null)
     getEmailAnalytics(days)
       .then(d => setData(d))
+      .catch(e => setError(e?.message || 'Failed to load email analytics'))
       .finally(() => setLoading(false))
   }, [days])
 
@@ -29,6 +32,14 @@ export function EmailAnalyticsTab() {
 
   if (loading && !data) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading email analytics...</div>
+  }
+  if (error && !data) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>
+        <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+        <div style={{ fontSize: 14, color: '#374151' }}>{error}</div>
+      </div>
+    )
   }
   if (!data) return null
 
@@ -67,6 +78,15 @@ export function EmailAnalyticsTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {error && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '10px 16px', borderRadius: 'var(--ui-radius, 12px)',
+          background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 13,
+        }}>
+          <AlertCircle size={14} /> {error}
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <TimeRangeSelector value={days} onChange={v => setDays(typeof v === 'number' ? v : 30)} onRefresh={load} />
         <div style={{ flex: 1 }} />

@@ -79,6 +79,60 @@ describe('parseCSV — order independence', () => {
   })
 })
 
+describe('parseCSV — parent-before-child ordering (import compatibility)', () => {
+  it('reorders an out-of-order 3-level file so every parent precedes its child', () => {
+    // Fully reversed order: Department appears before College, which appears before University.
+    const csv = [
+      'name,parent',
+      'Department of Computer Science,College of Engineering',
+      'College of Engineering,University of Idaho',
+      'University of Idaho,',
+    ].join('\n')
+    const rows = parseCSV(csv)
+    const idx = (name: string) => rows.findIndex(r => r.name === name)
+    expect(idx('University of Idaho')).toBeGreaterThanOrEqual(0)
+    expect(idx('University of Idaho')).toBeLessThan(idx('College of Engineering'))
+    expect(idx('College of Engineering')).toBeLessThan(idx('Department of Computer Science'))
+  })
+
+  it('leaves an already parent-before-child file in exactly the same order (stability)', () => {
+    const csv = [
+      'name,parent',
+      'University of Idaho,',
+      'College of Engineering,University of Idaho',
+      'College of Science,University of Idaho',
+      'Department of Computer Science,College of Engineering',
+      'Department of Physics,College of Science',
+    ].join('\n')
+    const rows = parseCSV(csv)
+    expect(rows.map(r => r.name)).toEqual([
+      'University of Idaho',
+      'College of Engineering',
+      'College of Science',
+      'Department of Computer Science',
+      'Department of Physics',
+    ])
+  })
+
+  it('terminates on a cyclic parent reference (A -> B -> A) and returns every row', () => {
+    const csv = [
+      'name,parent',
+      'A,B',
+      'B,A',
+    ].join('\n')
+    const rows = parseCSV(csv)
+    expect(rows).toHaveLength(2)
+    expect(rows.map(r => r.name).sort()).toEqual(['A', 'B'])
+  })
+
+  it('still returns a row whose parent reference is dangling (not present in the file)', () => {
+    const csv = 'name,parent\nSome Unit,Nonexistent Parent'
+    const rows = parseCSV(csv)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].name).toBe('Some Unit')
+  })
+})
+
 describe('parseCSV — structural cases', () => {
   it('returns [] for a header-only file', () => {
     expect(parseCSV('name,parent')).toEqual([])

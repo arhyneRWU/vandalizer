@@ -346,6 +346,7 @@ export function ConfigTab() {
   const confirm = useConfirm()
   const [cfg, setCfg] = useState<SystemConfigData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -391,6 +392,12 @@ export function ConfigTab() {
   // Endpoints
   const [ocrEndpoint, setOcrEndpoint] = useState('')
   const [ocrApiKey, setOcrApiKey] = useState('')
+  // Tracks whether the user actually edited the key field (vs. it merely
+  // holding the load's initial value). Only a dirty key is sent on save —
+  // this is defense in depth so a form rendered without a successful config
+  // load can never overwrite the stored key with ''. See the `!cfg || loadError`
+  // early return below, which is the primary guard.
+  const [ocrApiKeyDirty, setOcrApiKeyDirty] = useState(false)
   const [ocrTesting, setOcrTesting] = useState(false)
   const [ocrTestResult, setOcrTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [modelTesting, setModelTesting] = useState<number | null>(null)
@@ -499,14 +506,18 @@ export function ConfigTab() {
 
   useEffect(() => { void refreshReadiness() }, [refreshReadiness])
 
-  useEffect(() => {
+  // Extracted so the error panel's Retry control can re-run the exact same
+  // load the mount effect performs, resetting loadError/loading each time.
+  const loadConfig = useCallback(() => {
     setLoading(true)
-    getSystemConfig().then(c => {
+    setLoadError(null)
+    return getSystemConfig().then(c => {
       setCfg(c)
       setThemeColor(c.highlight_color || '#eab308')
       setThemeRadius(parseInt(c.ui_radius) || 12)
       setOcrEndpoint(c.ocr_endpoint || '')
       setOcrApiKey(c.ocr_api_key || '')
+      setOcrApiKeyDirty(false)
       setAuthMethods(c.auth_methods || ['password'])
       setSupportContacts((c as unknown as Record<string, unknown>).support_contacts as typeof supportContacts || [])
       // Extraction config
@@ -556,7 +567,13 @@ export function ConfigTab() {
       setChatRetentionDays((rc.chat_retention_days as number) ?? 365)
       setWorkflowResultRetentionDays((rc.workflow_result_retention_days as number) ?? 365)
       setStaleActivityMinutes((rc.activity_stale_threshold_minutes as number) ?? 30)
-    }).catch(() => {}).finally(() => setLoading(false))
+    }).catch(e => {
+      setLoadError(e instanceof Error ? e.message : 'Failed to load configuration')
+    }).finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    void loadConfig()
 
     getThemeConfig().then(t => {
       setThemeColor(t.highlight_color)
@@ -566,7 +583,7 @@ export function ConfigTab() {
       setThemeIcon(t.icon_data_url || '')
       setThemeIconHideInNav(!!t.icon_hide_in_nav)
     }).catch(() => {})
-  }, [])
+  }, [loadConfig])
 
   const handleSaveConfig = async () => {
     setSaving(true)
@@ -599,7 +616,11 @@ export function ConfigTab() {
           },
         },
         ocr_endpoint: ocrEndpoint,
-        ocr_api_key: ocrApiKey,
+        // Only send the key when the user actually touched the field. An
+        // untouched field after a successful load holds the "***" sentinel,
+        // which the backend already treats as "keep the stored key" — so
+        // omitting it here is equivalent and avoids ever sending ''.
+        ...(ocrApiKeyDirty ? { ocr_api_key: ocrApiKey } : {}),
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -928,9 +949,12 @@ export function ConfigTab() {
 
   const handleSaveAuthMethods = async () => {
     setAuthSaving(true)
+    setError(null)
     try {
       await updateAuthMethods(authMethods)
       void refreshReadiness()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update auth methods')
     } finally {
       setAuthSaving(false)
     }
@@ -1019,6 +1043,37 @@ export function ConfigTab() {
   }
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading config...</div>
+
+  // Structural guard: without this, a failed load left `cfg` null but still
+  // rendered the form against pristine useState defaults, and Save would
+  // write those defaults over real stored config (wiping the OCR API key,
+  // resetting extraction_config/quality_config). Never remove this without
+  // an equivalent guard in its place.
+  if (!cfg || loadError) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center' }}>
+        <div style={{
+          display: 'inline-block', padding: '16px 20px', background: '#fef2f2', border: '1px solid #fecaca',
+          borderRadius: 'var(--ui-radius, 12px)', color: '#991b1b', fontSize: 14, maxWidth: 480,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Could not load configuration</div>
+          <div style={{ marginBottom: 12 }}>
+            {loadError || 'The configuration failed to load.'} Saving is disabled until it loads
+            successfully, so this cannot overwrite stored settings with blank defaults.
+          </div>
+          <button
+            onClick={() => void loadConfig()}
+            style={{
+              padding: '6px 16px', borderRadius: 'var(--ui-radius, 12px)', border: '1px solid #991b1b',
+              fontSize: 13, fontWeight: 600, cursor: 'pointer', background: '#fff', color: '#991b1b',
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   const sectionStyle = {
     background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', overflow: 'hidden' as const,
@@ -1659,20 +1714,32 @@ ${playgroundResult.request.user_prompt}`}
           <div style={{ marginBottom: 20 }}>
             <label style={labelStyle}>Auth Methods</label>
             <div style={{ display: 'flex', gap: 16 }}>
-              {['password', 'oauth'].map(m => (
-                <label key={m} style={{ display: 'flex', alignItems: 'center', fontSize: 14, cursor: 'pointer', textTransform: 'capitalize' }}>
-                  <input
-                    type="checkbox"
-                    checked={authMethods.includes(m)}
-                    onChange={e => {
-                      if (e.target.checked) setAuthMethods(prev => [...prev, m])
-                      else setAuthMethods(prev => prev.filter(x => x !== m))
-                    }}
-                    style={checkStyle}
-                  />
-                  {m === 'oauth' ? 'OAuth / SAML' : m}
-                </label>
-              ))}
+              {['password', 'oauth'].map(m => {
+                // Disable unchecking the last remaining method — an empty
+                // auth_methods list disables every login path with no
+                // in-app recovery. The server also rejects this, but the
+                // UI should never let an admin walk into that footgun.
+                const isLastMethod = authMethods.length === 1 && authMethods.includes(m)
+                return (
+                  <label
+                    key={m}
+                    style={{ display: 'flex', alignItems: 'center', fontSize: 14, cursor: isLastMethod ? 'not-allowed' : 'pointer', textTransform: 'capitalize' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={authMethods.includes(m)}
+                      disabled={isLastMethod}
+                      title={isLastMethod ? 'At least one auth method must remain enabled' : undefined}
+                      onChange={e => {
+                        if (e.target.checked) setAuthMethods(prev => [...prev, m])
+                        else setAuthMethods(prev => prev.filter(x => x !== m))
+                      }}
+                      style={checkStyle}
+                    />
+                    {m === 'oauth' ? 'OAuth / SAML' : m}
+                  </label>
+                )
+              })}
             </div>
             <button
               onClick={handleSaveAuthMethods}
@@ -1966,7 +2033,7 @@ ${playgroundResult.request.user_prompt}`}
             <input
               type="password" autoComplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore
               name="vandalizer-ocr-api-key"
-              value={ocrApiKey} onChange={e => setOcrApiKey(e.target.value)}
+              value={ocrApiKey} onChange={e => { setOcrApiKey(e.target.value); setOcrApiKeyDirty(true) }}
               placeholder="Bearer token..." style={{ ...inputStyle, maxWidth: 500 }}
             />
           </div>

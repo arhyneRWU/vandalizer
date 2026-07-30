@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import {
-  ChevronRight, RefreshCw, MessageSquare, Download, ChevronDown,
+  AlertCircle, ChevronRight, RefreshCw, MessageSquare, Download, ChevronDown,
   Mail, Send, Link, UserPlus, Award,
 } from 'lucide-react'
 import { useConfirm } from '../shared/useConfirm'
@@ -110,10 +110,12 @@ export function DemoTab() {
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [expandedUuid, setExpandedUuid] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
     setLoading(true)
+    setLoadError(null)
     try {
       const [s, a] = await Promise.all([
         getDemoStats(),
@@ -121,8 +123,8 @@ export function DemoTab() {
       ])
       setStats(s)
       setApps(a)
-    } catch {
-      // ignore
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : 'Failed to load demo applications')
     } finally {
       setLoading(false)
     }
@@ -222,13 +224,39 @@ export function DemoTab() {
   }
 
   async function handleActivate(uuid: string) {
-    await activateDemoUser(uuid)
-    loadData()
+    const ok = await confirm({
+      title: 'Activate this application?',
+      message: 'Activate this pending application now? This creates their account and sends login credentials immediately, skipping the waitlist queue.',
+      confirmLabel: 'Activate',
+    })
+    if (!ok) return
+    setActionLoading(`activate-${uuid}`)
+    try {
+      await activateDemoUser(uuid)
+      loadData()
+    } catch {
+      toast('Failed to activate application', 'error')
+    } finally {
+      setActionLoading(null)
+    }
   }
 
   async function handleRelease(uuid: string) {
-    await releaseDemoUser(uuid)
-    loadData()
+    const ok = await confirm({
+      title: 'Release this user?',
+      message: 'Release this user so they can log in again? This is typically used for expired or completed trials that no longer need admin follow-up.',
+      confirmLabel: 'Release',
+    })
+    if (!ok) return
+    setActionLoading(`release-${uuid}`)
+    try {
+      await releaseDemoUser(uuid)
+      loadData()
+    } catch {
+      toast('Failed to release application', 'error')
+    } finally {
+      setActionLoading(null)
+    }
   }
 
   async function handleRestartTrial(uuid: string) {
@@ -552,8 +580,22 @@ export function DemoTab() {
       {/* Applications table */}
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>Loading...</div>
+      ) : loadError && apps.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>
+          <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 14, color: '#374151' }}>{loadError}</div>
+        </div>
       ) : (
         <div style={{ borderRadius: 12, border: '1px solid #e5e7eb', overflow: 'hidden', background: '#fff' }}>
+          {loadError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+              color: '#991b1b', fontSize: 13,
+            }}>
+              <AlertCircle size={14} /> {loadError}
+            </div>
+          )}
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
             <thead>
               <tr style={{ background: '#f9fafb' }}>
@@ -621,25 +663,29 @@ export function DemoTab() {
                           {app.status === 'pending' && (
                             <button
                               onClick={() => handleActivate(app.uuid)}
+                              disabled={actionLoading === `activate-${app.uuid}`}
                               style={{
                                 padding: '4px 12px', borderRadius: 6, border: '1px solid #16a34a',
                                 background: '#f0fdf4', color: '#16a34a', fontSize: 12, fontWeight: 600,
                                 cursor: 'pointer', fontFamily: 'inherit',
+                                opacity: actionLoading === `activate-${app.uuid}` ? 0.5 : 1,
                               }}
                             >
-                              Activate
+                              {actionLoading === `activate-${app.uuid}` ? 'Activating...' : 'Activate'}
                             </button>
                           )}
                           {(app.status === 'expired' || app.status === 'completed') && !app.admin_released && (
                             <button
                               onClick={() => handleRelease(app.uuid)}
+                              disabled={actionLoading === `release-${app.uuid}`}
                               style={{
                                 padding: '4px 12px', borderRadius: 6, border: '1px solid #2563eb',
                                 background: '#eff6ff', color: '#2563eb', fontSize: 12, fontWeight: 600,
                                 cursor: 'pointer', fontFamily: 'inherit',
+                                opacity: actionLoading === `release-${app.uuid}` ? 0.5 : 1,
                               }}
                             >
-                              Release
+                              {actionLoading === `release-${app.uuid}` ? 'Releasing...' : 'Release'}
                             </button>
                           )}
                           {(app.status === 'active' || app.status === 'expired' || app.status === 'completed') && (
@@ -1053,6 +1099,7 @@ function CheckInConversation({ ticketUuid, onUpdate }: { ticketUuid: string; onU
 }
 
 function TrialCheckinsSection() {
+  const { toast } = useToast()
   const [prompts, setPrompts] = useState<PromptOverview[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -1071,8 +1118,12 @@ function TrialCheckinsSection() {
   useEffect(() => { loadPrompts() }, [loadPrompts])
 
   async function toggleEnabled(slug: string, enabled: boolean) {
-    await adminUpdatePrompt(slug, { enabled })
-    loadPrompts()
+    try {
+      await adminUpdatePrompt(slug, { enabled })
+      loadPrompts()
+    } catch (e) {
+      toast(`Failed to ${enabled ? 'enable' : 'disable'} check-in prompt: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const stageColors: Record<string, { bg: string; text: string }> = {

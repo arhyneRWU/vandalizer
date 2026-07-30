@@ -3,6 +3,7 @@ import {
   Users, Building2, Plus, Trash2, Pencil, ChevronRight, Download, AlertCircle, FolderTree, X,
 } from 'lucide-react'
 import { useConfirm } from '../shared/useConfirm'
+import { useToast } from '../../contexts/ToastContext'
 import { adminListAllTeams } from '../../api/admin'
 import type { AdminTeamItem } from '../../api/admin'
 import * as orgApi from '../../api/organizations'
@@ -100,16 +101,19 @@ function OrgNodeRow({
 }
 
 function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose: () => void; onReload: () => void }) {
+  const { toast } = useToast()
   const [members, setMembers] = useState<{ users: OrgMember[]; teams: OrgTeam[] } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [membersError, setMembersError] = useState<string | null>(null)
   const [searchQ, setSearchQ] = useState('')
   const [searchResults, setSearchResults] = useState<OrgMember[]>([])
   const [searching, setSearching] = useState(false)
   const [teams, setTeams] = useState<{ uuid: string; name: string }[]>([])
 
   const loadMembers = useCallback(async () => {
+    setMembersError(null)
     try { const data = await orgApi.getOrgMembers(org.uuid); setMembers(data) }
-    catch { setMembers({ users: [], teams: [] }) }
+    catch (e) { setMembersError(e instanceof Error ? e.message : 'Failed to load members') }
     finally { setLoading(false) }
   }, [org.uuid])
 
@@ -134,20 +138,36 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
   }, [searchQ])
 
   const assignUser = async (userId: string) => {
-    await orgApi.assignUserToOrg(org.uuid, userId)
-    setSearchQ(''); setSearchResults([]); loadMembers(); onReload()
+    try {
+      await orgApi.assignUserToOrg(org.uuid, userId)
+      setSearchQ(''); setSearchResults([]); loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to add user to organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const unassignUser = async (userId: string) => {
-    await orgApi.unassignUserFromOrg(org.uuid, userId)
-    loadMembers(); onReload()
+    try {
+      await orgApi.unassignUserFromOrg(org.uuid, userId)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to remove user from organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const assignTeam = async (teamUuid: string) => {
-    await orgApi.assignTeamToOrg(org.uuid, teamUuid)
-    loadMembers(); onReload()
+    try {
+      await orgApi.assignTeamToOrg(org.uuid, teamUuid)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to add team to organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
   const unassignTeam = async (teamUuid: string) => {
-    await orgApi.unassignTeamFromOrg(org.uuid, teamUuid)
-    loadMembers(); onReload()
+    try {
+      await orgApi.unassignTeamFromOrg(org.uuid, teamUuid)
+      loadMembers(); onReload()
+    } catch (e) {
+      toast(`Failed to remove team from organization: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const memberUserIds = new Set(members?.users.map(u => u.user_id) || [])
@@ -196,6 +216,11 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
       {/* Current members */}
       {loading ? <div className="text-sm text-gray-500">Loading...</div> : (
         <div>
+          {membersError && (
+            <div className="mb-2 flex items-center gap-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />{membersError}
+            </div>
+          )}
           {(members?.users.length || 0) > 0 && (
             <div className="mb-2">
               <div className="text-xs font-semibold text-gray-500 mb-1">Users ({members!.users.length})</div>
@@ -218,7 +243,7 @@ function OrgMemberPanel({ org, onClose, onReload }: { org: Organization; onClose
               ))}
             </div>
           )}
-          {!members?.users.length && !members?.teams.length && (
+          {!membersError && !members?.users.length && !members?.teams.length && (
             <div className="text-sm text-gray-400">No users or teams assigned yet.</div>
           )}
         </div>
@@ -321,7 +346,68 @@ export function parseCSV(text: string): { name: string; parent_name: string; org
     const autoType = DEPTH_TYPE_DEFAULTS[Math.min(myDepth, DEPTH_TYPE_DEFAULTS.length - 1)]
     rows.push({ name: r.name, parent_name: r.parent_name, org_type: autoType })
   }
-  return rows
+  return topoSortRows(rows)
+}
+
+/**
+ * Reorder rows so that every row's parent (matched by name, when that name
+ * appears elsewhere in the file) comes before it — the order the backend
+ * importer requires (see bulk_import_organizations in
+ * organization_service.py, which walks `nodes` in order and raises if a
+ * child's parent hasn't been created yet).
+ *
+ * Fast path: if the input is already parent-before-child (using each name's
+ * first occurrence as "when it becomes available"), it is returned
+ * untouched — this guarantees byte-for-byte stability for already-correct
+ * files rather than merely an equivalent reordering.
+ *
+ * Slow path: a stable-as-possible Kahn's-style topological sort. Each pass
+ * scans rows in their original order and emits any row whose parent (if it
+ * has one present in the file) has already been emitted; repeated passes
+ * let a row whose parent appears later in the file "catch up" once that
+ * parent is emitted. A row with no parent, or whose parent name never
+ * appears in the file (a dangling reference — it may already exist
+ * server-side), is emitted on the first pass. The pass loop is bounded by
+ * "no progress made", so a cycle (A -> B -> A) cannot loop forever: once no
+ * row can be emitted, whatever remains (the cycle members) is appended in
+ * original relative order so no row is ever dropped.
+ */
+function topoSortRows<T extends { name: string; parent_name: string }>(rows: T[]): T[] {
+  const n = rows.length
+  const nameFirstIndex = new Map<string, number>()
+  for (let i = 0; i < n; i++) if (!nameFirstIndex.has(rows[i].name)) nameFirstIndex.set(rows[i].name, i)
+
+  const isAlreadyOrdered = rows.every((r, i) => {
+    if (!r.parent_name) return true
+    const parentIdx = nameFirstIndex.get(r.parent_name)
+    return parentIdx === undefined || parentIdx < i
+  })
+  if (isAlreadyOrdered) return rows
+
+  const emitted = new Array(n).fill(false)
+  const emittedNames = new Set<string>()
+  const result: T[] = []
+  let remaining = n
+  while (remaining > 0) {
+    let progressed = false
+    for (let i = 0; i < n; i++) {
+      if (emitted[i]) continue
+      const parent = rows[i].parent_name
+      const needsParent = !!parent && nameFirstIndex.has(parent)
+      if (!needsParent || emittedNames.has(parent)) {
+        emitted[i] = true
+        emittedNames.add(rows[i].name)
+        result.push(rows[i])
+        remaining--
+        progressed = true
+      }
+    }
+    if (!progressed) break
+  }
+  if (remaining > 0) {
+    for (let i = 0; i < n; i++) if (!emitted[i]) result.push(rows[i])
+  }
+  return result
 }
 
 function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {

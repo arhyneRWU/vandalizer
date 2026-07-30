@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Download } from 'lucide-react'
+import { AlertCircle, ChevronLeft, ChevronRight, Download } from 'lucide-react'
 
 import * as auditApi from '../../api/audit'
 import type { AuditLogEntry } from '../../api/audit'
@@ -9,17 +9,23 @@ export function AuditTab() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [loadedOnce, setLoadedOnce] = useState(false)
   const [actionFilter, setActionFilter] = useState('')
   const [resourceTypeFilter, setResourceTypeFilter] = useState('')
   const limit = 25
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const data = await auditApi.queryAuditLog({ action: actionFilter || undefined, resource_type: resourceTypeFilter || undefined, skip: page * limit, limit })
       setEntries(data.entries)
       setTotal(data.total)
-    } catch { /* ignore */ } finally { setLoading(false) }
+      setLoadedOnce(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load audit log')
+    } finally { setLoading(false) }
   }, [page, actionFilter, resourceTypeFilter])
 
   useEffect(() => { load() }, [load])
@@ -39,7 +45,9 @@ export function AuditTab() {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Audit Log <span style={{ fontSize: 14, fontWeight: 400, color: '#9ca3af' }}>({total} entries)</span></h2>
+        <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>
+          Audit Log {loadedOnce && <span style={{ fontSize: 14, fontWeight: 400, color: '#9ca3af' }}>({total} entries)</span>}
+        </h2>
         <a href={auditApi.exportAuditLog({ action: actionFilter, resource_type: resourceTypeFilter })}
           style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13, color: '#374151', textDecoration: 'none' }}>
           <Download size={14} /> Export CSV
@@ -56,6 +64,15 @@ export function AuditTab() {
           ))}
         </select>
       </div>
+      {error && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16,
+          padding: '10px 14px', borderRadius: 8, background: '#fef2f2',
+          border: '1px solid #fecaca', color: '#991b1b', fontSize: 13,
+        }}>
+          <AlertCircle size={14} /> {error}
+        </div>
+      )}
       <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', backgroundColor: '#fff' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
@@ -66,8 +83,10 @@ export function AuditTab() {
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {loading && !loadedOnce ? (
               <tr><td colSpan={5} style={{ padding: '32px', textAlign: 'center', color: '#9ca3af' }}>Loading…</td></tr>
+            ) : error && !loadedOnce ? (
+              <tr><td colSpan={5} style={{ padding: '32px', textAlign: 'center', color: '#dc2626' }}>Failed to load audit log</td></tr>
             ) : entries.length === 0 ? (
               <tr><td colSpan={5} style={{ padding: '32px', textAlign: 'center', color: '#9ca3af' }}>No entries found</td></tr>
             ) : entries.map(entry => (
