@@ -18,6 +18,10 @@ from app.models.audit_log import AdminAuditLog
 from app.models.system_config import SystemConfig, ensure_stable_ids
 from app.services import audit_service
 from app.services.llm_service import clear_agent_caches, get_agent_model
+from app.services.name_conflicts import (
+    DuplicateNameError,
+    ensure_model_identity_available,
+)
 from app.services.version_service import get_update_status
 from app.utils.encryption import decrypt_value, encrypt_value
 from app.models.team import Team, TeamMembership
@@ -1594,6 +1598,13 @@ async def add_model(
 
     cfg = await SystemConfig.get_config()
     await _ensure_config_ids(cfg)
+    try:
+        ensure_model_identity_available(
+            name=body.name, tag=body.tag, models=cfg.available_models,
+        )
+    except DuplicateNameError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
     was_empty = len(cfg.available_models) == 0
     cfg.available_models.append(
         {
@@ -1687,6 +1698,14 @@ async def update_model(
     index = _find_by_id(cfg.available_models, model_id)
     if index == -1:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    try:
+        ensure_model_identity_available(
+            name=body.name, tag=body.tag, models=cfg.available_models,
+            exclude_index=index,
+        )
+    except DuplicateNameError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     # If the client sends '***', preserve the existing (encrypted) key
     new_api_key = body.api_key or ""

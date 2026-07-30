@@ -9,6 +9,7 @@ import {
 } from '../../../api/admin'
 import type { ModelTestResult, SystemConfigData } from '../../../api/admin'
 import { ModelCharacterBars } from '../../ModelEffortPicker'
+import { getModelIdentityError } from '../../../utils/modelIdentity'
 import type { ModelInfo } from '../../../types/workflow'
 import { sectionStyle, sectionHeaderStyle, sectionBodyStyle, labelStyle, inputStyle, checkStyle } from './styles'
 
@@ -377,6 +378,17 @@ export function ModelEditor({
     }
     if (!newModel.tag.trim()) {
       onError('A tag is required (set one under Advanced settings)')
+      return
+    }
+    // Names and tags are one namespace: a collision makes a user's saved model
+    // selector resolve to whichever model comes first. The backend rejects this
+    // with a 409; warn here so the admin sees it before submitting.
+    const identityError = getModelIdentityError(
+      newModel.name, newModel.tag, models,
+      editingModelId !== null ? models.findIndex(m => m.id === editingModelId) : null,
+    )
+    if (identityError) {
+      onError(identityError)
       return
     }
     setSavingModel(true)

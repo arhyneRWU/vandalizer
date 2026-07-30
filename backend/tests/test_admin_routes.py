@@ -1304,3 +1304,106 @@ class TestTestModelAddressedById:
         # The config (and thus the model list) must never even be loaded —
         # proof the superadmin check ran first, not just that nothing saved.
         MockCfg.get_config.assert_not_called()
+
+
+class TestModelIdentityUniqueness:
+    """POST/PUT /api/admin/config/models — model names and tags stay unambiguous.
+
+    Resolution scans names then tags and returns the first match, so a shared
+    tag makes a user's stored selector resolve to whichever model happens to be
+    first in the list.
+    """
+
+    def _cfg(self, *pairs):
+        # Models carry pre-set ids so _ensure_config_ids has nothing to
+        # backfill — otherwise it would call cfg.save() itself and break the
+        # save.assert_not_awaited() assertions on the rejection paths.
+        return SimpleNamespace(
+            available_models=[{"id": f"id-{n}", "name": n, "tag": t} for n, t in pairs],
+            oauth_providers=[],
+            default_model="",
+            updated_at=None,
+            updated_by=None,
+            save=AsyncMock(),
+        )
+
+    async def _call(self, client, cfg, method, url, body):
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin.encrypt_value", side_effect=lambda v: v),
+            patch("app.routers.admin.clear_agent_caches"),
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            return await getattr(client, method)(
+                url, json=body, cookies=cookies, headers=headers
+            )
+
+    @pytest.mark.asyncio
+    async def test_adding_a_model_with_a_unique_identity_succeeds(self, client):
+        cfg = self._cfg(("qwen-large", "local"))
+        resp = await self._call(
+            client, cfg, "post", "/api/admin/config/models",
+            {"name": "gpt-oss", "tag": "fast"},
+        )
+        assert resp.status_code == 200
+        assert len(cfg.available_models) == 2
+
+    @pytest.mark.asyncio
+    async def test_adding_a_model_with_a_duplicate_tag_is_rejected(self, client):
+        cfg = self._cfg(("qwen-large", "local"))
+        resp = await self._call(
+            client, cfg, "post", "/api/admin/config/models",
+            {"name": "gpt-oss", "tag": "local"},
+        )
+        assert resp.status_code == 409
+        assert "local" in resp.json()["detail"]
+        # The colliding model must not have been persisted.
+        assert len(cfg.available_models) == 1
+        cfg.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_adding_a_model_whose_name_is_another_models_tag_is_rejected(self, client):
+        cfg = self._cfg(("qwen-large", "local"))
+        resp = await self._call(
+            client, cfg, "post", "/api/admin/config/models",
+            {"name": "local", "tag": "reasoning"},
+        )
+        assert resp.status_code == 409
+        assert len(cfg.available_models) == 1
+
+    @pytest.mark.asyncio
+    async def test_updating_a_model_without_changing_its_identity_succeeds(self, client):
+        cfg = self._cfg(("qwen-large", "local"), ("gpt-oss", "fast"))
+        resp = await self._call(
+            client, cfg, "put", "/api/admin/config/models/id-qwen-large",
+            {"name": "qwen-large", "tag": "local", "context_window": 32768},
+        )
+        assert resp.status_code == 200
+        assert cfg.available_models[0]["context_window"] == 32768
+
+    @pytest.mark.asyncio
+    async def test_updating_a_model_onto_another_models_tag_is_rejected(self, client):
+        cfg = self._cfg(("qwen-large", "local"), ("gpt-oss", "fast"))
+        resp = await self._call(
+            client, cfg, "put", "/api/admin/config/models/id-qwen-large",
+            {"name": "qwen-large", "tag": "fast"},
+        )
+        assert resp.status_code == 409
+        # The original row must survive untouched.
+        assert cfg.available_models[0]["tag"] == "local"
+        cfg.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_is_rejected_before_identity(self, client):
+        cfg = self._cfg(("qwen-large", "local"))
+        resp = await self._call(
+            client, cfg, "put", "/api/admin/config/models/no-such-id",
+            {"name": "gpt-oss", "tag": "fast"},
+        )
+        assert resp.status_code == 404

@@ -35,6 +35,55 @@ def _exact_name(name: str) -> dict:
     return {"$regex": f"^{re.escape(name)}$", "$options": "i"}
 
 
+def _model_identifier(value: object) -> str:
+    """Normalize a model name or tag for comparison."""
+    return str(value or "").strip().casefold()
+
+
+def ensure_model_identity_available(
+    *,
+    name: str,
+    tag: str,
+    models: list,
+    exclude_index: int | None = None,
+) -> None:
+    """Reject a model whose name or tag is already in use by another model.
+
+    ``get_llm_model_by_name`` resolves a selector by scanning names first and
+    tags second, returning the first match either way, so names and tags form a
+    single identifier namespace: two models sharing a tag — or one model whose
+    name is another's tag — make a selector ambiguous, and the loser is decided
+    by list order. User model preferences are stored as that selector, so the
+    ambiguity silently routes requests to a model the user did not choose.
+
+    Unlike the ``ensure_*_available`` helpers above, ``available_models`` is an
+    embedded list on ``SystemConfig`` rather than a collection, so this compares
+    in memory instead of querying. Matching is case-insensitive on the trimmed
+    value, consistent with :func:`_exact_name`. Pass ``exclude_index`` when
+    updating so a model does not collide with itself.
+    """
+    candidates = (("name", str(name or "").strip()), ("tag", str(tag or "").strip()))
+
+    for index, existing in enumerate(models):
+        if index == exclude_index or not isinstance(existing, dict):
+            continue
+        owner = str(existing.get("name") or "").strip() or f"at index {index}"
+        taken = (
+            ("name", _model_identifier(existing.get("name"))),
+            ("tag", _model_identifier(existing.get("tag"))),
+        )
+        for field, value in candidates:
+            if not value:
+                continue
+            for taken_field, taken_value in taken:
+                if taken_value and _model_identifier(value) == taken_value:
+                    raise DuplicateNameError(
+                        f"Model {field} {value!r} is already used as the "
+                        f"{taken_field} of model {owner!r}. Model names and tags "
+                        f"must be unique."
+                    )
+
+
 def _library_scope(user_id: str, team_id: str | None) -> dict:
     # Mirrors the default (no-scope) query in workflow_service.list_workflows
     # and search_set_service.list_search_sets: own items + current team items.
