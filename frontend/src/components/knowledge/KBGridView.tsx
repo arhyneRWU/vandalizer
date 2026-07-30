@@ -79,7 +79,9 @@ function KBGridCard({
   kb, allOrgs, onSelect, onChat, onEdit, onDelete, onAdopt, onClone, onRemoveRef, pinned, onTogglePin,
 }: KBGridCardProps) {
   const badge = STATUS_BADGE[kb.status] || STATUS_BADGE.empty
-  const isReady = kb.status === 'ready'
+  // A ready KB with zero indexed chunks has nothing to retrieve, so chatting
+  // with it only produces a misleading "still indexing" reply.
+  const canChat = kb.status === 'ready' && kb.total_chunks > 0
   const isReference = kb.is_reference
   // A broken bookmark has no underlying KB to open — the card is inert except
   // for its Remove button.
@@ -248,7 +250,7 @@ function KBGridCard({
 
       {/* Actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 'auto', paddingTop: 4 }}>
-        {isReady && (
+        {canChat && (
           <button
             onClick={(e) => { e.stopPropagation(); onChat(isReference ? kb.source_kb_uuid! : kb.uuid, kb.title) }}
             style={{

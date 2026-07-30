@@ -102,6 +102,47 @@ describe('ExploreTab open navigation', () => {
     )
   })
 
+  it('disables Open in Chat for a knowledge base with zero indexed chunks', async () => {
+    vi.mocked(listVerifiedItems).mockResolvedValue({
+      items: [makeItem({
+        id: 'cat-kb-0',
+        item_id: 'kb-1',
+        kind: 'knowledge_base',
+        name: 'Empty Regs KB',
+        source_uuid: 'kb-uuid-1',
+        total_chunks: 0,
+      })],
+      total: 1,
+    })
+    render(<ExploreTab />)
+    fireEvent.click(await screen.findByText('Empty Regs KB'))
+
+    expect(await screen.findByRole('button', { name: 'Open in Chat' })).toBeDisabled()
+    // Disabled buttons can't be hovered by keyboard/touch users, so the reason
+    // is also stated visibly.
+    expect(screen.getByText(/no indexed content yet/)).toBeInTheDocument()
+    expect(navigateMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps Open in Chat enabled for a knowledge base with indexed chunks', async () => {
+    vi.mocked(listVerifiedItems).mockResolvedValue({
+      items: [makeItem({
+        id: 'cat-kb-1',
+        item_id: 'kb-2',
+        kind: 'knowledge_base',
+        name: 'Export Control KB',
+        source_uuid: 'kb-uuid-2',
+        total_chunks: 120,
+      })],
+      total: 1,
+    })
+    render(<ExploreTab />)
+    fireEvent.click(await screen.findByText('Export Control KB'))
+
+    expect(await screen.findByRole('button', { name: 'Open in Chat' })).not.toBeDisabled()
+    expect(screen.queryByText(/no indexed content yet/)).not.toBeInTheDocument()
+  })
+
   it('keeps tab=library when opening a verified extraction', async () => {
     await openItemFromCatalog(makeItem({
       id: 'cat-2',

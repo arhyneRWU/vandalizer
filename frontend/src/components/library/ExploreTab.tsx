@@ -243,7 +243,8 @@ export function ItemDetailModal({
             {item.kind === 'knowledge_base' && item.source_uuid && onTryIt && (
               <button
                 onClick={() => onTryIt(item)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
+                disabled={item.total_chunks === 0}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:pointer-events-none"
               >
                 <ExternalLink className="h-4 w-4" />
                 Open in Chat
@@ -294,6 +295,13 @@ export function ItemDetailModal({
               </button>
             )}
           </div>
+          {/* A disabled button's tooltip is unreachable by keyboard and touch,
+              so say once, visibly, why chat is inert. */}
+          {item.kind === 'knowledge_base' && item.total_chunks === 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              This knowledge base has no indexed content yet, so chat is unavailable.
+            </p>
+          )}
         </div>
       </div>
       </FocusTrap>
