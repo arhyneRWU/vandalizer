@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **CSV formula injection in the admin org-import/export flow.** `downloadCSV` wrote user-controlled field values (org names, emails) directly into cells; a value starting with `=`, `+`, `-`, or `@` is interpreted as a formula by Excel/Sheets when the CSV is opened, letting a crafted org name run arbitrary formulas (including exfiltration via `HYPERLINK`/webservice calls) on whoever opens the export. Such values are now prefixed with a leading `'` (safe-quote) before writing. Separately, the org CSV importer is now quote-aware (fields containing commas no longer split incorrectly) and order-independent (parses by header name, not column position), and parsed rows are sorted parent-before-child so child orgs never reference a parent that hasn't been created yet.
+
 ## [v4.9.0] - 2026-07-23
 
 ### Fixed
