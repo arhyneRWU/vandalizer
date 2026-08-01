@@ -354,10 +354,43 @@ export function CostEstimator() {
           <span className="text-[#f1b300] mt-1">&#x2022;</span>
           <span>
             <strong className="text-white">Self-hosted models cost $0 per token</strong> but shift
-            spend to GPU infrastructure, which this estimator does not model.
+            spend to GPU infrastructure, which this estimator does not model. See{' '}
+            <em className="text-white">Sizing your own cluster</em> below.
           </span>
         </li>
       </ul>
+
+      {/* ------------------------------------------------------------------ */}
+      <h3 className="text-xl font-bold text-white mt-8">Sizing your own cluster</h3>
+      <p className="text-gray-300 leading-relaxed">
+        The figures above price a hosted frontier model per token. If you are weighing that against
+        running open-weight models on your own hardware, the cost shifts to capital and power, and
+        the question becomes how many GPUs your user count and throughput actually demand.
+      </p>
+      <div className="bg-[#262626] rounded-lg p-5 border border-white/15">
+        <div className="text-xs font-medium uppercase tracking-wide text-[#f1b300] mb-2">
+          Interactive tool
+        </div>
+        <div className="text-lg font-bold text-white">Plan Your Inference Cluster</div>
+        <p className="text-sm text-gray-300 mt-2 leading-relaxed">
+          MindRouter&rsquo;s configurator takes users, throughput, budget, and a model-intelligence
+          target calibrated against the open-weight frontier, and returns a concrete build:
+          servers, GPUs, price range, and power draw &mdash; from a single NVIDIA DGX Spark up to a
+          Supermicro HGX B300 node.
+        </p>
+        <a
+          href="https://mindrouter.ai/configurator.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-block mt-4 bg-[#f1b300] text-black font-bold text-sm px-4 py-2 rounded hover:bg-[#f1b300]/85 transition-colors"
+        >
+          Open the Configurator &rarr;
+        </a>
+        <p className="text-xs text-gray-500 mt-3 leading-relaxed">
+          External tool, not affiliated with Vandalizer. It sizes hardware; it does not account for
+          staff time, cooling, or rack space.
+        </p>
+      </div>
 
       <h3 className="text-xl font-bold text-white mt-8">Calibrating against real usage</h3>
       <p className="text-gray-300 leading-relaxed">
