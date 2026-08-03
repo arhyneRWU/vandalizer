@@ -5119,6 +5119,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
                   { fmt: 'csv', label: 'CSV (parse structured)', desc: 'Detect JSON/tables in prompt output', parseStructured: true },
                   { fmt: 'pdf', label: 'PDF', desc: 'Printable report', parseStructured: false },
                   { fmt: 'docx', label: 'Word (.docx)', desc: 'Editable document', parseStructured: false },
+                  { fmt: 'markdown', label: 'Markdown', desc: 'Formatted text (.md)', parseStructured: false },
                   { fmt: 'text', label: 'Plain Text', desc: 'Raw text output', parseStructured: false },
                 ] as const).map(({ fmt, label, desc, parseStructured }) => (
                   <a
@@ -5963,9 +5964,10 @@ function OutputConfigCard({
               <option value="json">JSON</option>
               <option value="csv">CSV</option>
               <option value="pdf">PDF</option>
+              <option value="docx">Word (.docx)</option>
             </select>
             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
-              Markdown is the most chainable format. PDFs and CSVs are saved as files but their text content is rendered as Markdown for downstream workflows.
+              Markdown is the most chainable format. PDF, Word, and CSV files are saved as-is but their text content is rendered as Markdown for downstream workflows.
             </div>
           </div>
 
