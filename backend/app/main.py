@@ -180,6 +180,14 @@ app.add_middleware(CSRFMiddleware)
 # CORS
 # ---------------------------------------------------------------------------
 settings = get_settings()
+if settings.is_production and not settings.use_secure_cookies:
+    logger.warning(
+        "Production deployment served over plain HTTP (frontend_url=%s): "
+        "auth/CSRF cookies will NOT carry the Secure attribute. This is "
+        "expected for isolated/intranet installs; put the site behind HTTPS "
+        "for anything internet-facing.",
+        settings.frontend_url,
+    )
 _cors_origins = [settings.frontend_url]
 if not settings.is_production:
     _cors_origins.append("http://localhost:5173")
