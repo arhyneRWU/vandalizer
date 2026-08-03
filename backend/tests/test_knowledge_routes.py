@@ -2045,8 +2045,6 @@ class TestKnowledgeReingest:
 
         assert resp.status_code == 403
 
-        assert resp.status_code == 403
-
 
 class TestTestQueryImport:
     """Bulk CSV/XLSX import of validation test queries."""
@@ -2274,3 +2272,179 @@ class TestTestQueryImport:
         assert resp.status_code == 403
 
 
+class TestValidationRunExport:
+    """GET /{uuid}/validation-runs/{run_uuid}/export — per-query results."""
+
+    def _kb(self):
+        kb = MagicMock()
+        kb.uuid = "kb-1"
+        kb.title = "NSF PAPPG"
+        kb.tags = []
+        kb.total_sources = 1
+        kb.total_chunks = 10
+        kb.resource_config = {"seed_id": "kb-nsf"}
+        kb.rag_config_override = None
+        return kb
+
+    def _vr(self, snapshot):
+        vr = MagicMock()
+        vr.uuid = "run-abcdef123456"
+        vr.score = 80.0
+        vr.score_breakdown = {}
+        vr.created_at = datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)
+        vr.result_snapshot = snapshot
+        return vr
+
+    def _full_snapshot(self):
+        return {
+            "mode": "judge",
+            "judge_model": "claude-x",
+            "retrieval_precision": {
+                "details": [
+                    {
+                        "query": "Q1?",
+                        "query_uuid": "q-1",
+                        "precision": 1.0,
+                        "actual_answer": "A1.",
+                        "judge": {"score": 0.9, "verdict": "PASS", "reasoning": "ok"},
+                    },
+                ],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_export_csv_happy_path(self, client):
+        user = _make_user("viewer")
+        cookies, headers = _auth("viewer")
+        kb = self._kb()
+        vr = self._vr(self._full_snapshot())
+        cfg = MagicMock()
+        cfg.catalog_version = "1.3.1"
+        tq_query = MagicMock()
+        tq_query.to_list = AsyncMock(return_value=[])
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "viewer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.knowledge.organization_service.get_user_org_ancestry",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch("app.routers.knowledge.svc.get_knowledge_base", new_callable=AsyncMock, return_value=kb),
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.models.kb_test_query.KBTestQuery.find", return_value=tq_query),
+            patch("app.models.system_config.SystemConfig.get_config", new_callable=AsyncMock, return_value=cfg),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockRun.find_one = AsyncMock(return_value=vr)
+
+            resp = await client.get(
+                "/api/knowledge/kb-1/validation-runs/run-abcdef123456/export",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert 'filename="NSF_PAPPG-validation-20260801-000000-run-abcd.csv"' in (
+            resp.headers["content-disposition"]
+        )
+        lines = resp.text.splitlines()
+        assert lines[0].startswith("run_uuid,run_created_at,kb_uuid,kb_title")
+        assert "Q1?" in lines[1]
+        assert "PASS" in lines[1]
+
+    @pytest.mark.asyncio
+    async def test_export_json_carries_format_tag(self, client):
+        user = _make_user("viewer")
+        cookies, headers = _auth("viewer")
+        kb = self._kb()
+        vr = self._vr(self._full_snapshot())
+        cfg = MagicMock()
+        cfg.catalog_version = None
+        tq_query = MagicMock()
+        tq_query.to_list = AsyncMock(return_value=[])
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "viewer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.knowledge.organization_service.get_user_org_ancestry",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch("app.routers.knowledge.svc.get_knowledge_base", new_callable=AsyncMock, return_value=kb),
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.models.kb_test_query.KBTestQuery.find", return_value=tq_query),
+            patch("app.models.system_config.SystemConfig.get_config", new_callable=AsyncMock, return_value=cfg),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockRun.find_one = AsyncMock(return_value=vr)
+
+            resp = await client.get(
+                "/api/knowledge/kb-1/validation-runs/run-abcdef123456/export?format=json",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["format"] == "vandalizer.kb-validation-results.v1"
+        assert body["validation_run"]["judge_model"] == "claude-x"
+        assert len(body["results"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_export_optimizer_apply_row_is_400(self, client):
+        user = _make_user("viewer")
+        cookies, headers = _auth("viewer")
+        kb = self._kb()
+        # Apply rows persist a lightweight snapshot with no per-query details.
+        vr = self._vr({"source": "optimizer_apply", "score": 90.0})
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "viewer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.knowledge.organization_service.get_user_org_ancestry",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch("app.routers.knowledge.svc.get_knowledge_base", new_callable=AsyncMock, return_value=kb),
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockRun.find_one = AsyncMock(return_value=vr)
+
+            resp = await client.get(
+                "/api/knowledge/kb-1/validation-runs/run-abcdef123456/export",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 400
+        assert "optimizer apply" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_export_foreign_kb_is_404(self, client):
+        user = _make_user("viewer")
+        cookies, headers = _auth("viewer")
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "viewer", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.knowledge.organization_service.get_user_org_ancestry",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch("app.routers.knowledge.svc.get_knowledge_base", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockRun.find_one = AsyncMock()
+
+            resp = await client.get(
+                "/api/knowledge/kb-1/validation-runs/run-abcdef123456/export",
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 404
+        MockRun.find_one.assert_not_awaited()

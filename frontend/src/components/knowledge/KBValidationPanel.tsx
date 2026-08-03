@@ -4,7 +4,9 @@ import {
   listKBTestQueries,
   getKBQuality,
   runKBValidationAsync,
+  downloadKBValidationRunExport,
   type KBTestQuery,
+  type KBValidationExportFormat,
   type KBValidationMode,
   type KBValidationResult,
 } from '../../api/knowledge'
@@ -74,6 +76,9 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
   const [tab, setTab] = useState<Tab>('autovalidate')
   const [queries, setQueries] = useState<KBTestQuery[]>([])
   const [latestRun, setLatestRun] = useState<KBValidationResult | null>(null)
+  // Persisted uuid of the run shown in the Run-now tab, so its results can be
+  // exported. null until a run lands (or is hydrated from history).
+  const [latestRunUuid, setLatestRunUuid] = useState<string | null>(null)
   const [latestQuality, setLatestQuality] = useState<LatestQualitySummary | null>(null)
   const [loading, setLoading] = useState(false)
   // Run state lives here (not in KBValidationRunTab) so an in-flight validation
@@ -164,6 +169,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
 
       const deadline = Date.now() + MAX_POLL_MS
       let result: KBValidationResult | null = null
+      let resultUuid: string | null = null
       while (Date.now() < deadline) {
         await sleep(POLL_INTERVAL_MS)
         if (!mountedRef.current) return
@@ -180,6 +186,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
         )
         if (fresh?.result_snapshot) {
           result = fresh.result_snapshot
+          resultUuid = fresh.uuid ?? null
           applyLatestQuality(history)
           break
         }
@@ -187,6 +194,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
       if (!mountedRef.current) return
       if (result) {
         setLatestRun(result)
+        setLatestRunUuid(resultUuid)
         // Surface the new run in History without waiting for a reload.
         setHistoryRefreshKey(k => k + 1)
       } else {
@@ -201,6 +209,17 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
       if (mountedRef.current) setRunning(false)
     }
   }, [kbUuid, fetchHistory, applyLatestQuality])
+
+  // Export the run currently shown in the Run-now tab. Failures surface in
+  // the tab's existing error slot rather than dying silently.
+  const exportLatestRun = useCallback(async (format: KBValidationExportFormat) => {
+    if (!latestRunUuid) return
+    try {
+      await downloadKBValidationRunExport(kbUuid, latestRunUuid, format)
+    } catch (e) {
+      if (mountedRef.current) setRunError(`Export failed: ${(e as Error).message}`)
+    }
+  }, [kbUuid, latestRunUuid])
 
   useEffect(() => {
     setLoading(true)
@@ -402,6 +421,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, onCloned, collap
           running={running}
           error={runError}
           onRun={runValidation}
+          onExport={latestRunUuid ? exportLatestRun : undefined}
         />
       ) : (
         <KBQualityHistoryTab

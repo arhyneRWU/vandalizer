@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, rawFetch } from './client'
 import type { KnowledgeBase, KnowledgeBaseDetail, KnowledgeBaseSourceDetail, KBListResponse, KBReference, KBScope } from '../types/knowledge'
 
 export function listKnowledgeBases() {
@@ -871,6 +871,41 @@ export async function downloadKBExport(uuid: string, fallbackTitle = 'knowledge_
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+export type KBValidationExportFormat = 'csv' | 'xlsx' | 'json'
+
+/** Download the per-query results of a validation run (CSV / Excel / JSON).
+ * Pass ``runUuid = 'latest'`` for the most recent full run. */
+export async function downloadKBValidationRunExport(
+  kbUuid: string,
+  runUuid: string,
+  format: KBValidationExportFormat,
+): Promise<void> {
+  const res = await rawFetch(
+    `/api/knowledge/${kbUuid}/validation-runs/${runUuid}/export?format=${format}`,
+  )
+  if (!res.ok) {
+    let detail = 'Export failed'
+    try {
+      const body = await res.json() as { detail?: string }
+      if (body.detail) detail = body.detail
+    } catch { /* non-JSON error body — keep the generic message */ }
+    throw new Error(detail)
+  }
+  // Honor the server-provided filename (KB title + run timestamp + run id).
+  const disposition = res.headers.get('Content-Disposition') || ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match?.[1] || `kb-validation-results.${format}`
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
   URL.revokeObjectURL(url)
 }
 

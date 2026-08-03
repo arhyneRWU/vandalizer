@@ -876,6 +876,117 @@ async def get_kb_quality(uuid: str, user: User = Depends(get_current_user)):
     return {"history": history, "contract": contract}
 
 
+@router.get("/{uuid}/validation-runs/{run_uuid}/export")
+async def export_kb_validation_run(
+    uuid: str,
+    run_uuid: str,
+    format: str = Query("csv", pattern="^(csv|xlsx|json)$"),
+    user: User = Depends(get_current_user),
+):
+    """Download the per-query results of a KB validation run so evaluators can
+    analyze, document, and compare runs outside Vandalizer.
+
+    One row per test query: question, expected answer (re-joined from the
+    current test queries — the snapshot doesn't store it), actual and baseline
+    answers, judge score/verdict/reasoning, retrieved sources, and run-level
+    metadata (judge model, mode, catalog version, run date).
+
+    ``run_uuid`` may be ``latest`` to export the most recent full validation
+    run. ``format`` is ``csv`` (default), ``xlsx``, or ``json``. Uses the same
+    view gate as the quality history — evaluators don't need manage rights.
+    """
+    user_org_ancestry = await organization_service.get_user_org_ancestry(user)
+    kb = await svc.get_knowledge_base(
+        uuid, user, user_org_ancestry=user_org_ancestry, allow_admin=True,
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    def _has_details(run: ValidationRun) -> bool:
+        return bool((run.result_snapshot or {}).get("retrieval_precision"))
+
+    if run_uuid == "latest":
+        recent = await (
+            ValidationRun.find(
+                ValidationRun.item_kind == "knowledge_base",
+                ValidationRun.item_id == kb.uuid,
+                ValidationRun.run_type == "kb_validation",
+            )
+            .sort("-created_at")
+            .limit(30)
+            .to_list()
+        )
+        vr = next((r for r in recent if _has_details(r)), None)
+        if not vr:
+            raise HTTPException(
+                status_code=404,
+                detail="No validation results found. Run a validation first.",
+            )
+    else:
+        vr = await ValidationRun.find_one(
+            ValidationRun.uuid == run_uuid,
+            ValidationRun.item_kind == "knowledge_base",
+            ValidationRun.item_id == kb.uuid,
+        )
+        if not vr:
+            raise HTTPException(status_code=404, detail="Validation run not found")
+        if not _has_details(vr):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This timeline entry has no per-query results to export "
+                    "(it records an optimizer apply, not a validation run)."
+                ),
+            )
+
+    from app.models.kb_test_query import KBTestQuery
+    from app.models.system_config import SystemConfig
+    from app.services.kb_validation_export import (
+        build_kb_validation_results_export,
+        render_results_csv,
+        render_results_xlsx,
+    )
+
+    test_queries = await KBTestQuery.find(
+        {"knowledge_base_uuid": kb.uuid},
+    ).to_list()
+    sys_cfg = await SystemConfig.get_config()
+
+    payload, run_meta, rows = build_kb_validation_results_export(
+        kb=kb,
+        vr=vr,
+        test_queries=test_queries,
+        catalog_version=getattr(sys_cfg, "catalog_version", None),
+        exported_by_user_id=user.user_id,
+        exported_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+
+    safe_title = re.sub(r"[^A-Za-z0-9_.-]+", "_", kb.title or "knowledge_base").strip("_")
+    stamp = vr.created_at.strftime("%Y%m%d-%H%M%S") if vr.created_at else "run"
+    base_name = f"{safe_title or 'knowledge_base'}-validation-{stamp}-{vr.uuid[:8]}"
+
+    if format == "json":
+        return JSONResponse(
+            content=payload,
+            headers={"Content-Disposition": f'attachment; filename="{base_name}.json"'},
+        )
+    if format == "xlsx":
+        from fastapi.responses import Response
+
+        return Response(
+            content=render_results_xlsx(run_meta, rows),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{base_name}.xlsx"'},
+        )
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(
+        content=render_results_csv(run_meta, rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{base_name}.csv"'},
+    )
+
+
 @router.get("/{uuid}/feedback-impact")
 async def get_kb_feedback_impact(uuid: str, user: User = Depends(get_current_user)):
     """Thumbs-up rate on chat answers grounded in this KB, before vs after the
