@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **Document chat is hardened against answering with a neighbouring-but-wrong value when the asked-for fact isn't in the document.** Benchmarking document-scoped chat against real grant proposals showed the dominant failure was not invention from nothing but substitution: asked for an indirect cost rate when only a fringe rate exists, models returned the fringe rate with a genuine citation to a real line — the citation checks out, so the wrong answer survives review. `DOCUMENT_CHAT_SYSTEM_PROMPT` now carries the same class of absence-handling guidance `KB_CHAT_SYSTEM_PROMPT` gained in the earlier grounding fixes: check whether the document actually states the specific thing asked; never substitute a related-but-different value; a blank form field is blank, not zero; don't supply standard boilerplate (cognizant agencies, rate-agreement dates) the document doesn't state; and a stated "None" is an answer, not an absence. On a 16-item machine-verified absence benchmark, this wording took three local models from 9/16, 10/16 and 8/16 correct to 16/16, 15/16 and 14/16, with positive controls (facts genuinely present, including a literal "None" field) unchanged — the guidance does not cause over-declining. (#610)
+
 ## [v4.10.0] - 2026-08-10
 
 ### Added
