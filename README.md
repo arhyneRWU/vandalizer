@@ -15,7 +15,7 @@ The project was developed at the University of Idaho under the NSF GRANTED progr
 
 ## Features
 
-- **Structured Extraction** - Pull dates, budgets, requirements, and more from PDFs into clean structured data
+- **Structured Extraction** - Pull dates, budgets, requirements, and more from PDFs into clean structured data, with per-field source tracking: click any extracted value to jump to the passage and page it came from, or see an explicit "no source found" when it can't be traced
 - **Workflow Engine** - Chain extraction tasks into repeatable pipelines with dependency resolution
 - **RAG Chat** - Ask questions against your document collection with citation-backed answers
 - **Projects** - Gather the files, knowledge base, pinned tools, and chat for one grant or effort in a single scoped workspace, sharable to a team or via invite link
@@ -239,6 +239,8 @@ React Frontend  -->  FastAPI Backend  -->  MongoDB
 ## Documentation
 
 - [External API Reference](docs/api.md)
+- [Management API Reference](docs/mgmt-api.md)
+- [Anonymous Telemetry](docs/telemetry.md)
 - [Authorization Matrix](AUTHORIZATION_MATRIX.md)
 - [Deployment Guide](DEPLOY.md)
 - [Operations Guide](OPERATIONS.md)
