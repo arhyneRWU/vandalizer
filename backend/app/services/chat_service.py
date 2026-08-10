@@ -122,6 +122,111 @@ class _ThinkTagParser:
         return last_lt
 
 
+def annotate_pages(text: str, markers: list[dict] | None) -> str:
+    """Insert ``[p. N]`` boundaries into document text using its page markers.
+
+    Page structure is computed at ingest and stored on the document
+    (``SmartDocument.text_markers``, one ``{"char_offset", "kind": "page",
+    "value": n}`` per page). Extraction sources and KB chat already resolve it;
+    document chat previously sent ``raw_text`` flat, so the model had no way to
+    attribute a fact to a page even though the data was sitting right there.
+
+    Returns *text* unchanged when there is no usable page structure — non-PDF
+    formats, and PDFs ingested before markers were persisted. Callers get a
+    plain document rather than an error. See #603.
+    """
+    if not text or not markers:
+        return text
+
+    positions: list[tuple[int, int, bool]] = []
+    for m in markers:
+        if not isinstance(m, dict) or m.get("kind") != "page":
+            continue  # XLSX markers describe sheets, not pages
+        page = m.get("value")
+        offset = m.get("char_offset")
+        if not isinstance(page, int) or not isinstance(offset, bool | int):
+            continue
+        if isinstance(offset, bool) or not 0 <= offset <= len(text):
+            # raw_text can be re-saved shorter than when markers were computed.
+            continue
+        positions.append((offset, page, bool(m.get("approximate"))))
+
+    if not positions:
+        return text
+
+    positions.sort()
+    out: list[str] = []
+    cursor = 0
+    for offset, page, approximate in positions:
+        out.append(text[cursor:offset])
+        # OCR'd pages are evenly-spaced estimates, so the boundary is a guess.
+        # The tilde keeps the model from quoting an estimate as a fact.
+        out.append(f"[p. ~{page}]\n" if approximate else f"[p. {page}]\n")
+        cursor = offset
+    out.append(text[cursor:])
+    return "".join(out)
+
+
+def _has_approximate_pages(markers: list[dict] | None) -> bool:
+    """True when any usable page marker came from interpolation, not measurement."""
+    return any(
+        isinstance(m, dict) and m.get("kind") == "page" and m.get("approximate")
+        for m in markers or []
+    )
+
+
+def build_document_segments(
+    documents: list,
+) -> tuple[list[DocumentSegment], list[str], list[str], list[str]]:
+    """Turn selected documents into trimmable context segments.
+
+    One segment per document so the budget planner can trim each independently.
+    Returns ``(segments, skipped_no_text, errored, low_quality)`` — the last
+    three are titles the caller warns the user about. ``skipped_no_text`` and
+    ``errored`` never reach the model; ``low_quality`` documents do, but their
+    text layer is garbled, so the answer is unreliable (see #609).
+    """
+    segments: list[DocumentSegment] = []
+    skipped_no_text: list[str] = []
+    errored: list[str] = []
+    low_quality: list[str] = []
+
+    for doc in documents:
+        if doc.raw_text:
+            markers = getattr(doc, "text_markers", None)
+            body = annotate_pages(doc.raw_text, markers)
+            # Only explain the markers when the document actually got some —
+            # otherwise the note would promise page citations the model has no
+            # way to make (non-PDF formats, or PDFs ingested before #603).
+            if body == doc.raw_text:
+                page_note = ""
+            elif _has_approximate_pages(markers):
+                # Scanned/OCR'd document: boundaries are interpolated, so an
+                # exact-sounding citation would be invented precision.
+                page_note = (
+                    "\n_`[p. ~N]` marks the approximate start of page N — this "
+                    "document was scanned, so page positions are estimated. Cite "
+                    "pages as approximate, e.g. \"around p. 4\"._\n"
+                )
+            else:
+                page_note = (
+                    "\n_`[p. N]` marks the start of page N. Cite the page when you "
+                    "quote or reference a specific passage._\n"
+                )
+            segments.append(DocumentSegment(
+                label=f"doc:{doc.title or doc.uuid}",
+                text=f"\n\n## Document: {doc.title}\n{page_note}{body}",
+            ))
+            if document_service.is_extraction_low_quality(doc):
+                low_quality.append(doc.title or doc.uuid)
+        elif doc.task_status == "error":
+            errored.append(doc.title or doc.uuid)
+        else:
+            skipped_no_text.append(doc.title or doc.uuid)
+
+    return segments, skipped_no_text, errored, low_quality
+
+
 def _classify_stream_error(exc: BaseException) -> tuple[str, str]:
     """Classify a chat stream error into (severity, user_message).
 
@@ -318,22 +423,9 @@ async def chat_stream(
 
     # Document segments — one entry per SmartDocument so each can be trimmed
     # independently by the budget planner.
-    doc_segments: list[DocumentSegment] = []
-    skipped_no_text: list[str] = []
-    errored_docs: list[str] = []
-    low_quality_docs: list[str] = []
-    for doc in documents:
-        if doc.raw_text:
-            doc_segments.append(DocumentSegment(
-                label=f"doc:{doc.title or doc.uuid}",
-                text=f"\n\n## Document: {doc.title}\n{doc.raw_text}",
-            ))
-            if document_service.is_extraction_low_quality(doc):
-                low_quality_docs.append(doc.title or doc.uuid)
-        elif doc.task_status == "error":
-            errored_docs.append(doc.title or doc.uuid)
-        else:
-            skipped_no_text.append(doc.title or doc.uuid)
+    doc_segments, skipped_no_text, errored_docs, low_quality_docs = (
+        build_document_segments(documents)
+    )
 
     # Warn the caller about any selected document that the model won't see
     # because text extraction hasn't finished, errored out, or the doc is gone.
