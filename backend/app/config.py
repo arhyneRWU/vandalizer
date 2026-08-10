@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     resend_from_email: str = ""
     resend_from_name: str = "Vandalizer"
 
+    # Master switch for scheduled promotional email (demo recapture drips,
+    # onboarding drips, inactivity nudges). Set false to silence all three
+    # regardless of per-user preferences — transactional mail is unaffected.
+    promotional_emails_enabled: bool = True
+
     # Encryption key for sensitive config values (API keys) stored in MongoDB.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     config_encryption_key: str = ""

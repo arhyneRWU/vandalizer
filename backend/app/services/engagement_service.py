@@ -50,6 +50,10 @@ async def process_onboarding_drips(settings: Settings | None = None) -> int:
     if settings is None:
         settings = Settings()
 
+    if not settings.promotional_emails_enabled:
+        logger.info("Promotional email disabled — skipping onboarding drips")
+        return 0
+
     now = datetime.datetime.now(datetime.timezone.utc)
     sent = 0
 
@@ -118,6 +122,10 @@ async def process_inactivity_nudges(settings: Settings | None = None) -> int:
     """
     if settings is None:
         settings = Settings()
+
+    if not settings.promotional_emails_enabled:
+        logger.info("Promotional email disabled — skipping inactivity nudges")
+        return 0
 
     now = datetime.datetime.now(datetime.timezone.utc)
     threshold = now - datetime.timedelta(days=INACTIVITY_THRESHOLD_DAYS)
