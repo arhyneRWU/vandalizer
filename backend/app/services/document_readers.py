@@ -5,7 +5,6 @@ All functions are synchronous — safe for Celery workers.
 """
 
 import logging
-import os
 import re
 from datetime import date, datetime, time
 
@@ -104,18 +103,25 @@ def _pymupdf_extract_with_pages(pdf_path: str) -> tuple[str, list[dict]]:
 
 
 def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
-    """Extract text from a PDF using the UIPDF OCR endpoint.
+    """Extract text from a PDF using the configured OCR endpoint.
 
-    Falls back gracefully if the OCR service is unavailable.
+    The request/response contract depends on the configured provider — see
+    ``app.services.ocr_client``. Falls back gracefully (returns "") if the OCR
+    service is unavailable or misconfigured; callers then use PyMuPDF.
     """
     # OCR endpoint is stored in the database via admin config (SystemConfig)
+    from app.services import ocr_client
     from app.tasks import get_sync_db
     from app.utils.encryption import decrypt_value
     db = get_sync_db()
-    cfg = db.system_config.find_one({})
-    ocr_endpoint = (cfg or {}).get("ocr_endpoint", "")
-    raw_api_key = (cfg or {}).get("ocr_api_key", "")
+    cfg = db.system_config.find_one({}) or {}
+    ocr_endpoint = cfg.get("ocr_endpoint", "")
+    raw_api_key = cfg.get("ocr_api_key", "")
     ocr_api_key = decrypt_value(raw_api_key)
+    provider = ocr_client.normalize_provider(cfg.get("ocr_provider"))
+    options = cfg.get("ocr_options") or {}
+    use_async = bool(cfg.get("ocr_async"))
+    timeout = float(cfg.get("ocr_timeout_seconds") or ocr_client.DEFAULT_OCR_TIMEOUT)
 
     if not ocr_endpoint:
         logger.warning("OCR_ENDPOINT not configured — skipping OCR for %s", pdf_path)
@@ -131,8 +137,9 @@ def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
         return ""
 
     logger.info(
-        "Extracting text with OCR: endpoint=%s key_set=%s key_len=%d file=%s",
-        ocr_endpoint, bool(ocr_api_key), len(ocr_api_key), pdf_path,
+        "Extracting text with OCR: provider=%s endpoint=%s async=%s key_set=%s "
+        "key_len=%d file=%s",
+        provider, ocr_endpoint, use_async, bool(ocr_api_key), len(ocr_api_key), pdf_path,
     )
 
     headers = {}
@@ -144,19 +151,21 @@ def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
     import httpx
     for attempt in range(retries):
         try:
-            with httpx.Client(timeout=120.0) as client:
-                with open(pdf_path, "rb") as f:
-                    resp = client.post(
-                        ocr_endpoint,
-                        headers=headers,
-                        files={"file": (os.path.basename(pdf_path), f, "application/pdf")},
-                    )
-                if resp.status_code == 200:
-                    return resp.text
-                logger.warning(
-                    "OCR attempt %d returned HTTP %d from %s — body: %s",
-                    attempt + 1, resp.status_code, ocr_endpoint, resp.text[:500],
+            with httpx.Client(timeout=timeout) as client:
+                return ocr_client.convert(
+                    client,
+                    pdf_path=pdf_path,
+                    endpoint=ocr_endpoint,
+                    headers=headers,
+                    provider=provider,
+                    options=options,
+                    use_async=use_async,
                 )
+        except ocr_client.OcrRequestError as e:
+            logger.warning(
+                "OCR attempt %d failed against %s: %s — body: %s",
+                attempt + 1, ocr_endpoint, e, e.body,
+            )
         except Exception as e:
             logger.warning("OCR attempt %d raised: %s", attempt + 1, e)
         if attempt < retries - 1:
