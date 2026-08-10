@@ -13,68 +13,12 @@ from __future__ import annotations
 
 import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.services import demo_service, engagement_service
-
-
-class _Field:
-    """Stand-in for a Beanie ExpressionField.
-
-    Every comparison yields a sentinel instead of a real query expression, so
-    the services' filters (``Model.recapture_step < N``, ``Model.due <= now``)
-    build without ``init_beanie``. The ordering operators are why this exists
-    rather than the plain string sentinel used elsewhere in the suite.
-    """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def _expr(self, op: str, other: object) -> str:
-        return f"<field:{self.name} {op} {other!r}>"
-
-    def __eq__(self, other):  # type: ignore[override]
-        return self._expr("==", other)
-
-    def __ne__(self, other):  # type: ignore[override]
-        return self._expr("!=", other)
-
-    def __lt__(self, other):
-        return self._expr("<", other)
-
-    def __le__(self, other):
-        return self._expr("<=", other)
-
-    def __gt__(self, other):
-        return self._expr(">", other)
-
-    def __ge__(self, other):
-        return self._expr(">=", other)
-
-    __hash__ = object.__hash__
-
-
-class _FieldMeta(type):
-    """Return a comparable sentinel for any unset class attribute."""
-
-    def __getattr__(cls, name):
-        return _Field(name)
-
-
-def _fake_model(docs: list | None = None, *, find_one_result=None):
-    """A stand-in Beanie Document class with mocked find()/find_one()."""
-
-    query = MagicMock()
-    query.to_list = AsyncMock(return_value=docs or [])
-
-    class _Fake(metaclass=_FieldMeta):
-        pass
-
-    _Fake.find = MagicMock(return_value=query)
-    _Fake.find_one = AsyncMock(return_value=find_one_result)
-    return _Fake
+from tests.conftest import fake_model as _fake_model
 
 
 def _settings(*, promotional: bool = True) -> SimpleNamespace:
