@@ -29,6 +29,7 @@ from app.services.context_budget import (
     DocumentSegment,
     plan_and_compact_context,
 )
+from app.services.page_locator import locator_for_meta
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -1188,16 +1189,15 @@ async def _build_kb_segment(
         src = meta.get("source_name", "Unknown")
         page = meta.get("page")
         sheet = meta.get("sheet")
-        label = src
-        if isinstance(page, int):
-            label = f"{src} (p. {page})"
-        elif isinstance(sheet, str) and sheet:
-            label = f"{src} ({sheet})"
+        approximate = bool(meta.get("page_approximate"))
+        locator = locator_for_meta(meta)
+        label = f"{src} ({locator})" if locator else src
         kb_text += f"\n**Source: {label}**\n{r['content']}\n"
         kb_sources.append({
             "document_id": meta.get("source_id"),
             "document_title": src,
             "page": page if isinstance(page, int) else None,
+            "page_approximate": approximate,
             "sheet": sheet if isinstance(sheet, str) else None,
             "chunk_id": r.get("chunk_id"),
             "score": r.get("score"),

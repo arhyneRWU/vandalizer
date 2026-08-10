@@ -95,6 +95,8 @@ export interface WorkflowCitation {
   document_id?: string | null;
   document_title: string;
   page?: number | null;
+  /** Page was interpolated from OCR text, not measured. See #603. */
+  page_approximate?: boolean;
   sheet?: string | null;
   chunk_id?: string | null;
   score?: number | null;

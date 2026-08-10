@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 
 from app.services.extraction_engine import ExtractionEngine
 from app.services.llm_service import create_chat_agent
+from app.services.page_locator import locator_for_meta
 
 logger = logging.getLogger(__name__)
 
@@ -1434,16 +1435,15 @@ class KnowledgeBaseQueryNode(Node):
             source_name = meta.get("source_name", "Unknown source")
             page = meta.get("page")
             sheet = meta.get("sheet")
-            label = source_name
-            if isinstance(page, int):
-                label = f"{source_name} · p. {page}"
-            elif isinstance(sheet, str) and sheet:
-                label = f"{source_name} · {sheet}"
+            approximate = bool(meta.get("page_approximate"))
+            locator = locator_for_meta(meta)
+            label = f"{source_name} · {locator}" if locator else source_name
             parts.append(f"[{i}] {label}\n{r['content']}")
             sources.append({
                 "document_id": meta.get("source_id"),
                 "document_title": source_name,
                 "page": page if isinstance(page, int) else None,
+                "page_approximate": approximate,
                 "sheet": sheet if isinstance(sheet, str) else None,
                 "chunk_id": r.get("chunk_id"),
                 "score": r.get("score"),

@@ -42,6 +42,7 @@ import { CrossFieldRulesSection } from '../extractions/CrossFieldRulesSection'
 import { CrossFieldViolationsPanel } from '../extractions/CrossFieldViolationsPanel'
 import { getModels } from '../../api/config'
 import { MAX_NAME_LENGTH, normalizeName } from '../../utils/nameValidation'
+import { formatPageLocator } from '../../utils/pageLocator'
 import type { SearchSet, ModelInfo } from '../../types/workflow'
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from 'recharts'
 import { QualityBadge } from '../library/QualityBadge'
@@ -1597,7 +1598,7 @@ function DesignTab({
                   const clickTitle = !clickable
                     ? undefined
                     : hasSource
-                      ? `Click to show the source passage${src?.page != null ? ` (page ${src.page})` : ''}`
+                      ? `Click to show the source passage${formatPageLocator(src?.page, src?.page_approximate) ? ` (${formatPageLocator(src?.page, src?.page_approximate)})` : ''}`
                       : noSource
                         ? 'No source found for this value — click to copy'
                         : 'Click to highlight in PDF'
@@ -1633,7 +1634,7 @@ function DesignTab({
                           background: '#eff6ff', borderRadius: 3, padding: '1px 4px',
                           whiteSpace: 'nowrap',
                         }}>
-                          p. {src.page}
+                          {formatPageLocator(src.page, src.page_approximate)}
                         </span>
                       )}
                       {clickable && noSource && (
