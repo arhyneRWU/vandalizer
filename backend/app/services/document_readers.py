@@ -565,13 +565,25 @@ def _interpolate_page_markers(text: str, num_pages: int) -> list[dict]:
     from a service that didn't preserve page structure (the OCR endpoint).
     Treats the text as uniformly dense — a rough heuristic, but good enough
     for "this answer is from somewhere around page 234" citations.
+
+    Markers carry ``"approximate": True`` so consumers can tell an estimated
+    boundary from a measured one (``_pymupdf_extract_with_pages`` emits the
+    same shape without the flag). Anything that shows a page number to a user
+    or a model should hedge accordingly — a confident citation off an
+    interpolated offset is a fabricated one. Markers persisted before this
+    flag existed have no key, and read as exact.
     """
     if num_pages <= 0 or not text:
         return []
     length = len(text)
     step = max(1, length // num_pages)
     return [
-        {"char_offset": min(length - 1, i * step), "kind": "page", "value": i + 1}
+        {
+            "char_offset": min(length - 1, i * step),
+            "kind": "page",
+            "value": i + 1,
+            "approximate": True,
+        }
         for i in range(num_pages)
     ]
 
