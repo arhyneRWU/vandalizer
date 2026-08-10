@@ -401,12 +401,17 @@ mongorestore --uri="$MONGO_HOST" --db=vandalizer --gzip "$BACKUP_DIR/$TIMESTAMP/
 
 ### ChromaDB
 
-Weekly rsync of the persistent directory:
+ChromaDB runs as its own service and persists to the `chroma-data` volume at
+`/chroma/chroma` inside the `chromadb` container. It is not readable from a
+path on the host or in the `api` container, so archive it from that container:
 
 ```bash
 #!/bin/bash
 # /etc/cron.weekly/vandalizer-chromadb-backup
-rsync -a --delete /app/static/db/ /backups/chromadb/
+cd /opt/vandalizer   # the directory holding compose.yaml
+docker compose exec -T chromadb \
+  sh -lc 'tar czf - -C /chroma/chroma .' \
+  > "/backups/chromadb/chroma-$(date +%F).tgz"
 ```
 
 ChromaDB can be rebuilt from source documents if the backup is lost, but this is time-consuming.
