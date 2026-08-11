@@ -98,6 +98,10 @@ export interface StreamChunk {
   response_tokens?: number
   total_tokens?: number
   plan?: ContextBudgetPlan
+  /** context_budget only: a larger model that would hold this request, when
+   *  one exists and passes the server's privacy rule. Absent means there is
+   *  nothing to offer — the dialog must not invent a choice. */
+  suggested_model?: SuggestedModel | null
   action?: string
   tokens_dropped?: number
   // Error-only: machine-readable failure code + optional suggested recovery.
@@ -106,4 +110,10 @@ export interface StreamChunk {
   oversize_documents?: OversizeDocument[]
   // sources kind only: citation list emitted before the LLM streams text.
   sources?: Citation[]
+}
+
+export interface SuggestedModel {
+  name: string
+  tag: string
+  context_window: number
 }

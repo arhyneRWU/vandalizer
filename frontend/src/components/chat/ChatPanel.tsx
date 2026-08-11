@@ -78,6 +78,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     contextMode,
     contextCutoffIndex,
     contextNotices,
+    suggestedModel,
     setContextTokens,
     setContextMode,
     setContextCutoffIndex,
@@ -203,6 +204,14 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     setContextMode('truncated')
     setContextCutoffIndex(result.context_cutoff_index)
     setContextTokens(0)
+  }
+
+  // Switching model keeps the whole conversation — nothing is dropped or
+  // summarised — so unlike the other options there is no context state to
+  // reset. It sticks for the rest of the conversation, which is what the
+  // model picker already does.
+  const handleUseSuggestedModel = async (name: string) => {
+    setSelectedModel(name)
   }
 
   const handleConvertToKB = async () => {
@@ -1011,6 +1020,8 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
         onTruncate={handleTruncate}
         onCompact={handleCompact}
         onClear={handleClearContext}
+        suggestedModel={suggestedModel}
+        onUseModel={handleUseSuggestedModel}
         percent={contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 100) : 0}
       />
     </div>
