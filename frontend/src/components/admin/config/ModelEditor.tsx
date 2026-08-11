@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import { useConfirm } from '../../shared/useConfirm'
 import {
-  addModel, updateModel, deleteModel, setDefaultModel, testModel, probeModel,
+  addModel, updateModel, deleteModel, setDefaultModel, setLongDocumentModel, testModel, probeModel,
 } from '../../../api/admin'
 import type { ModelTestResult, SystemConfigData } from '../../../api/admin'
 import { ModelCharacterBars } from '../../ModelEffortPicker'
@@ -266,8 +266,11 @@ export interface ModelEditorHandle {
 export interface ModelEditorProps {
   models: ModelList
   defaultModel: string
+  /** Model to fall back to when a request won't fit the chosen one. Empty
+   *  disables routing. */
+  longDocumentModel?: string
   /** Merge a model-list / default-model change back into the parent's config. */
-  onConfigPatch: (patch: { available_models?: ModelList; default_model?: string }) => void
+  onConfigPatch: (patch: { available_models?: ModelList; default_model?: string; long_document_model?: string }) => void
   /** Re-grade the setup checklist after a change that can affect readiness. */
   onReadinessChange: () => void
   /** The tab-level error banner is shared with the parent; the wizard also
@@ -278,7 +281,7 @@ export interface ModelEditorProps {
 }
 
 export function ModelEditor({
-  models, defaultModel, onConfigPatch, onReadinessChange, error, onError, ref,
+  models, defaultModel, longDocumentModel = '', onConfigPatch, onReadinessChange, error, onError, ref,
 }: ModelEditorProps) {
   const confirm = useConfirm()
 
@@ -705,6 +708,37 @@ export function ModelEditor({
           </div>
         ) : (
           <div style={{ fontSize: 13, color: '#6b7280' }}>No models configured.</div>
+        )}
+
+        {models.length > 0 && (
+          <div style={{ marginTop: 16, padding: 16, background: '#f9fafb', borderRadius: 'var(--ui-radius, 12px)' }}>
+            <label htmlFor="admin-long-document-model" style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+              Long-document model
+            </label>
+            <select
+              id="admin-long-document-model"
+              value={longDocumentModel}
+              onChange={async e => {
+                const name = e.target.value
+                try {
+                  const res = await setLongDocumentModel(name)
+                  onConfigPatch({ long_document_model: res.long_document_model ?? name })
+                  onError(null)
+                } catch (err) {
+                  onError(err instanceof Error ? err.message : String(err))
+                }
+              }}
+              style={{ padding: '8px 12px', borderRadius: 'var(--ui-radius, 12px)', border: '1px solid #d1d5db', fontSize: 14, maxWidth: 320 }}
+            >
+              <option value="">Off &mdash; trim documents that don&rsquo;t fit</option>
+              {models.map(m => (
+                <option key={m.id} value={m.name}>{m.name}</option>
+              ))}
+            </select>
+            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
+              When a document is too large for the chosen model, answer with this one instead of trimming the middle out. Pick a model with a large context window. Routing never moves a request to a model with weaker privacy, and the answer says which model was used.
+            </div>
+          </div>
         )}
 
         {showModelForm && (() => {
