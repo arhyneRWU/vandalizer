@@ -88,3 +88,32 @@ export interface SupportContact {
   email: string
   name: string
 }
+
+// ---------------------------------------------------------------------------
+// Queue filters, as they live in the URL
+// ---------------------------------------------------------------------------
+
+/**
+ * Declared here so the route that validates these and the page that updates
+ * them agree on one shape. They were previously declared in both places: the
+ * route's `validateSearch` returned every key, which TypeScript infers as
+ * required-but-possibly-undefined, while the page declared them optional. Any
+ * partial update — `search={{ ticket: undefined }}`, or a reducer spreading
+ * `prev` — then failed to typecheck against the route.
+ *
+ * Optional is the honest shape: `validateSearch` returns `undefined` for every
+ * absent or unrecognized value, so a missing key and a key set to `undefined`
+ * mean the same thing, and a caller should be free to pass either.
+ */
+export type StatusFilter = 'all' | 'open' | 'in_progress' | 'closed'
+export type PriorityFilter = 'all' | 'low' | 'normal' | 'high'
+export type ClassificationFilter = 'all' | 'bug' | 'enhancement' | 'feature_request'
+
+export type SupportSearch = {
+  ticket?: string
+  status?: StatusFilter
+  priority?: PriorityFilter
+  classification?: ClassificationFilter
+  tag?: string
+  q?: string
+}

@@ -11,6 +11,7 @@ import {
 import { useBranding } from './contexts/BrandingContext'
 import { ProtectedRoute } from './components/auth/ProtectedRoute'
 import { useCertificationPanel } from './contexts/CertificationPanelContext'
+import type { SupportSearch } from './types/support'
 import { Workspace } from './pages/Workspace'
 import { TeamSettings } from './pages/TeamSettings'
 
@@ -289,7 +290,11 @@ const supportRoute = createRoute({
   path: '/support',
   // Queue filters live in the URL so they survive a refresh (and can be shared
   // or bookmarked). Anything unrecognized falls back to the default.
-  validateSearch: (search: Record<string, unknown>) => {
+  // Annotated rather than inferred: without it every key is inferred as
+  // required-but-possibly-undefined, so a partial update like
+  // `search={{ ticket: undefined }}` fails to typecheck for missing the other
+  // five keys — even though all five would be undefined. See types/support.
+  validateSearch: (search: Record<string, unknown>): SupportSearch => {
     const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): T | undefined =>
       typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined
     return {
