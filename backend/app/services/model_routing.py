@@ -102,3 +102,36 @@ def choose_document_model(
         f"can hold ({current_budget:,}), so it was answered with "
         f"{candidate_name} to keep the whole document in view.",
     )
+
+
+def suggest_document_model(
+    *,
+    current_name: str,
+    current_config: Optional[dict],
+    models: list[dict],
+    input_tokens: int,
+) -> Optional[dict]:
+    """The model to offer the user when their request won't fit.
+
+    Same privacy rule as :func:`choose_document_model` — the suggestion is
+    computed here rather than in the browser precisely so the gate cannot be
+    walked around by reading the model list client-side.
+
+    Returns the *smallest* window that fits, not the largest. Jumping straight
+    to the biggest model changes the thing answering the question more than the
+    problem requires, and window size is not a proxy for quality.
+    """
+    if input_tokens <= input_budget_for(current_name, current_config):
+        return None
+
+    current_rank = _privacy_rank(current_config)
+    fits = [
+        m for m in models or []
+        if m.get("name")
+        and m.get("name") != current_name
+        and _privacy_rank(m) <= current_rank
+        and input_tokens <= input_budget_for(m.get("name", ""), m)
+    ]
+    if not fits:
+        return None
+    return min(fits, key=lambda m: input_budget_for(m.get("name", ""), m))

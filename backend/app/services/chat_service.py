@@ -30,7 +30,11 @@ from app.services.context_budget import (
     estimate_input_tokens,
     plan_and_compact_context,
 )
-from app.services.model_routing import RoutingDecision, choose_document_model
+from app.services.model_routing import (
+    RoutingDecision,
+    choose_document_model,
+    suggest_document_model,
+)
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -230,6 +234,31 @@ def select_chat_system_prompt(
     # the generic prompt, which would let it answer "what is the total in this
     # proposal?" as though a proposal were present.
     return NO_DOCUMENT_SYSTEM_PROMPT
+
+
+def _suggest_model_for_overflow(
+    compacted, model_name: str, model_config: Optional[dict], sys_config_doc: dict
+) -> Optional[dict]:
+    """A larger model to offer, or None when nothing needs offering.
+
+    Only when the request actually overflowed — a suggestion on a request that
+    fit would be noise, and the dialog it feeds only opens on overflow.
+    """
+    if not compacted.actions:
+        return None
+    suggestion = suggest_document_model(
+        current_name=model_name,
+        current_config=model_config,
+        models=(sys_config_doc or {}).get("available_models") or [],
+        input_tokens=compacted.plan.total_input_tokens,
+    )
+    if not suggestion:
+        return None
+    return {
+        "name": suggestion.get("name", ""),
+        "tag": suggestion.get("tag", ""),
+        "context_window": suggestion.get("context_window", 0),
+    }
 
 
 async def chat_stream(
@@ -486,6 +515,14 @@ async def chat_stream(
         "kind": "context_budget",
         "content": "",
         "plan": compacted.plan.to_dict(),
+        # Offered to the user when their request didn't fit, so the context
+        # dialog can propose keeping the whole document instead of dropping
+        # part of it. Computed server-side under the same privacy rule as
+        # automatic routing — picking a model from the list in the browser
+        # would walk around that gate.
+        "suggested_model": _suggest_model_for_overflow(
+            compacted, model_name, model_config, sys_config_doc,
+        ),
     }) + "\n"
     # Switching the model without saying so is the same failure as trimming a
     # document without saying so — the answer looks identical either way.
