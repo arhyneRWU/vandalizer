@@ -1188,13 +1188,6 @@ def resume_workflow_after_approval(self, approval_uuid):
     # no API key.
     model = result_doc.get("model") or _default_model_from_config(sys_config)
 
-    # Steps after an approval gate must run on the model the run started with.
-    # That model is snapshotted on the result at dispatch; runs that predate the
-    # field fall back to the configured default rather than to a hardcoded model
-    # name, which is never a configured model and so reaches the provider with
-    # no API key.
-    model = result_doc.get("model") or _default_model_from_config(sys_config)
-
     engine = build_workflow_engine(
         steps_data=steps_data,
         model=model,
