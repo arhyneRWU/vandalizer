@@ -6,6 +6,7 @@ import { ChatInput } from './ChatInput'
 import { AttachmentList } from './AttachmentList'
 import { ContextMeter } from './ContextMeter'
 import { ContextLimitDialog } from './ContextLimitDialog'
+import { contextNoticeHeading } from './contextNotices'
 import { useChat } from '../../hooks/useChat'
 import { useProject } from '../../hooks/useProjects'
 import { useOnboarding } from '../../hooks/useOnboarding'
@@ -883,20 +884,26 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
           </div>
         )}
 
-        {contextNotices.length > 0 && (
-          <div role="alert" className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 border border-amber-200">
-            <div className="font-medium mb-1">
-              {contextNotices.some((n) => n.action.startsWith('documents_'))
-                ? 'About your selected documents:'
-                : 'Context was compacted to fit the model:'}
-            </div>
+        {contextNotices.length > 0 && (() => {
+          const { heading, tone } = contextNoticeHeading(contextNotices)
+          return (
+          <div
+            role="alert"
+            className={
+              tone === 'info'
+                ? 'mt-2 rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800 border border-sky-200'
+                : 'mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 border border-amber-200'
+            }
+          >
+            <div className="font-medium mb-1">{heading}</div>
             <ul className="list-disc pl-4 space-y-0.5">
               {contextNotices.map((n, i) => (
                 <li key={i}>{n.detail}</li>
               ))}
             </ul>
           </div>
-        )}
+          )
+        })()}
         </div>{/* end centering wrapper */}
 
       </div>
