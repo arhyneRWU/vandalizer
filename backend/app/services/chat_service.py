@@ -852,6 +852,13 @@ async def chat_stream(
                 # the model charged are both in hand exactly once per request —
                 # compare them, because an estimate that reads low is how bug
                 # #1 hard-failed ordinary documents for months without a trace.
+                #
+                # By design, this only sees answered requests: one the provider
+                # rejects for overflowing the window reports no usage, so bug
+                # #1's own hard failure can never raise this alert — only its
+                # latent precursor can. That is sufficient, because a systemic
+                # under-count announces itself on every preceding successful
+                # turn, so the cause is alerted long before the symptom.
                 from app.services.token_estimate_check import check_and_record
 
                 await check_and_record(

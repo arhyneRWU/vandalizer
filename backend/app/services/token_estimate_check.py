@@ -21,6 +21,32 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Models whose self-check has already failed loudly, so a broken check reports
+# once per process rather than once per chat response. Same rationale, and the
+# same shape, as `context_budget._ESTIMATED_MODELS_WARNED`.
+_FAILED_MODELS_LOGGED: set[str] = set()
+
+
+def _log_failure_once(model: str, message: str, *args: object) -> None:
+    """Report a failure of the check itself once per model per process.
+
+    Both callers run off the back of a chat response, so an unconditional
+    ``logger.exception`` here re-creates at ERROR — with a full traceback —
+    exactly the per-turn noise the shortfall WARNING was coalesced to avoid.
+    The failures this catches are systemic (``quality_alerts`` unreachable, a
+    regressed coercion at the call site): they say the same thing on every
+    turn, forever. Loud once, DEBUG thereafter, and it resets on restart, so a
+    deploy or a config change is still visible.
+
+    The traceback is kept on both branches — the DEBUG line is the only record
+    of occurrences two onward, and a repeat that is a *different* exception is
+    exactly what a bare "already reported" would hide.
+    """
+    first_time = model not in _FAILED_MODELS_LOGGED
+    _FAILED_MODELS_LOGGED.add(model)
+    log = logger.error if first_time else logger.debug
+    log(message, *args, exc_info=True)
+
 
 @dataclass
 class EstimateShortfall:
@@ -77,6 +103,40 @@ def evaluate_estimate(
     )
 
 
+def _alert_message(shortfall: EstimateShortfall) -> str:
+    """The sentence an admin reads in the Quality tab.
+
+    Built in one place because it is written twice: on the first occurrence,
+    and again when a warning escalates to critical. An escalated row that kept
+    the first occurrence's text would show warning-sized numbers, and describe
+    a request that has already failed as one that might.
+
+    States the shortfall itself — the number an operator acts on ("read low by
+    1,810") — and names the one control that exists today:
+    ``token_safety_margin`` on the model config, which ``context_budget``
+    honours ahead of every other rung. Stored calibration is a separate,
+    unwritten plan; naming it here would point at a control that is not there.
+    """
+    if shortfall.severity == "critical":
+        consequence = (
+            f"That exceeded the input budget of {shortfall.input_budget:,}, "
+            f"so this request was rejected instead of answered."
+        )
+    else:
+        consequence = (
+            f"It still fit the input budget of {shortfall.input_budget:,}, "
+            f"but budgets for this model are optimistic and will fail nearer "
+            f"the context limit."
+        )
+    return (
+        f"Token estimate read low for {shortfall.model}: estimated "
+        f"{shortfall.estimated:,} but the model charged "
+        f"{shortfall.charged:,}, read low by {shortfall.shortfall:,} tokens. "
+        f"{consequence} Raise token_safety_margin on this model's config, or "
+        f"check that its name matches its published identifier."
+    )
+
+
 async def record_shortfall(shortfall: EstimateShortfall) -> None:
     """Raise (or escalate) an admin-visible alert for an optimistic estimate.
 
@@ -121,6 +181,11 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
         if existing is not None:
             if shortfall.severity == "critical" and existing.severity != "critical":
                 existing.severity = "critical"
+                # Refresh the text along with the severity: the escalated row
+                # is the most severe thing this feature raises, and leaving it
+                # describing the latent first occurrence makes exactly that row
+                # wrong. `created_at` stays first-seen; admin sorting reads it.
+                existing.message = _alert_message(shortfall)
                 await existing.save()
                 logger.warning(summary, *details)
             else:
@@ -133,20 +198,19 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
             item_id=shortfall.model,
             item_name=shortfall.model,
             severity=shortfall.severity,
-            message=(
-                f"Token estimate read low for {shortfall.model}: estimated "
-                f"{shortfall.estimated:,} but the model charged "
-                f"{shortfall.charged:,}. Budgets for this model are "
-                f"optimistic, which can cause requests to fail near the "
-                f"context limit. Calibrate the model or check that its name "
-                f"matches its published identifier."
-            ),
+            message=_alert_message(shortfall),
             created_at=datetime.datetime.now(tz=datetime.timezone.utc),
         ).insert()
         logger.warning(summary, *details)
     except Exception:
-        logger.exception(
-            "could not record token-estimate alert for %s", shortfall.model
+        # Carry the measurement into the failure line. This is the one path
+        # where no alert row is written, so if the numbers do not appear here
+        # they appear nowhere at all — and swallowing the exception is only
+        # defensible while the observation survives it.
+        _log_failure_once(
+            shortfall.model,
+            "could not record token-estimate alert; " + summary,
+            *details,
         )
 
 
@@ -165,4 +229,12 @@ async def check_and_record(
         if shortfall is not None:
             await record_shortfall(shortfall)
     except Exception:
-        logger.exception("token estimate self-check failed for %s", model)
+        # %s, not %d: the failures that reach here include a caller handing
+        # over something that is not a number, and a log line that cannot
+        # format itself is no diagnostic at all.
+        _log_failure_once(
+            model,
+            "token estimate self-check failed for %s "
+            "(estimated %s, charged %s, budget %s)",
+            model, estimated, charged, input_budget,
+        )
