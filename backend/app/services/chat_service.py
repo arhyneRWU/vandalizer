@@ -27,8 +27,10 @@ from app.services import document_service
 from app.services.config_service import get_llm_model_by_name, get_user_model_name
 from app.services.context_budget import (
     DocumentSegment,
+    estimate_input_tokens,
     plan_and_compact_context,
 )
+from app.services.model_routing import RoutingDecision, choose_document_model
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -440,6 +442,35 @@ async def chat_stream(
 
     # Resolve the model's context window and compact oversize components.
     model_config = await get_llm_model_by_name(model_name)
+
+    # A whole document is the unit people actually work in — a grant proposal
+    # arrives as one file and gets read as one. When it doesn't fit, trimming
+    # answers from part of it. If the deployment nominated a bigger model, use
+    # it rather than silently dropping the middle. See services/model_routing.
+    routing = RoutingDecision(model_name, False, "")
+    candidate_name = (sys_config_doc or {}).get("long_document_model") or ""
+    if candidate_name and (doc_segments or attachment_segments):
+        candidate_config = await get_llm_model_by_name(candidate_name)
+        routing = choose_document_model(
+            current_name=model_name,
+            current_config=model_config,
+            candidate_name=candidate_name,
+            candidate_config=candidate_config,
+            input_tokens=estimate_input_tokens(
+                model_name=model_name,
+                system_prompt=system_prompt or "",
+                user_message=message,
+                history=previous_messages,
+                documents=doc_segments,
+                attachments=attachment_segments,
+            ),
+        )
+        if routing.switched:
+            logger.info(
+                "Routing to %s: request does not fit %s", candidate_name, model_name
+            )
+            model_name, model_config = routing.model_name, candidate_config
+
     compacted = plan_and_compact_context(
         model_name=model_name,
         model_config=model_config,
@@ -456,6 +487,15 @@ async def chat_stream(
         "content": "",
         "plan": compacted.plan.to_dict(),
     }) + "\n"
+    # Switching the model without saying so is the same failure as trimming a
+    # document without saying so — the answer looks identical either way.
+    if routing.reason:
+        yield json.dumps({
+            "kind": "context_notice",
+            "content": routing.reason,
+            "action": "model_routed" if routing.switched else "model_not_routed",
+            "tokens_dropped": 0,
+        }) + "\n"
     for action in compacted.actions:
         yield json.dumps({
             "kind": "context_notice",

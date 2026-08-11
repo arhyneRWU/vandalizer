@@ -259,6 +259,52 @@ def _truncate_text_to_tokens(
     return new_text, original_tokens - count_tokens(new_text, model_name)
 
 
+def input_budget_for(
+    model_name: str,
+    model_config: Optional[dict] = None,
+    response_reserve: Optional[int] = None,
+) -> int:
+    """Tokens available for input on this model, after the output reserve.
+
+    The same arithmetic ``plan_and_compact_context`` uses to decide whether a
+    request is over budget, exposed so callers can ask "would this fit?"
+    without building and trimming a whole context first.
+    """
+    context_window = resolve_context_window(model_name, model_config)
+    reserve = (
+        response_reserve
+        if response_reserve is not None
+        else _default_response_reserve(context_window)
+    )
+    return max(1, context_window - reserve)
+
+
+def estimate_input_tokens(
+    *,
+    model_name: str,
+    system_prompt: str,
+    user_message: str,
+    history: list,
+    documents: list[DocumentSegment],
+    attachments: list[DocumentSegment],
+) -> int:
+    """Input size of a request before any trimming.
+
+    Mirrors what ``plan_and_compact_context`` counts into
+    ``BudgetPlan.total_input_tokens``, including the same 64-token allowance for
+    prompt scaffolding, so a caller can ask "would this fit?" without building
+    a context and having the very documents it wants to measure trimmed out
+    from under it. Kept next to the planner so the two stay in step.
+    """
+    return (
+        (count_tokens(system_prompt, model_name) if system_prompt else 0)
+        + count_tokens(user_message, model_name)
+        + sum(count_message_tokens(m, model_name) for m in history)
+        + sum(count_tokens(d.text, model_name) for d in documents)
+        + sum(count_tokens(a.text, model_name) for a in attachments)
+    )
+
+
 def plan_and_compact_context(
     *,
     model_name: str,

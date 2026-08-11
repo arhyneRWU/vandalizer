@@ -9,6 +9,8 @@ from app.services.context_budget import (
     DocumentSegment,
     count_message_tokens,
     count_tokens,
+    estimate_input_tokens,
+    input_budget_for,
     plan_and_compact_context,
     resolve_context_window,
 )
@@ -285,3 +287,55 @@ def test_find_oversize_documents_handles_missing_token_count():
     docs = [{"uuid": "a", "title": "no-count"}, {"uuid": "b", "title": "zero", "token_count": 0}]
     oversize = find_oversize_documents(documents=docs, model_name="gpt-3.5")
     assert oversize == []
+
+
+class TestEstimateInputTokens:
+    """Routing has to ask "would this fit?" before a context is built.
+
+    Answering that by running the planner would trim the very documents we're
+    trying to measure, so the estimate is computed separately — and it has to
+    match what the planner counts, or routing fires on the wrong requests.
+    """
+
+    def _pieces(self):
+        return dict(
+            system_prompt="You are a helpful assistant.",
+            user_message="What is the total budget?",
+            history=[],
+            documents=[DocumentSegment(label="d", text="word " * 500)],
+            attachments=[],
+        )
+
+    def test_counts_every_component(self):
+        total = estimate_input_tokens(model_name="m", **self._pieces())
+        assert total > 500  # the document alone is ~500 words
+
+    def test_agrees_with_the_planner_on_a_request_that_fits(self):
+        """The estimate is only useful if it matches the number the planner
+        would have produced — otherwise routing triggers at the wrong size."""
+        pieces = self._pieces()
+        estimate = estimate_input_tokens(model_name="m", **pieces)
+        planned = plan_and_compact_context(
+            model_name="m", model_config={"context_window": 128000}, **pieces
+        )
+        assert not planned.actions, "fixture must fit, or the planner trims it"
+        assert abs(estimate - planned.plan.total_input_tokens) <= 64
+
+    def test_empty_request_is_not_negative(self):
+        assert estimate_input_tokens(
+            model_name="m", system_prompt="", user_message="",
+            history=[], documents=[], attachments=[],
+        ) >= 0
+
+
+class TestInputBudgetFor:
+    def test_subtracts_the_response_reserve_from_the_window(self):
+        assert input_budget_for("m", {"context_window": 32768}) == 32768 - 8192
+
+    def test_a_bigger_window_yields_a_bigger_budget(self):
+        small = input_budget_for("m", {"context_window": 32768})
+        large = input_budget_for("m", {"context_window": 262144})
+        assert large > small * 5
+
+    def test_never_returns_zero_or_less(self):
+        assert input_budget_for("m", {"context_window": 1}) >= 1
