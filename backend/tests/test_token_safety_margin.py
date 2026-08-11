@@ -45,10 +45,17 @@ from app.services.context_budget import (
 # The estimate is under in all 97. It is never once equal or over.
 #
 # The ratio is not monotonic in request size — 1.042 at 307 tokens, 1.173 at
-# 2.2k, 1.076 at 47k — because the fixed per-message chat-template overhead
-# that `count_message_tokens` only approximates dominates small requests and
-# amortizes away on large ones. So a margin cannot be derived from the biggest
-# sample alone; it has to cover the worst, which sits in the middle.
+# 2.2k, 1.076 at 47k. Later measurement against the models directly showed why,
+# and it is not size: the divergence is driven by *content*. cl100k and the
+# Qwen vocabulary agree exactly on flowing prose (1.000) and diverge sharply on
+# numbers and tables (1.171 on a real budget justification, 1.455 on a
+# synthetic currency table). The rows below vary because the documents behind
+# them vary, not because the requests were bigger or smaller.
+#
+# That is why these observations pin down the *direction* of the error and not
+# a safe constant: no constant is safe across that range, which is what
+# motivated exact tokenization (see test_exact_tokenizer.py). These rows now
+# guard the fallback path used for models whose vocabulary we do not have.
 OBSERVED_UNDERCOUNTS: list[tuple[str, int, int]] = [
     ("Qwen/Qwen3-VL-30B-A3B-Instruct", 2154, 2527),   # 1.1732 — worst observed
     ("Qwen/Qwen3-VL-8B-Instruct", 2154, 2527),        # 1.1732
@@ -217,8 +224,14 @@ class TestMarginReachesTheCallers:
             model_name="Qwen/Qwen3-VL-8B-Instruct", **kwargs
         )
         assert qwen_est > openai_est
-        # Uniform across components, so the whole-request ratio tracks the margin.
-        assert qwen_est >= int(openai_est * DEFAULT_TOKEN_SAFETY_MARGIN * 0.98)
+        # The margin scales counted text; the scaffold allowance is a flat
+        # addition on top and is identical for both, so it has to come off
+        # before the ratio means anything.
+        from app.services.context_budget import REQUEST_SCAFFOLD_TOKENS
+
+        qwen_text = qwen_est - REQUEST_SCAFFOLD_TOKENS
+        openai_text = openai_est - REQUEST_SCAFFOLD_TOKENS
+        assert qwen_text >= int(openai_text * DEFAULT_TOKEN_SAFETY_MARGIN * 0.98)
 
     def test_per_model_config_reaches_estimate_input_tokens(self):
         kwargs = dict(
