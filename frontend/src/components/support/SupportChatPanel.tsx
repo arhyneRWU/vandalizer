@@ -16,6 +16,7 @@ import {
   Plus,
   Send,
   Sparkles,
+  Trash2,
   Upload,
   UserPlus,
   X,
@@ -725,12 +726,14 @@ function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
   }, [message])
 
-  const loadTicket = useCallback(async () => {
+  // Error toasts persist until dismissed, so the 15s refresh stays silent on
+  // failure — only the initial load reports.
+  const loadTicket = useCallback(async (isPoll = false) => {
     try {
       const data = await supportApi.getTicket(ticketUuid)
       setTicket(data)
     } catch {
-      toast('Failed to load ticket', 'error')
+      if (!isPoll) toast('Failed to load ticket', 'error')
     } finally {
       setLoading(false)
     }
@@ -743,7 +746,7 @@ function ChatView({
     import('../../api/notifications').then(({ markReadForItem }) => {
       markReadForItem('support_ticket', ticketUuid).catch(() => {})
     }).catch(() => {})
-    const interval = setInterval(loadTicket, 15000)
+    const interval = setInterval(() => loadTicket(true), 15000)
     return () => clearInterval(interval)
   }, [loadTicket, ticketUuid])
 
@@ -832,6 +835,23 @@ function ChatView({
       toast('Attachment removed', 'success')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to remove attachment', 'error')
+    }
+  }
+
+  const handleDeleteMessage = async (messageUuid: string) => {
+    if (!(await confirm({
+      title: 'Delete this comment?',
+      message: "This can't be undone.",
+      confirmLabel: 'Delete',
+      destructive: true,
+    }))) return
+    try {
+      const updated = await supportApi.deleteMessage(ticketUuid, messageUuid)
+      setTicket(updated)
+      toast('Message deleted', 'success')
+      onTicketUpdated()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete message', 'error')
     }
   }
 
@@ -1046,6 +1066,9 @@ function ChatView({
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {ticket.messages.map((msg) => {
           const isMe = msg.user_id === user?.user_id
+          // Author or admin — regular support agents can't delete other
+          // people's messages (mirrors the backend gate).
+          const canDeleteMsg = !!user && (user.is_admin || msg.user_id === user.user_id)
           const isInternal = msg.is_internal_note
           const isEditing = editingMessageUuid === msg.uuid
           const msgAttachments = ticket.attachments.filter(a => a.message_uuid === msg.uuid)
@@ -1141,15 +1164,29 @@ function ChatView({
                   {msg.edited_at && <span className="ml-1 italic">(edited)</span>}
                 </p>
               </div>
-              {isMe && !isEditing && (
-                <button
-                  onClick={() => startEdit(msg)}
-                  className="mt-0.5 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-gray-500 opacity-0 transition-opacity hover:bg-gray-100 hover:text-gray-600 group-hover:opacity-100"
-                  title="Edit message"
-                >
-                  <Pencil className="h-2.5 w-2.5" />
-                  Edit
-                </button>
+              {(isMe || canDeleteMsg) && !isEditing && (
+                <div className="mt-0.5 flex items-center gap-0.5">
+                  {isMe && (
+                    <button
+                      onClick={() => startEdit(msg)}
+                      className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-gray-500 opacity-0 transition-opacity hover:bg-gray-100 hover:text-gray-600 group-hover:opacity-100"
+                      title="Edit message"
+                    >
+                      <Pencil className="h-2.5 w-2.5" />
+                      Edit
+                    </button>
+                  )}
+                  {canDeleteMsg && (
+                    <button
+                      onClick={() => handleDeleteMessage(msg.uuid)}
+                      className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-gray-500 opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
+                      title="Delete message"
+                    >
+                      <Trash2 className="h-2.5 w-2.5" />
+                      Delete
+                    </button>
+                  )}
+                </div>
               )}
               {msgAttachments.length > 0 && (
                 <div className={`flex flex-col gap-1.5 mt-1.5 max-w-[85%] ${isMe ? 'items-end' : 'items-start'}`}>

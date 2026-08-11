@@ -1,50 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Award, Lock, RefreshCw, Unlock } from 'lucide-react'
+import { AlertCircle, Award, Lock, RefreshCw, Unlock } from 'lucide-react'
 import {
   getCertificationProgressList, setCertificationUnlock,
   type CertificationProgressItem,
 } from '../../api/admin'
-import { formatNumber } from './shared/format'
+import { useToast } from '../../contexts/ToastContext'
+import { downloadCSV, formatDate, formatNumber } from './shared/format'
 import { ExportButton, SearchInput, UserAvatar } from './shared/primitives'
 
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
 export function CertificationsTab() {
+  const { toast } = useToast()
   const [items, setItems] = useState<CertificationProgressItem[]>([])
+  const [capped, setCapped] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busyUser, setBusyUser] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const data = await getCertificationProgressList()
-      setItems(data)
+      setItems(data.items)
+      setCapped(data.capped)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load certification progress')
     } finally {
       setLoading(false)
     }
@@ -69,6 +50,8 @@ export function CertificationsTab() {
       setItems(prev => prev.map(p =>
         p.user_id === item.user_id ? { ...p, unlocked: !item.unlocked } : p
       ))
+    } catch (e) {
+      toast(`Failed to ${item.unlocked ? 're-lock' : 'unlock'} certification for ${item.name || item.user_id}: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setBusyUser(null)
     }
@@ -117,8 +100,22 @@ export function CertificationsTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           Certification Progress ({filtered.length})
         </div>
+        {capped && (
+          <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertCircle size={14} /> Showing the top {items.length} users by progress — this list is truncated. Search and export cover only these loaded rows, not every user.
+          </div>
+        )}
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+            color: '#991b1b', fontSize: 13,
+          }}>
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
         {filtered.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users have started the certification yet.</div>
+          !error && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users have started the certification yet.</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>

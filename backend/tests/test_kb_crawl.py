@@ -73,8 +73,9 @@ def _mock_source_cls():
     children = []
 
     def construct(**kwargs):
-        child = SimpleNamespace(status="pending", **kwargs)
+        child = SimpleNamespace(status="pending", error_message=None, **kwargs)
         child.insert = AsyncMock()
+        child.delete = AsyncMock()
         children.append(child)
         return child
 
@@ -283,6 +284,208 @@ async def test_redirected_parent_stamps_landing_url():
 # ---------------------------------------------------------------------------
 # Bot-challenge pages must not be ingested as KB source content
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Navigation pages must not become sources (support ticket: a crawl filed
+# Home / Topics / Agencies as 2-chunk sources beside the real documents)
+# ---------------------------------------------------------------------------
+
+
+# Comfortably over kb_crawl_min_content_chars (1200) with few links — a real page.
+_CONTENT = "The policy applies to all funded research. " * 60
+# Well under it — a nav page's extracted text is menu labels and a footer.
+_NAV = "Home Topics Agencies World Contact"
+
+
+def _page(url: str, text: str, links: list[str]) -> WebFetchResult:
+    html = " ".join(f'<a href="{href}">link</a>' for href in links)
+    return WebFetchResult(
+        url=url, title=url, text=text, raw_html=html,
+        used_browser=False, status_code=200,
+    )
+
+
+def _gated_ingest(pages: dict[str, WebFetchResult]):
+    """Stand-in for _ingest_url_source that runs the caller's real content gate.
+
+    Mirrors the production contract: a gated-out page is marked ``skipped`` and
+    still returns its fetch result, so the crawl can follow its links.
+    """
+    async def ingest(child, kb, content_gate=None):
+        result = pages.get(child.url)
+        if result is None:
+            child.status = "error"
+            return None
+        if content_gate is not None:
+            reason = content_gate(result)
+            if reason:
+                child.status = "skipped"
+                child.error_message = reason
+                return result
+        child.status = "ready"
+        return result
+
+    return AsyncMock(side_effect=ingest)
+
+
+@pytest.mark.asyncio
+async def test_navigation_pages_are_not_kept_as_sources():
+    """Junk pages are dropped and don't consume a max_pages slot, so a crawl
+    capped at 2 pages returns the 2 real documents rather than 2 nav pages."""
+    parent = _make_parent("https://example.gov/index")
+    parent_fetched = _page(parent.url, _CONTENT, [
+        "https://example.gov/home",
+        "https://example.gov/topics",
+        "https://example.gov/rule-a",
+        "https://example.gov/agencies",
+        "https://example.gov/rule-b",
+    ])
+    pages = {
+        "https://example.gov/home": _page("https://example.gov/home", _NAV, []),
+        "https://example.gov/topics": _page("https://example.gov/topics", _NAV, []),
+        "https://example.gov/agencies": _page("https://example.gov/agencies", _NAV, []),
+        "https://example.gov/rule-a": _page("https://example.gov/rule-a", _CONTENT, []),
+        "https://example.gov/rule-b": _page("https://example.gov/rule-b", _CONTENT, []),
+    }
+    cls, children = _mock_source_cls()
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource", cls), \
+         patch.object(knowledge_service, "_ingest_url_source", _gated_ingest(pages)):
+        added = await knowledge_service._crawl_from_source(
+            parent, MagicMock(uuid="kb-1"), max_pages=2,
+            allowed_domains="", parent_fetched=parent_fetched,
+        )
+
+    assert added == 2
+    assert parent.crawled_urls == [
+        "https://example.gov/rule-a",
+        "https://example.gov/rule-b",
+    ]
+    # The nav pages were fetched and dropped, not embedded.
+    assert parent.skipped_urls == [
+        "https://example.gov/home",
+        "https://example.gov/topics",
+        "https://example.gov/agencies",
+    ]
+    skipped = [c for c in children if c.status == "skipped"]
+    assert len(skipped) == 3
+    assert all(c.delete.await_count == 1 for c in skipped)
+    assert all(c.delete.await_count == 0 for c in children if c.status == "ready")
+
+
+@pytest.mark.asyncio
+async def test_links_on_skipped_navigation_pages_are_still_followed():
+    """A nav page is the route to the content behind it — dropping it as a
+    source must not prune that branch of the crawl."""
+    parent = _make_parent("https://example.gov/index")
+    parent_fetched = _page(parent.url, _CONTENT, ["https://example.gov/topics"])
+    pages = {
+        # The hub itself is junk, but it's the only path to the real document.
+        "https://example.gov/topics": _page(
+            "https://example.gov/topics", _NAV, ["https://example.gov/deep-rule"],
+        ),
+        "https://example.gov/deep-rule": _page(
+            "https://example.gov/deep-rule", _CONTENT, [],
+        ),
+    }
+    cls, children = _mock_source_cls()
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource", cls), \
+         patch.object(knowledge_service, "_ingest_url_source", _gated_ingest(pages)):
+        added = await knowledge_service._crawl_from_source(
+            parent, MagicMock(uuid="kb-1"), max_pages=5,
+            allowed_domains="", parent_fetched=parent_fetched,
+        )
+
+    assert added == 1
+    assert parent.crawled_urls == ["https://example.gov/deep-rule"]
+    assert parent.skipped_urls == ["https://example.gov/topics"]
+    assert [c.url for c in children] == [
+        "https://example.gov/topics",
+        "https://example.gov/deep-rule",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_all_navigation_site_stops_at_the_fetch_budget():
+    """Skipped pages don't use a page slot, so an all-navigation site must be
+    stopped by the fetch budget (max_pages * 5) rather than crawling forever."""
+    parent = _make_parent("https://example.gov/index")
+    # Every nav page links to the next one, so the queue never runs dry.
+    pages = {
+        f"https://example.gov/nav-{i}": _page(
+            f"https://example.gov/nav-{i}", _NAV, [f"https://example.gov/nav-{i + 1}"],
+        )
+        for i in range(200)
+    }
+    parent_fetched = _page(parent.url, _CONTENT, ["https://example.gov/nav-0"])
+    cls, children = _mock_source_cls()
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource", cls), \
+         patch.object(knowledge_service, "_ingest_url_source", _gated_ingest(pages)):
+        added = await knowledge_service._crawl_from_source(
+            parent, MagicMock(uuid="kb-1"), max_pages=3,
+            allowed_domains="", parent_fetched=parent_fetched,
+        )
+
+    assert added == 0
+    assert len(children) == 3 * 5  # max_pages * 5 fetch budget
+    assert len(parent.skipped_urls) == 15
+
+
+# ---------------------------------------------------------------------------
+# The gate applies to discovered pages only — never to what the user pasted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_user_supplied_thin_url_is_still_ingested():
+    """add_urls passes no content gate, so a short page the user asked for
+    (a one-paragraph policy note) is kept rather than silently dropped."""
+    source = SimpleNamespace(
+        uuid="src-1", url="https://example.gov/short-notice", status="pending",
+        error_message=None, content=None, url_title=None, truncated=False,
+        chunk_count=0, processed_at=None,
+    )
+    source.save = AsyncMock()
+    fetched = _page(source.url, _NAV, [])
+
+    dm = MagicMock()
+    dm.add_to_kb = MagicMock(return_value=1)
+    with patch("app.services.web_fetcher.fetch_url", AsyncMock(return_value=fetched)), \
+         patch.object(knowledge_service, "_get_dm", return_value=dm):
+        out = await knowledge_service._ingest_url_source(source, MagicMock(uuid="kb-1"))
+
+    assert out is fetched
+    assert source.status == "ready"
+    assert source.chunk_count == 1
+
+
+@pytest.mark.asyncio
+async def test_gated_out_page_never_reaches_chromadb():
+    """A rejected page must cost no embeddings, and must still hand back its
+    fetch result so the crawler can mine it for links."""
+    source = SimpleNamespace(
+        uuid="src-1", url="https://example.gov/topics", status="pending",
+        error_message=None, content=None, url_title=None, truncated=False,
+        chunk_count=0, processed_at=None,
+    )
+    source.save = AsyncMock()
+    fetched = _page(source.url, _NAV, [])
+
+    with patch("app.services.web_fetcher.fetch_url", AsyncMock(return_value=fetched)), \
+         patch.object(knowledge_service, "_get_dm") as mock_get_dm:
+        out = await knowledge_service._ingest_url_source(
+            source, MagicMock(uuid="kb-1"),
+            content_gate=lambda result: "Navigation or near-empty page",
+        )
+
+    assert out is fetched
+    assert source.status == "skipped"
+    assert source.content is None
+    assert source.chunk_count == 0
+    mock_get_dm.assert_not_called()
 
 
 @pytest.mark.asyncio

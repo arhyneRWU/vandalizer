@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify'
 import { ThumbsUp, ThumbsDown, Copy, Check, ChevronRight } from 'lucide-react'
 import { marked } from 'marked'
 import { submitChatFeedback } from '../../api/feedback'
+import { formatPageLocator } from '../../utils/pageLocator'
 import { useCertificationPanel } from '../../contexts/CertificationPanelContext'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
 import type { ChatMessage as ChatMessageType } from '../../types/chat'
@@ -238,7 +239,7 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                     Sources:
                   </span>
                   {message.citations.map((c, i) => {
-                    const locator = typeof c.page === 'number' ? `p. ${c.page}` : (c.sheet || null)
+                    const locator = formatPageLocator(c.page, c.page_approximate) ?? (c.sheet || null)
                     const label = locator ? `${c.document_title} · ${locator}` : c.document_title
                     const preview = c.content_preview || ''
                     const isOpen = openCitation === i
@@ -273,7 +274,10 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                   }}>
                     <div style={{ fontSize: 11, fontWeight: 600, color: '#6b7280', marginBottom: 4 }}>
                       {open.document_title}
-                      {typeof open.page === 'number' ? ` · p. ${open.page}` : (open.sheet ? ` · ${open.sheet}` : '')}
+                      {(() => {
+                        const loc = formatPageLocator(open.page, open.page_approximate) ?? open.sheet
+                        return loc ? ` · ${loc}` : ''
+                      })()}
                     </div>
                     {openPreview || 'No preview available for this source.'}
                   </div>

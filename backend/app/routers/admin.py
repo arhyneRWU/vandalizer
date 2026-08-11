@@ -4,7 +4,8 @@ import datetime
 import logging
 import math
 import re
-from typing import Optional
+import uuid
+from typing import Literal, Optional
 
 from bson import ObjectId as BsonObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,9 +15,13 @@ from app.config import Settings
 from app.dependencies import get_current_user, get_settings
 from app.models.activity import ActivityEvent
 from app.models.audit_log import AdminAuditLog
-from app.models.system_config import SystemConfig
-from app.services import audit_service
+from app.models.system_config import SystemConfig, ensure_stable_ids
+from app.services import audit_service, ocr_client
 from app.services.llm_service import clear_agent_caches, get_agent_model
+from app.services.name_conflicts import (
+    DuplicateNameError,
+    ensure_model_identity_available,
+)
 from app.services.version_service import get_update_status
 from app.utils.encryption import decrypt_value, encrypt_value
 from app.models.team import Team, TeamMembership
@@ -31,6 +36,14 @@ router = APIRouter()
 # realistic ad-hoc reporting need without letting callers ask for wildly
 # unbounded scans.
 MAX_ANALYTICS_DAYS = 730
+
+# Ceiling for the `limit` query param on the admin list endpoints (user/team
+# leaderboards, all-teams, isolated-users, certification progress). These
+# build a Python list in memory after scoping, so an unbounded response is
+# both a large JSON payload and thousands of re-sorted DOM rows client-side.
+# 2000 is generous relative to any current deployment's row counts while
+# still bounding the worst case.
+MAX_LIST_LIMIT = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +75,29 @@ def _sanitize_providers(providers: list[dict]) -> list[dict]:
             p_copy["client_secret"] = "***" if decrypt_value(secret) else ""
         sanitized.append(p_copy)
     return sanitized
+
+
+async def _ensure_config_ids(cfg: SystemConfig) -> None:
+    """Backfill stable `id`s for models/providers and persist if any changed.
+
+    Existing deployments have `available_models`/`oauth_providers` entries
+    with no `id` (they used to be addressed by array index). This assigns one
+    lazily the first time the config is touched after upgrading, and never
+    regenerates an `id` once assigned. Call this before addressing any entry
+    by id, and on the GET path too, so the client always has ids to send back.
+    """
+    changed = ensure_stable_ids(cfg.available_models)
+    changed = ensure_stable_ids(cfg.oauth_providers) or changed
+    if changed:
+        await cfg.save()
+
+
+def _find_by_id(entries: list[dict], entry_id: str) -> int:
+    """Return the index of the dict in `entries` whose `id` matches, or -1."""
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("id") == entry_id:
+            return i
+    return -1
 
 
 def _sanitize_models(models: list[dict]) -> list[dict]:
@@ -172,6 +208,12 @@ class UserLeaderboardItem(BaseModel):
     last_active: Optional[datetime.datetime] = None
 
 
+class UserLeaderboardResponse(BaseModel):
+    items: list[UserLeaderboardItem]
+    total: int
+    capped: bool
+
+
 class TeamLeaderboardItem(BaseModel):
     team_id: str
     name: str
@@ -181,6 +223,12 @@ class TeamLeaderboardItem(BaseModel):
     active_users: int = 0
     member_count: int = 0
     avg_latency_ms: Optional[float] = None
+
+
+class TeamLeaderboardResponse(BaseModel):
+    items: list[TeamLeaderboardItem]
+    total: int
+    capped: bool
 
 
 class WorkflowEventItem(BaseModel):
@@ -227,6 +275,10 @@ class ConfigUpdateRequest(BaseModel):
     retention_config: Optional[dict] = None
     ocr_endpoint: Optional[str] = None
     ocr_api_key: Optional[str] = None
+    ocr_provider: Optional[str] = None
+    ocr_options: Optional[dict] = None
+    ocr_async: Optional[bool] = None
+    ocr_timeout_seconds: Optional[int] = None
     llm_endpoint: Optional[str] = None
     default_team_id: Optional[str] = None
     support_contacts: Optional[list[dict]] = None
@@ -239,6 +291,12 @@ class AdminTeamItem(BaseModel):
     owner_user_id: str
     member_count: int
     is_default: bool
+
+
+class AdminTeamListResponse(BaseModel):
+    items: list[AdminTeamItem]
+    total: int
+    capped: bool
 
 
 class AdminCreateTeamRequest(BaseModel):
@@ -254,6 +312,12 @@ class IsolatedUserItem(BaseModel):
     user_id: str
     name: Optional[str] = None
     email: Optional[str] = None
+
+
+class IsolatedUsersResponse(BaseModel):
+    items: list[IsolatedUserItem]
+    total: int
+    capped: bool
 
 
 class ModelAddRequest(BaseModel):
@@ -309,7 +373,13 @@ class OAuthProviderRequest(BaseModel):
 
 
 class AuthMethodsRequest(BaseModel):
-    methods: list[str]
+    # Constrained to known auth methods so an unrecognized value can't slip
+    # into storage. Emptiness is *not* enforced here (an empty list is
+    # vacuously valid against this element constraint) — it is rejected
+    # explicitly in the route below, which is the real security boundary:
+    # it must run after `_require_superadmin`, not as a body-parsing error
+    # that would short-circuit before the auth check.
+    methods: list[Literal["password", "oauth"]]
 
 
 class TimeseriesDayItem(BaseModel):
@@ -548,9 +618,10 @@ async def usage_timeseries(
 # 2. GET /users  - User leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/users", response_model=list[UserLeaderboardItem])
+@router.get("/users", response_model=UserLeaderboardResponse)
 async def user_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -585,7 +656,7 @@ async def user_leaderboard(
     # Fetch user records — scope to team members when team-scoped
     if team_scope:
         if not scoped_team:
-            return []
+            return UserLeaderboardResponse(items=[], total=0, capped=False)
         team_memberships = await TeamMembership.find(
             TeamMembership.team == scoped_team.id
         ).to_list()
@@ -648,16 +719,19 @@ async def user_leaderboard(
 
     # Sort by tokens desc
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return UserLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
 # 3. GET /teams  - Team leaderboard
 # ---------------------------------------------------------------------------
 
-@router.get("/teams", response_model=list[TeamLeaderboardItem])
+@router.get("/teams", response_model=TeamLeaderboardResponse)
 async def team_leaderboard(
     days: int | None = Query(default=None, ge=1, le=MAX_ANALYTICS_DAYS),
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
     user: User = Depends(get_current_user),
 ):
     _, team_scope = await _require_admin_or_team_admin(user)
@@ -732,7 +806,9 @@ async def team_leaderboard(
         )
 
     result.sort(key=lambda x: x.tokens_total, reverse=True)
-    return result
+    total = len(result)
+    capped = total > limit
+    return TeamLeaderboardResponse(items=result[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -1386,6 +1462,7 @@ async def get_config(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     return {
         "extraction_config": cfg.get_extraction_config(),
         "quality_config": cfg.get_quality_config(),
@@ -1395,6 +1472,10 @@ async def get_config(
         "default_model": cfg.default_model or "",
         "ocr_endpoint": cfg.ocr_endpoint,
         "ocr_api_key": "***" if decrypt_value(cfg.ocr_api_key) else "",
+        "ocr_provider": cfg.ocr_provider or "raw",
+        "ocr_options": cfg.ocr_options or {},
+        "ocr_async": bool(cfg.ocr_async),
+        "ocr_timeout_seconds": cfg.ocr_timeout_seconds or 120,
         "llm_endpoint": cfg.llm_endpoint,
         "highlight_color": cfg.highlight_color,
         "ui_radius": cfg.ui_radius,
@@ -1430,6 +1511,30 @@ async def update_config(
         cfg.ocr_endpoint = body.ocr_endpoint
     if body.ocr_api_key is not None and body.ocr_api_key != "***":
         cfg.ocr_api_key = encrypt_value(body.ocr_api_key)
+    if body.ocr_provider is not None:
+        if body.ocr_provider not in ocr_client.OCR_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown OCR provider '{body.ocr_provider}'. "
+                       f"Supported: {', '.join(ocr_client.OCR_PROVIDERS)}",
+            )
+        cfg.ocr_provider = body.ocr_provider
+    if body.ocr_options is not None:
+        # Reject unencodable options here rather than letting them surface as a
+        # 422 on every upload, hours after the config change that caused them.
+        try:
+            cfg.ocr_options = ocr_client.validate_docling_options(body.ocr_options)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if body.ocr_async is not None:
+        cfg.ocr_async = body.ocr_async
+    if body.ocr_timeout_seconds is not None:
+        if not 10 <= body.ocr_timeout_seconds <= 3600:
+            raise HTTPException(
+                status_code=400,
+                detail="OCR timeout must be between 10 and 3600 seconds",
+            )
+        cfg.ocr_timeout_seconds = body.ocr_timeout_seconds
     if body.llm_endpoint is not None:
         cfg.llm_endpoint = body.llm_endpoint
     if body.default_team_id is not None:
@@ -1524,9 +1629,18 @@ async def add_model(
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
+    try:
+        ensure_model_identity_available(
+            name=body.name, tag=body.tag, models=cfg.available_models,
+        )
+    except DuplicateNameError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
     was_empty = len(cfg.available_models) == 0
     cfg.available_models.append(
         {
+            "id": str(uuid.uuid4()),
             "name": body.name,
             "tag": body.tag,
             "external": body.external,
@@ -1564,7 +1678,8 @@ async def add_model(
 # ---------------------------------------------------------------------------
 # 7b. PUT /config/models/default  - Set (or clear) the system default model
 # ---------------------------------------------------------------------------
-# Defined before PUT /config/models/{index} so "default" isn't parsed as an int.
+# Defined before PUT /config/models/{model_id} so this literal path wins over
+# the parameterized route (FastAPI matches by registration order).
 
 class DefaultModelRequest(BaseModel):
     name: str = ""
@@ -1599,20 +1714,30 @@ async def set_default_model(
 
 
 # ---------------------------------------------------------------------------
-# 7c. PUT /config/models/{index}  - Update an existing model
+# 7c. PUT /config/models/{model_id}  - Update an existing model
 # ---------------------------------------------------------------------------
 
-@router.put("/config/models/{index}")
+@router.put("/config/models/{model_id}")
 async def update_model(
-    index: int,
+    model_id: str,
     body: ModelAddRequest,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    try:
+        ensure_model_identity_available(
+            name=body.name, tag=body.tag, models=cfg.available_models,
+            exclude_index=index,
+        )
+    except DuplicateNameError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     # If the client sends '***', preserve the existing (encrypted) key
     new_api_key = body.api_key or ""
@@ -1623,6 +1748,7 @@ async def update_model(
 
     prev_name = cfg.available_models[index].get("name", "")
     cfg.available_models[index] = {
+        "id": model_id,
         "name": body.name,
         "tag": body.tag,
         "external": body.external,
@@ -1649,25 +1775,27 @@ async def update_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "update_model", f"Updated model at index {index}: {body.tag}")
+    await _audit(user, "update_model", f"Updated model {model_id}: {body.tag}")
 
     return {"status": "ok", "models": _sanitize_models(cfg.available_models), "default_model": cfg.default_model or ""}
 
 
 # ---------------------------------------------------------------------------
-# 8. DELETE /config/models/{index}  - Remove a model by index
+# 8. DELETE /config/models/{model_id}  - Remove a model by id
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/models/{index}")
+@router.delete("/config/models/{model_id}")
 async def delete_model(
-    index: int,
+    model_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
-        raise HTTPException(status_code=404, detail="Model index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Model not found")
 
     removed = cfg.available_models.pop(index)
     # Clear default_model if we just deleted it.
@@ -1677,7 +1805,7 @@ async def delete_model(
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
-    await _audit(user, "delete_model", f"Deleted model at index {index}: {removed.get('tag', '?')}")
+    await _audit(user, "delete_model", f"Deleted model {model_id}: {removed.get('tag', '?')}")
 
     return {"status": "ok", "removed": removed, "models": cfg.available_models, "default_model": cfg.default_model or ""}
 
@@ -1711,7 +1839,9 @@ async def add_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
+    await _ensure_config_ids(cfg)
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = str(uuid.uuid4())
     provider_dict["enabled"] = True
     if provider_dict.get("client_secret"):
         provider_dict["client_secret"] = encrypt_value(provider_dict["client_secret"])
@@ -1775,12 +1905,12 @@ async def parse_saml_metadata(
 
 
 # ---------------------------------------------------------------------------
-# 10. PUT /config/auth/providers/{index}  - Update OAuth provider
+# 10. PUT /config/auth/providers/{provider_id}  - Update OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.put("/config/auth/providers/{index}")
+@router.put("/config/auth/providers/{provider_id}")
 async def update_oauth_provider(
-    index: int,
+    provider_id: str,
     body: OAuthProviderRequest,
     user: User = Depends(get_current_user),
 ):
@@ -1788,10 +1918,13 @@ async def update_oauth_provider(
     _validate_provider_request(body)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     provider_dict = body.model_dump(exclude_none=True)
+    provider_dict["id"] = provider_id
     # If the client sends '***', preserve the existing (encrypted) secret
     if provider_dict.get("client_secret") == "***":
         provider_dict["client_secret"] = cfg.oauth_providers[index].get("client_secret", "")
@@ -1801,31 +1934,33 @@ async def update_oauth_provider(
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "update_oauth_provider", f"Updated OAuth provider at index {index}: {body.provider}")
+    await _audit(user, "update_oauth_provider", f"Updated OAuth provider {provider_id}: {body.provider}")
 
     return {"status": "ok", "providers": _sanitize_providers(cfg.oauth_providers)}
 
 
 # ---------------------------------------------------------------------------
-# 11. DELETE /config/auth/providers/{index}  - Remove OAuth provider
+# 11. DELETE /config/auth/providers/{provider_id}  - Remove OAuth provider
 # ---------------------------------------------------------------------------
 
-@router.delete("/config/auth/providers/{index}")
+@router.delete("/config/auth/providers/{provider_id}")
 async def delete_oauth_provider(
-    index: int,
+    provider_id: str,
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.oauth_providers):
-        raise HTTPException(status_code=404, detail="Provider index out of range")
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.oauth_providers, provider_id)
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Provider not found")
 
     removed = cfg.oauth_providers.pop(index)
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
-    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider at index {index}: {removed.get('provider', '?')}")
+    await _audit(user, "delete_oauth_provider", f"Deleted OAuth provider {provider_id}: {removed.get('provider', '?')}")
 
     return {"status": "ok", "removed": removed, "providers": cfg.oauth_providers}
 
@@ -1840,6 +1975,12 @@ async def update_auth_methods(
     user: User = Depends(get_current_user),
 ):
     await _require_superadmin(user)
+
+    if not body.methods:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one auth method must remain enabled.",
+        )
 
     cfg = await SystemConfig.get_config()
     cfg.auth_methods = body.methods
@@ -2044,11 +2185,237 @@ async def quality_contract(
 
 
 # ---------------------------------------------------------------------------
+# 18b. GET /optimizer/activity  - Fleet-wide optimizer runs (read-only)
+#
+# The per-item optimizer panels only ever show one item's runs, and the user
+# inbox is access-scoped to what its caller owns. Neither answers "is the
+# optimizer healthy?" — which is how a ten-day run of failures stayed invisible.
+# This endpoint is the operator view: every run across all three surfaces, with
+# failure reasons rolled up. Read-only by construction — no apply/dismiss here,
+# because acting on someone else's item is theirs to do from their inbox.
+# ---------------------------------------------------------------------------
+
+OPTIMIZER_SURFACES = ("kb", "extraction", "workflow")
+
+
+def _failure_reason(run) -> str:
+    """Group key for the failure rollup.
+
+    Prefers the structured ``error_code`` (KB runs set one); otherwise uses a
+    truncated message, since raw exception strings carry ids that would make
+    every failure look unique.
+    """
+    code = getattr(run, "error_code", None)
+    if code:
+        return str(code)
+    message = (getattr(run, "error_message", None) or "").strip()
+    if not message:
+        return "unknown"
+    return message[:120]
+
+
+@router.get("/optimizer/activity")
+async def optimizer_activity(
+    days: int = Query(default=14, ge=1, le=MAX_ANALYTICS_DAYS),
+    surface: Optional[str] = Query(default=None, description="kb | extraction | workflow"),
+    status: Optional[str] = Query(
+        default=None, description="queued | running | completed | failed | cancelled",
+    ),
+    trigger: Optional[str] = Query(
+        default=None, description="'auto' (signal/alert-triggered) or 'user'",
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+):
+    """Every optimizer run in the window, newest first, with a health summary."""
+    await _require_admin(user)
+
+    from app.models.extraction_optimization_run import ExtractionOptimizationRun
+    from app.models.kb_optimization_run import KBOptimizationRun
+    from app.models.knowledge import KnowledgeBase
+    from app.models.search_set import SearchSet
+    from app.models.workflow import Workflow
+    from app.models.workflow_optimization_run import WorkflowOptimizationRun
+    from app.routers.optimizer_inbox import (
+        extraction_run_is_live,
+        kb_run_is_live,
+        workflow_run_is_live,
+    )
+
+    if surface and surface not in OPTIMIZER_SURFACES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"surface must be one of {', '.join(OPTIMIZER_SURFACES)}",
+        )
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    query: dict = {"started_at": {"$gte": cutoff}}
+    if status:
+        query["status"] = status
+    if trigger == "auto":
+        query["options.shadow_trigger"] = {"$exists": True}
+    elif trigger == "user":
+        query["options.shadow_trigger"] = {"$exists": False}
+
+    async def _fetch(model):
+        return await model.find(query).sort("-started_at").limit(limit).to_list()
+
+    kb_runs = [] if surface not in (None, "kb") else await _fetch(KBOptimizationRun)
+    ex_runs = [] if surface not in (None, "extraction") else await _fetch(ExtractionOptimizationRun)
+    wf_runs = [] if surface not in (None, "workflow") else await _fetch(WorkflowOptimizationRun)
+
+    # Bulk-resolve parent items (for display names and live-config checks) and
+    # owners (for "who launched this"), so the row loop stays query-free.
+    kb_by_uuid = {}
+    if kb_runs:
+        kbs = await KnowledgeBase.find(
+            {"uuid": {"$in": list({r.kb_uuid for r in kb_runs if r.kb_uuid})}},
+        ).to_list()
+        kb_by_uuid = {k.uuid: k for k in kbs}
+
+    ss_by_uuid = {}
+    if ex_runs:
+        sets = await SearchSet.find(
+            {"uuid": {"$in": list({r.search_set_uuid for r in ex_runs if r.search_set_uuid})}},
+        ).to_list()
+        ss_by_uuid = {s.uuid: s for s in sets}
+
+    wf_by_id: dict = {}
+    if wf_runs:
+        object_ids = []
+        for r in wf_runs:
+            try:
+                object_ids.append(BsonObjectId(r.workflow_id))
+            except Exception:
+                continue
+        if object_ids:
+            workflows = await Workflow.find({"_id": {"$in": object_ids}}).to_list()
+            wf_by_id = {str(w.id): w for w in workflows}
+
+    all_runs = [
+        ("kb", r, r.kb_uuid, kb_by_uuid.get(r.kb_uuid), kb_run_is_live(r))
+        for r in kb_runs
+    ] + [
+        ("extraction", r, r.search_set_uuid, ss_by_uuid.get(r.search_set_uuid),
+         extraction_run_is_live(r, ss_by_uuid.get(r.search_set_uuid)))
+        for r in ex_runs
+    ] + [
+        ("workflow", r, r.workflow_id, wf_by_id.get(r.workflow_id),
+         workflow_run_is_live(r, wf_by_id.get(r.workflow_id)))
+        for r in wf_runs
+    ]
+
+    user_ids = {getattr(r, "user_id", None) for _, r, _, _, _ in all_runs}
+    user_ids.discard(None)
+    owners = await User.find({"user_id": {"$in": list(user_ids)}}).to_list() if user_ids else []
+    email_by_user = {u.user_id: u.email for u in owners}
+
+    rows = []
+    by_status: dict[str, int] = {}
+    by_surface: dict[str, int] = {}
+    failure_counts: dict[str, int] = {}
+    auto_triggered = pending_review = applied_count = dismissed_count = 0
+    tokens_used_total = 0
+
+    for kind, run, item_id, item_doc, is_live in all_runs:
+        options = run.options or {}
+        shadow_trigger = options.get("shadow_trigger")
+        dismissed_at = getattr(run, "dismissed_at", None)
+        tied = bool(getattr(run, "tied_with_baseline", False))
+        item_name = (
+            (getattr(item_doc, "name", None) or getattr(item_doc, "title", None))
+            if item_doc is not None else None
+        )
+
+        by_status[run.status] = by_status.get(run.status, 0) + 1
+        by_surface[kind] = by_surface.get(kind, 0) + 1
+        if shadow_trigger:
+            auto_triggered += 1
+        if is_live:
+            applied_count += 1
+        if dismissed_at is not None:
+            dismissed_count += 1
+        if run.status == "failed":
+            reason = _failure_reason(run)
+            failure_counts[reason] = failure_counts.get(reason, 0) + 1
+        if (
+            run.status == "completed" and not is_live and not tied
+            and dismissed_at is None and getattr(run, "best_config", None)
+        ):
+            pending_review += 1
+        tokens_used_total += int(getattr(run, "tokens_used", 0) or 0)
+
+        rows.append({
+            "surface": kind,
+            "run_uuid": run.uuid,
+            "item_id": item_id,
+            # Null name = the tuned item has since been deleted.
+            "item_name": item_name,
+            "item_deleted": item_doc is None,
+            "user_id": getattr(run, "user_id", None),
+            "user_email": email_by_user.get(getattr(run, "user_id", None)),
+            "status": run.status,
+            "trigger": shadow_trigger,
+            "trigger_detail": options.get("shadow_trigger_detail") or {},
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "baseline_score": getattr(run, "baseline_default_score", None),
+            "optimized_score": getattr(run, "optimized_score", None),
+            "tied_with_baseline": tied,
+            "tokens_used": getattr(run, "tokens_used", 0),
+            "token_budget": getattr(run, "token_budget", 0),
+            "actual_cost_usd": getattr(run, "actual_cost_usd", None),
+            "stopped_reason": getattr(run, "stopped_reason", None),
+            "error_message": getattr(run, "error_message", None),
+            "error_code": getattr(run, "error_code", None),
+            "phase": getattr(run, "phase", None),
+            "progress_message": getattr(run, "progress_message", None),
+            "is_live": is_live,
+            "dismissed_at": dismissed_at.isoformat() if dismissed_at else None,
+        })
+
+    rows.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+
+    return {
+        "runs": rows[:limit],
+        "summary": {
+            "window_days": days,
+            "total": len(rows),
+            "by_status": by_status,
+            "by_surface": by_surface,
+            "auto_triggered": auto_triggered,
+            "user_launched": len(rows) - auto_triggered,
+            "failed": by_status.get("failed", 0),
+            "applied": applied_count,
+            "dismissed": dismissed_count,
+            # Completed candidates nobody has acted on — the backlog the
+            # support ticket was about.
+            "pending_review": pending_review,
+            "tokens_used": tokens_used_total,
+            "failure_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    failure_counts.items(), key=lambda kv: kv[1], reverse=True,
+                )
+            ],
+            # True when a per-surface fetch hit the cap, so the UI can say the
+            # summary is a floor rather than an exact fleet total.
+            "truncated": any(
+                len(runs) >= limit for runs in (kb_runs, ex_runs, wf_runs)
+            ),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # 19. GET /admin/teams/all  - All teams (admin management view)
 # ---------------------------------------------------------------------------
 
-@router.get("/teams/all", response_model=list[AdminTeamItem])
-async def admin_list_all_teams(user: User = Depends(get_current_user)):
+@router.get("/teams/all", response_model=AdminTeamListResponse)
+async def admin_list_all_teams(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     cfg = await SystemConfig.get_config()
@@ -2060,7 +2427,7 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         key = str(m.team)
         member_counts[key] = member_counts.get(key, 0) + 1
 
-    return [
+    items = [
         AdminTeamItem(
             team_id=str(t.id),
             uuid=t.uuid,
@@ -2071,6 +2438,9 @@ async def admin_list_all_teams(user: User = Depends(get_current_user)):
         )
         for t in all_teams
     ]
+    total = len(items)
+    capped = total > limit
+    return AdminTeamListResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2174,8 +2544,11 @@ async def admin_remove_user_from_team(
 # 23. GET /admin/users/isolated  - Users with no shared team
 # ---------------------------------------------------------------------------
 
-@router.get("/users/isolated", response_model=list[IsolatedUserItem])
-async def isolated_users(user: User = Depends(get_current_user)):
+@router.get("/users/isolated", response_model=IsolatedUsersResponse)
+async def isolated_users(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     await _require_admin(user)
 
     all_memberships = await TeamMembership.find().limit(100000).to_list()
@@ -2195,13 +2568,16 @@ async def isolated_users(user: User = Depends(get_current_user)):
     ]
 
     if not isolated_ids:
-        return []
+        return IsolatedUsersResponse(items=[], total=0, capped=False)
 
     users = await User.find({"user_id": {"$in": isolated_ids}}).to_list()
-    return [
+    items = [
         IsolatedUserItem(user_id=u.user_id, name=u.name, email=u.email)
         for u in users
     ]
+    total = len(items)
+    capped = total > limit
+    return IsolatedUsersResponse(items=items[:limit], total=total, capped=capped)
 
 
 # ---------------------------------------------------------------------------
@@ -2306,6 +2682,7 @@ async def classification_dashboard(user: User = Depends(get_current_user)):
 class TestOcrRequest(BaseModel):
     ocr_endpoint: Optional[str] = None
     ocr_api_key: Optional[str] = None
+    ocr_provider: Optional[str] = None
 
 
 @router.post("/config/test-ocr")
@@ -2315,6 +2692,12 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
     Accepts the admin form's current values so unsaved edits can be tested;
     an ``"***"`` api key means "use the saved key", the same sentinel the
     config update path uses. Omitted fields fall back to the saved config.
+
+    The probe is provider-aware: docling-serve's convert path only answers
+    POSTs, so a GET against it reports 405 and tells an admin nothing. For that
+    provider we probe the service's ``/health`` endpoint instead, and report
+    the convert URL the extraction path will actually use — the field most
+    often misconfigured.
     """
     await _require_superadmin(user)
 
@@ -2322,6 +2705,9 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
     endpoint = body.ocr_endpoint if body and body.ocr_endpoint is not None else cfg.ocr_endpoint
     if not endpoint:
         raise HTTPException(status_code=400, detail="OCR endpoint not configured")
+
+    provider_raw = body.ocr_provider if body and body.ocr_provider is not None else cfg.ocr_provider
+    provider = ocr_client.normalize_provider(provider_raw)
 
     import httpx
 
@@ -2334,9 +2720,32 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    probe_url = (
+        ocr_client.docling_health_url(endpoint) if provider == "docling" else endpoint
+    )
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(endpoint, headers=headers)
+            resp = await client.get(probe_url, headers=headers)
+            if provider == "docling":
+                convert_url = ocr_client.normalize_endpoint(
+                    endpoint, provider, use_async=bool(cfg.ocr_async)
+                )
+                healthy = resp.status_code == 200
+                message = (
+                    f"Docling-Serve health check returned {resp.status_code}"
+                    f" — documents will be converted via POST {convert_url}"
+                )
+                if not healthy:
+                    message += (
+                        f" (probed {probe_url}; a non-200 here usually means the URL "
+                        "is not a docling-serve root)"
+                    )
+                return {
+                    "status": "ok" if healthy else "warning",
+                    "status_code": resp.status_code,
+                    "message": message,
+                }
             return {
                 "status": "ok",
                 "status_code": resp.status_code,
@@ -2350,19 +2759,27 @@ async def test_ocr(body: Optional[TestOcrRequest] = None, user: User = Depends(g
         raise HTTPException(status_code=502, detail=f"OCR test failed: {e}")
 
 
-@router.post("/config/test-model/{index}")
-async def test_model(index: int, user: User = Depends(get_current_user)):
+@router.post("/config/test-model/{model_id}")
+async def test_model(model_id: str, user: User = Depends(get_current_user)):
     """Run a real round-trip against a model and return full diagnostics.
 
     Returns HTTP 200 with ``ok`` true/false (in-band, like the Prompt
     Playground) so the UI can render a step-by-step breakdown — on success why
     the model is healthy, on failure a classified error with a suggested fix —
     instead of a bare error toast. A genuinely missing model still 404s.
+
+    Addressed by stable id, not array index — see PUT/DELETE
+    /config/models/{model_id} for the position-shift bug this avoids: without
+    it, another admin's edit between page load and this request could make
+    the badge for model X actually reflect a live test of model Y's
+    credentials.
     """
     await _require_superadmin(user)
 
     cfg = await SystemConfig.get_config()
-    if index < 0 or index >= len(cfg.available_models):
+    await _ensure_config_ids(cfg)
+    index = _find_by_id(cfg.available_models, model_id)
+    if index == -1:
         raise HTTPException(status_code=404, detail="Model not found")
 
     from app.services.system_diagnostics import diagnose_model
@@ -2461,9 +2878,12 @@ class ModelProbeRequest(BaseModel):
     api_protocol: Optional[str] = ""
     api_key: Optional[str] = ""
     # When editing an existing model, the form sends api_key="***" to
-    # preserve the stored credential. Pass that model's index so we can
-    # decrypt and use it.
-    existing_model_index: Optional[int] = None
+    # preserve the stored credential. Pass that model's stable id so we can
+    # decrypt and use it — addressed by id, not array index, for the same
+    # reason PUT/DELETE /config/models/{model_id} are: an index resolved
+    # against a list that has since shifted would decrypt and use a
+    # different model's credential against this endpoint.
+    existing_model_id: Optional[str] = None
 
 
 @router.post("/config/probe-model")
@@ -2482,10 +2902,11 @@ async def probe_model(
     from app.services.model_probe import probe_context_window
 
     api_key = (body.api_key or "").strip()
-    if (api_key == "***" or not api_key) and body.existing_model_index is not None:
+    if (api_key == "***" or not api_key) and body.existing_model_id:
         cfg = await SystemConfig.get_config()
-        idx = body.existing_model_index
-        if 0 <= idx < len(cfg.available_models):
+        await _ensure_config_ids(cfg)
+        idx = _find_by_id(cfg.available_models, body.existing_model_id)
+        if idx != -1:
             stored = cfg.available_models[idx].get("api_key", "")
             if stored:
                 api_key = decrypt_value(stored) or ""
@@ -2755,8 +3176,17 @@ class CertificationProgressDetail(CertificationProgressItem):
     modules: dict
 
 
-@router.get("/certifications", response_model=list[CertificationProgressItem])
-async def list_certification_progress(user: User = Depends(get_current_user)):
+class CertificationProgressListResponse(BaseModel):
+    items: list[CertificationProgressItem]
+    total: int
+    capped: bool
+
+
+@router.get("/certifications", response_model=CertificationProgressListResponse)
+async def list_certification_progress(
+    limit: int = Query(default=500, ge=1, le=MAX_LIST_LIMIT),
+    user: User = Depends(get_current_user),
+):
     """List all users who have started the certification program with progress summary."""
     await _require_admin(user)
 
@@ -2765,7 +3195,7 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
 
     progresses = await CertificationProgress.find().to_list()
     if not progresses:
-        return []
+        return CertificationProgressListResponse(items=[], total=0, capped=False)
 
     user_ids = [p.user_id for p in progresses]
     users = await User.find({"user_id": {"$in": user_ids}}).to_list()
@@ -2795,7 +3225,9 @@ async def list_certification_progress(user: User = Depends(get_current_user)):
         )
 
     items.sort(key=lambda i: (i.modules_completed, i.total_xp), reverse=True)
-    return items
+    total = len(items)
+    capped = total > limit
+    return CertificationProgressListResponse(items=items[:limit], total=total, capped=capped)
 
 
 @router.get("/certifications/{user_id}", response_model=CertificationProgressDetail)

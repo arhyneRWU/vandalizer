@@ -133,6 +133,15 @@ def _can_delete_attachment(attachment: dict, user: User, is_support: bool) -> bo
     return attachment.get("uploaded_by") == user.user_id
 
 
+def _can_delete_message(message: dict, user: User) -> bool:
+    """Authors can delete their own messages; admins can delete any.
+    Deliberately tighter than attachments — a non-admin support agent
+    can't remove someone else's words from the record."""
+    if user.is_admin:
+        return True
+    return message.get("user_id") == user.user_id
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -241,20 +250,20 @@ async def list_tickets(
     effective_tag = tag if is_support else None
     effective_category = category if is_support else None
     if scope == "mine" or not is_support:
-        tickets = await support_service.list_tickets(
+        tickets, total = await support_service.list_tickets(
             user_id=user.user_id, status=status, priority=priority,
             classification=classification, tag=effective_tag,
             category=effective_category,
             search=search, limit=limit, offset=offset,
         )
     else:
-        tickets = await support_service.list_all_tickets(
+        tickets, total = await support_service.list_all_tickets(
             status=status, priority=priority, classification=classification,
             tag=effective_tag, category=effective_category, search=search,
             limit=limit, offset=offset,
         )
     tickets = [_view(t, is_support) for t in tickets]
-    return {"tickets": tickets}
+    return {"tickets": tickets, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/tickets/{ticket_uuid}")
@@ -347,6 +356,48 @@ async def edit_message(
         raise HTTPException(status_code=status_code, detail=error)
     if not result:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    return _view(result, is_support)
+
+
+@router.delete("/tickets/{ticket_uuid}/messages/{message_uuid}")
+async def delete_message(
+    ticket_uuid: str,
+    message_uuid: str,
+    user: User = Depends(get_current_user),
+):
+    """Delete a message. Authors can delete their own; admins can delete
+    any. Attachments uploaded with the message are removed too. Returns
+    the updated ticket payload."""
+    ticket_data = await support_service.get_ticket(ticket_uuid)
+    if not ticket_data:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    is_support = await _is_support_user(user)
+    if not _can_view_ticket(ticket_data, user, is_support):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    target = next(
+        (m for m in ticket_data.get("messages", []) if m["uuid"] == message_uuid),
+        None,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if not _can_delete_message(target, user):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete your own messages",
+        )
+
+    result, removed = await support_service.delete_message(
+        ticket_uuid=ticket_uuid,
+        message_uuid=message_uuid,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if removed is None:
+        # Race: message was already gone between the check and delete.
+        raise HTTPException(status_code=404, detail="Message not found")
     return _view(result, is_support)
 
 

@@ -14,47 +14,19 @@ import type {
 } from '../../api/admin'
 import * as auditApi from '../../api/audit'
 import { useAuth } from '../../hooks/useAuth'
-import { formatNumber, formatDuration } from './shared/format'
+import { useConfirm } from '../shared/useConfirm'
+import { useToast } from '../../contexts/ToastContext'
+import { downloadCSV, formatDate, formatDateTime, formatDuration, formatNumber } from './shared/format'
 import {
   StatusBadge, RoleBadge, KpiCard, UserAvatar, SortableHeader, SearchInput, ExportButton, TimeRangeSelector, type DayOption,
 } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function formatDateTime(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 type UserSortKey = 'tokens_total' | 'workflows_run' | 'conversations' | 'last_active' | 'name'
 
 function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void }) {
   const { user: currentUser } = useAuth()
+  const confirm = useConfirm()
+  const { toast } = useToast()
   const [data, setData] = useState<UserDetailResponse | null>(null)
   const [days, setDays] = useState(30)
   const [loading, setLoading] = useState(true)
@@ -62,12 +34,17 @@ function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void 
   const [savingRoles, setSavingRoles] = useState(false)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    getUserDetail(userId, days).then(setData).catch(e => setError(e?.message || 'Failed to load')).finally(() => setLoading(false))
+    getUserDetail(userId, days)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [userId, days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const prev = data?.previous_period
 
@@ -111,15 +88,42 @@ function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void 
             {(['is_admin', 'is_staff', 'is_examiner'] as const).map(role => {
               const label = role === 'is_admin' ? 'Admin' : role === 'is_staff' ? 'Staff' : 'Examiner'
               const active = !!data[role]
+              const isSelfAdmin = role === 'is_admin' && !!currentUser && currentUser.user_id === userId
+              const disabled = savingRoles || isSelfAdmin
               return (
                 <button
                   key={role}
-                  disabled={savingRoles}
+                  disabled={disabled}
+                  title={isSelfAdmin ? 'You cannot change your own Admin role. Ask another admin to do this to avoid locking yourself out.' : undefined}
                   onClick={async () => {
+                    if (isSelfAdmin) return
+                    const granting = !active
+                    const ok = await confirm({
+                      title: `${granting ? 'Grant' : 'Revoke'} ${label} role?`,
+                      message: role === 'is_admin' ? (
+                        <>
+                          {granting ? 'Grant' : 'Revoke'} the <strong>Admin</strong> role for{' '}
+                          <strong>{data.name || data.email || userId}</strong>?{' '}
+                          {granting
+                            ? 'They will be able to manage LLM credentials, retention policy, and platform-wide authentication configuration — the highest-privilege access in the product.'
+                            : 'They will immediately lose access to LLM credentials, retention policy, and platform-wide configuration.'}
+                        </>
+                      ) : (
+                        <>
+                          {granting ? 'Grant' : 'Revoke'} the <strong>{label}</strong> role for{' '}
+                          <strong>{data.name || data.email || userId}</strong>?
+                        </>
+                      ),
+                      confirmLabel: granting ? 'Grant' : 'Revoke',
+                      destructive: !granting,
+                    })
+                    if (!ok) return
                     setSavingRoles(true)
                     try {
                       await updateUserRoles(userId, { [role]: !active })
                       setData(prev => prev ? { ...prev, [role]: !active } : prev)
+                    } catch (e) {
+                      toast(`Failed to ${granting ? 'grant' : 'revoke'} ${label} role: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
                     } finally {
                       setSavingRoles(false)
                     }
@@ -129,10 +133,10 @@ function UserDrillDown({ userId, onBack }: { userId: string; onBack: () => void 
                     padding: '8px 16px', borderRadius: 'var(--ui-radius, 12px)',
                     border: active ? '2px solid #22c55e' : '2px solid #e5e7eb',
                     background: active ? '#f0fdf4' : '#fff',
-                    cursor: savingRoles ? 'wait' : 'pointer',
+                    cursor: disabled ? (isSelfAdmin ? 'not-allowed' : 'wait') : 'pointer',
                     fontSize: 13, fontWeight: 600,
                     color: active ? '#166534' : '#6b7280',
-                    opacity: savingRoles ? 0.6 : 1,
+                    opacity: disabled ? 0.6 : 1,
                   }}
                 >
                   <div style={{
@@ -397,19 +401,27 @@ function UserActivityHistory({ userId, email }: { userId: string; email: string 
 
 export function UsersTab() {
   const [users, setUsers] = useState<UserLeaderboardItem[]>([])
+  const [capped, setCapped] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: UserSortKey; dir: 'asc' | 'desc' }>({ key: 'tokens_total', dir: 'desc' })
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
   const [days, setDays] = useState<DayOption>('all')
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
+    setError(null)
     const arg = typeof days === 'number' ? days : undefined
-    getUserLeaderboard(arg).then(setUsers).catch(() => setUsers([])).finally(() => setLoading(false))
+    getUserLeaderboard(arg)
+      .then(res => { if (!cancelled) { setUsers(res.items); setCapped(res.capped) } })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load users') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const handleSort = (key: string) => {
     setSort(prev => ({
@@ -440,7 +452,7 @@ export function UsersTab() {
     return sorted
   }, [users, search, sort])
 
-  const maxTokens = users.length > 0 ? Math.max(...users.map(u => u.tokens_total), 1) : 1
+  const maxTokens = users.reduce((max, u) => Math.max(max, u.tokens_total), 1)
 
   const handleExport = () => {
     downloadCSV('users.csv',
@@ -474,8 +486,22 @@ export function UsersTab() {
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
           User Leaderboard ({filtered.length}) {days !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {days} days</span>}
         </div>
+        {capped && (
+          <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertCircle size={14} /> Showing the top {users.length} users by token usage — this list is truncated. Sorting and export cover only these loaded rows, not the full user base.
+          </div>
+        )}
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+            color: '#991b1b', fontSize: 13,
+          }}>
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
         {filtered.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users found.</div>
+          !error && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No users found.</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>

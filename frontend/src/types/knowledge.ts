@@ -4,7 +4,9 @@ export interface KnowledgeBase {
   uuid: string
   title: string
   description: string
-  status: 'empty' | 'building' | 'ready' | 'error'
+  // 'unavailable' appears only on reference rows whose source KB no longer
+  // resolves (deleted, retired from the catalog, or no longer shared).
+  status: 'empty' | 'building' | 'ready' | 'error' | 'unavailable'
   shared_with_team: boolean
   team_owned: boolean
   verified: boolean
@@ -63,6 +65,8 @@ export interface KnowledgeBaseSourceDetail extends KnowledgeBaseSource {
   max_crawl_pages: number
   parent_source_uuid?: string | null
   crawled_urls?: string[] | null
+  // Navigation pages the crawl followed for their links but did not embed.
+  skipped_urls?: string[] | null
   child_sources: KnowledgeBaseSource[]
   processed_at?: string | null
 }

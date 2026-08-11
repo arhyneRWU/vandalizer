@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     upload_dir: str = "../app/static/uploads"
     frontend_url: str = "http://localhost:5173"
     environment: str = "development"
+    # Explicit override for the Secure attribute on auth/CSRF cookies. Leave
+    # unset to derive it from environment + frontend_url (see
+    # use_secure_cookies): Secure in production, EXCEPT when the deployment is
+    # served over plain http:// — a browser silently drops Secure cookies on
+    # HTTP, so login would "succeed" and every following request would 401.
+    cookie_secure: bool | None = None
     # Human-readable name for THIS deployment, shown in the UI version footer so
     # users can tell environments apart (e.g. "U of I Prod", "National Trial Prod").
     # `environment` alone can't: both prods report "production". Falls back to
@@ -58,6 +64,11 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_from_email: str = ""
     resend_from_name: str = "Vandalizer"
+
+    # Master switch for scheduled promotional email (demo recapture drips,
+    # onboarding drips, inactivity nudges). Set false to silence all three
+    # regardless of per-user preferences — transactional mail is unaffected.
+    promotional_emails_enabled: bool = True
 
     # Encryption key for sensitive config values (API keys) stored in MongoDB.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -143,11 +154,24 @@ class Settings(BaseSettings):
     web_fetcher_max_html_chars: int = 8_000_000
     web_fetcher_timeout_seconds: int = 30
 
+    # Minimum characters of extracted content for an auto-discovered crawl page
+    # to be kept as a KB source. Pages below it are site navigation (Home,
+    # Topics, Agencies) — still followed for their links, never embedded. Does
+    # not apply to a URL the user pasted themselves; that is always kept.
+    kb_crawl_min_content_chars: int = 1200
+
     # Per-request read timeout (seconds) for the dedicated httpx client used by
     # workflow LLM calls. Reasoning models (e.g. gpt-oss) can think for a while
     # over a large document before emitting the first token, so this is set
     # generously above httpx's 5s default.
     workflow_llm_timeout_seconds: int = 120
+
+    # A document whose extracted text has a non-letter ratio above this is
+    # treated as a garbled extraction (broken font encoding / CID-mangled text
+    # layer) and chat over it carries a low-quality warning. Clean extractions
+    # measure ≤0.01 and garbled ones ~0.5, so anywhere in between works; 0.25
+    # leaves wide margin on both sides and tolerates notation-heavy documents.
+    extraction_max_nonletter_ratio: float = 0.25
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> "Settings":
@@ -176,3 +200,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def use_secure_cookies(self) -> bool:
+        """Whether auth/CSRF cookies should carry the Secure attribute.
+
+        COOKIE_SECURE, when set, always wins. Otherwise: Secure in production
+        unless frontend_url says the site is served over plain HTTP (an
+        air-gapped / intranet box without TLS) — Secure cookies never reach
+        the server there, which breaks login silently.
+        """
+        if self.cookie_secure is not None:
+            return self.cookie_secure
+        return self.is_production and not self.frontend_url.lower().startswith(
+            "http://"
+        )

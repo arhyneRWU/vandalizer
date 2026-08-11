@@ -5,6 +5,7 @@ import { pollStatus, retryExtraction } from '../../api/documents'
 import { SpreadsheetViewer } from './SpreadsheetViewer'
 import { DocumentSearchBar, useFindInDocumentHotkey } from './DocumentSearchBar'
 import { stageCopy } from '../../utils/processingStatus'
+import { normalizeWithMap } from '../../utils/textMatch'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
@@ -15,6 +16,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
 interface DocumentViewerProps {
   docUuid: string
   highlightTerms?: string[]
+  // 1-based page hint for highlightTerms (extraction source tracking). Used
+  // to prefer matches on that page, and to still jump the viewer there when
+  // the passage can't be text-matched at all.
+  highlightPage?: number | null
   onClearHighlights?: () => void
   processing?: boolean
   taskStatus?: string | null
@@ -112,7 +117,7 @@ function highlightHtmlSearch(root: HTMLElement, query: string): number {
   return count
 }
 
-export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights, processing, taskStatus }: DocumentViewerProps) {
+export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = null, onClearHighlights, processing, taskStatus }: DocumentViewerProps) {
   const [zoom, setZoom] = useState(2) // index into ZOOM_LEVELS, default 100%
   const [isPdf, setIsPdf] = useState<boolean | null>(null) // null = loading
   const [isSpreadsheet, setIsSpreadsheet] = useState(false)
@@ -127,6 +132,9 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
   const renderingRef = useRef(false)
   const [totalHighlights, setTotalHighlights] = useState(0)
   const [currentHighlight, setCurrentHighlight] = useState(0)
+  // True when highlight terms were requested but nothing matched — drives
+  // the explicit "not found" feedback instead of silently doing nothing.
+  const [highlightMiss, setHighlightMiss] = useState(false)
 
   // In-document find (Cmd/Ctrl+F)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -162,6 +170,9 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
     }
     return highlightTerms
   }, [searchOpen, searchQuery, highlightTerms])
+
+  // Page hint only applies to extraction-driven highlights, not the find bar.
+  const effectivePage = searchOpen ? null : highlightPage
 
   // Detect file type, then route to the right loader.
   //
@@ -296,6 +307,20 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
     if (isPdf !== true) return
     let cancelled = false
 
+    // SECURITY: this viewer is deliberately built on the raw pdfjs API only.
+    // CVE-2026-16633 (GHSA-hq66-cqwq-w95j, pdfjs-dist >=5.6.83 <6.2.108) lets a
+    // malicious PDF run arbitrary JS in the hosting origin -- but only through
+    // embedded-script execution, which lives in the annotation layer and the
+    // bundled viewer, not here. `enableScripting` is not a getDocument option;
+    // it is an AnnotationLayer/PDFViewer option defaulting to false in the API
+    // (`params.enableScripting === true`) and true in the bundled viewer. We
+    // render canvas + text layer ourselves, so pdf.sandbox is never loaded and
+    // that path is unreachable.
+    //
+    // Before adding an annotation layer, switching to `pdfjs-dist/web/pdf_viewer`,
+    // or wiring PDFScriptingManager: upgrade pdfjs-dist to >=6.2.108 first, and
+    // pass enableScripting: false explicitly. Uploaded PDFs are untrusted and
+    // are rendered in other team members' browsers, and no CSP is set.
     const loadTask = pdfjsLib.getDocument({
       url: inlineUrl,
       withCredentials: true,
@@ -334,11 +359,11 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
   // Re-apply highlights when terms change
   useEffect(() => {
     if (isPdf !== true || !pdfDocRef.current) return
-    applyHighlights(pdfDocRef.current, effectiveTerms).catch(err => {
+    applyHighlights(pdfDocRef.current, effectiveTerms, effectivePage).catch(err => {
       console.error('[DocumentViewer] applyHighlights failed:', err)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTerms])
+  }, [effectiveTerms, effectivePage])
 
   const renderAllPages = useCallback(async (doc: pdfjsLib.PDFDocumentProxy) => {
     if (renderingRef.current) return
@@ -400,13 +425,13 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
 
     // Apply highlights after rendering
     if (effectiveTerms.length > 0) {
-      applyHighlights(doc, effectiveTerms).catch(err => {
+      applyHighlights(doc, effectiveTerms, effectivePage).catch(err => {
         console.error('[DocumentViewer] applyHighlights failed:', err)
       })
     }
-  }, [zoomLevel, effectiveTerms])
+  }, [zoomLevel, effectiveTerms, effectivePage])
 
-  const applyHighlights = useCallback(async (doc: pdfjsLib.PDFDocumentProxy, terms: string[]) => {
+  const applyHighlights = useCallback(async (doc: pdfjsLib.PDFDocumentProxy, terms: string[], preferPage: number | null = null) => {
     const container = containerRef.current
     if (!container) return
 
@@ -416,6 +441,7 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
     if (terms.length === 0) {
       setTotalHighlights(0)
       setCurrentHighlight(0)
+      setHighlightMiss(false)
       return
     }
 
@@ -430,6 +456,9 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
     type CharRef = { itemIdx: number; localIdx: number } | null
 
     let matchCount = 0
+    // First match found on the hinted page — becomes the initial scroll
+    // target so a common value doesn't land the user on the wrong occurrence.
+    let preferredMatchIdx = -1
 
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i)
@@ -460,21 +489,24 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
           concat += ' '
         }
       }
-      const concatLower = concat.toLowerCase()
+      // Match in normalized space (case, unicode quotes/dashes, whitespace
+      // runs) and project hits back onto real char positions, so verbatim
+      // passages match even when the LLM and the PDF text layer disagree on
+      // punctuation encoding.
+      const { norm: concatNorm, map: normMap } = normalizeWithMap(concat)
 
       for (const term of terms) {
         if (!term) continue
-        // Collapse internal whitespace in the search term so multi-word values
-        // match regardless of exactly where the PDF broke the runs.
-        const termLower = term.toLowerCase().replace(/\s+/g, ' ').trim()
-        if (!termLower) continue
+        const needle = normalizeWithMap(term).norm
+        if (!needle) continue
 
         let from = 0
-        while (from < concatLower.length) {
-          const matchStart = concatLower.indexOf(termLower, from)
-          if (matchStart === -1) break
-          const matchEnd = matchStart + termLower.length
-          from = matchStart + 1
+        while (from < concatNorm.length) {
+          const normStart = concatNorm.indexOf(needle, from)
+          if (normStart === -1) break
+          from = normStart + 1
+          const matchStart = normMap[normStart]
+          const matchEnd = normMap[normStart + needle.length - 1] + 1
 
           // Gather the span of each item that is covered by this match.
           const perItem = new Map<number, { start: number; end: number }>()
@@ -531,6 +563,9 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
             overlay.appendChild(hl)
           }
 
+          if (preferPage != null && i === preferPage && preferredMatchIdx === -1) {
+            preferredMatchIdx = matchCount
+          }
           matchCount++
         }
       }
@@ -586,13 +621,36 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
 
     setTotalHighlights(matchCount)
     if (matchCount > 0) {
-      setCurrentHighlight(0)
+      setHighlightMiss(false)
+      const initialIdx = preferredMatchIdx >= 0 ? preferredMatchIdx : 0
+      setCurrentHighlight(initialIdx)
       // Double rAF ensures DOM layout is complete before scrolling
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => scrollToHighlightByIndex(0))
+        requestAnimationFrame(() => scrollToHighlightByIndex(initialIdx))
       })
+    } else {
+      // Nothing matched: say so instead of doing nothing, and at least jump
+      // to the source page when we know it.
+      setHighlightMiss(true)
+      if (preferPage != null) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => scrollToPage(preferPage))
+        })
+      }
     }
   }, [zoomLevel])
+
+  const scrollToPage = (pageNum: number) => {
+    const container = containerRef.current
+    if (!container) return
+    const wrapper = container.querySelector(`[data-page-num="${pageNum}"]`) as HTMLElement | null
+    const scrollParent = container.parentElement
+    if (!wrapper || !scrollParent) return
+    const targetRect = wrapper.getBoundingClientRect()
+    const parentRect = scrollParent.getBoundingClientRect()
+    const scrollTop = scrollParent.scrollTop + (targetRect.top - parentRect.top) - 20
+    scrollParent.scrollTo({ top: Math.max(0, scrollTop), behavior: 'smooth' })
+  }
 
   const scrollToHighlightByIndex = (index: number) => {
     const container = containerRef.current
@@ -658,19 +716,21 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
   }, [])
 
   // Re-apply DOCX highlights when the query changes or the rendered HTML
-  // is replaced (e.g. text re-poll after processing).
+  // is replaced (e.g. text re-poll after processing). effectiveTerms covers
+  // both the find bar and extraction-driven highlights.
   useEffect(() => {
     if (!isDocx) return
     const root = docxContentRef.current
     if (!root) return
-    const q = searchOpen ? searchQuery : ''
+    const q = effectiveTerms[0] ?? ''
     const count = highlightHtmlSearch(root, q)
     setDocxMatchCount(count)
     setDocxCurrentMatch(0)
+    setHighlightMiss(!!q && count === 0)
     if (count > 0) {
       requestAnimationFrame(() => scrollDocxMatch(0))
     }
-  }, [isDocx, searchOpen, searchQuery, docxText, scrollDocxMatch])
+  }, [isDocx, effectiveTerms, docxText, scrollDocxMatch])
 
   const goToDocxMatch = useCallback((direction: 'next' | 'prev') => {
     if (docxMatchCount === 0) return
@@ -815,6 +875,33 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
             onClose={closeSearch}
             autoFocus
           />
+        )}
+        {!searchOpen && highlightMiss && highlightTerms.length > 0 && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '8px 12px', fontSize: 13, color: '#92400e',
+              backgroundColor: '#fffbeb', borderBottom: '1px solid #fde68a',
+              flexShrink: 0,
+            }}
+          >
+            <AlertCircle size={15} style={{ flexShrink: 0 }} />
+            <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+              &ldquo;{highlightTerms[0]}&rdquo; not found in this document
+            </span>
+            {onClearHighlights && (
+              <button
+                type="button"
+                onClick={onClearHighlights}
+                aria-label="Dismiss"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#92400e', display: 'flex', padding: 2 }}
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
         )}
         <div style={{
           flex: 1, overflow: 'auto', backgroundColor: '#fff', position: 'relative',
@@ -1031,8 +1118,9 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
       }}>
         <div ref={containerRef} style={{ paddingBottom: 20 }} />
 
-        {/* Highlight navigation bar */}
-        {!searchOpen && totalHighlights > 0 && (
+        {/* Highlight navigation bar — also shown in a "not found" state so a
+            failed source lookup gives explicit feedback instead of nothing. */}
+        {!searchOpen && (totalHighlights > 0 || (highlightMiss && highlightTerms.length > 0)) && (
           <div style={{
             position: 'sticky',
             bottom: 12,
@@ -1051,50 +1139,66 @@ export function DocumentViewer({ docUuid, highlightTerms = [], onClearHighlights
             boxShadow: '0 2px 12px rgba(0,0,0,0.12)',
             zIndex: 100,
           }}>
-            <button
-              type="button"
-              onClick={() => goToHighlight('prev')}
+            {totalHighlights > 0 && (
+              <button
+                type="button"
+                onClick={() => goToHighlight('prev')}
+                style={{
+                  ...btnStyle,
+                  width: 34, height: 34,
+                  border: 'none',
+                  background: 'none',
+                }}
+                title="Previous highlight"
+                aria-label="Previous highlight"
+              >
+                <ChevronLeft size={18} />
+              </button>
+            )}
+            <div
+              role="status"
+              aria-live="polite"
               style={{
-                ...btnStyle,
-                width: 34, height: 34,
-                border: 'none',
-                background: 'none',
+                flex: 1,
+                textAlign: 'center',
+                fontSize: 14,
+                color: '#374151',
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
               }}
-              title="Previous highlight"
-              aria-label="Previous highlight"
             >
-              <ChevronLeft size={18} />
-            </button>
-            <div style={{
-              flex: 1,
-              textAlign: 'center',
-              fontSize: 14,
-              color: '#374151',
-              overflow: 'hidden',
-              whiteSpace: 'nowrap',
-              textOverflow: 'ellipsis',
-            }}>
               <span style={{ fontWeight: 700 }}>
                 &ldquo;{effectiveTerms[0]}&rdquo;
               </span>
-              <span style={{ marginLeft: 6, color: '#6b7280', fontWeight: 400 }}>
-                {currentHighlight + 1} of {totalHighlights}
-              </span>
+              {totalHighlights > 0 ? (
+                <span style={{ marginLeft: 6, color: '#6b7280', fontWeight: 400 }}>
+                  {currentHighlight + 1} of {totalHighlights}
+                </span>
+              ) : (
+                <span style={{ marginLeft: 6, color: '#b45309', fontWeight: 500 }}>
+                  {effectivePage != null
+                    ? `passage not matched — showing page ${effectivePage}`
+                    : 'not found in this document'}
+                </span>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={() => goToHighlight('next')}
-              style={{
-                ...btnStyle,
-                width: 34, height: 34,
-                border: 'none',
-                background: 'none',
-              }}
-              title="Next highlight"
-              aria-label="Next highlight"
-            >
-              <ChevronRight size={18} />
-            </button>
+            {totalHighlights > 0 && (
+              <button
+                type="button"
+                onClick={() => goToHighlight('next')}
+                style={{
+                  ...btnStyle,
+                  width: 34, height: 34,
+                  border: 'none',
+                  background: 'none',
+                }}
+                title="Next highlight"
+                aria-label="Next highlight"
+              >
+                <ChevronRight size={18} />
+              </button>
+            )}
             {onClearHighlights && (
               <button
                 type="button"

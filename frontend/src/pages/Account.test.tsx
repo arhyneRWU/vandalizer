@@ -8,7 +8,8 @@ const mockRefreshUser = vi.fn()
 
 // Stable references: Account's mount effect depends on `user`, so a fresh
 // object each render would re-run the effect and clobber typed input.
-const mockUser = { user_id: 'testuser', email: 'old@example.com', name: 'Test User', is_admin: false }
+const mockUser = { user_id: 'testuser', email: 'old@example.com', name: 'Test User', is_admin: false, sso_provider: null as string | null }
+const mockSsoUser = { ...mockUser, sso_provider: 'saml' }
 const mockAuthValue = { user: mockUser, refreshUser: mockRefreshUser }
 
 vi.mock('../hooks/useAuth', () => ({
@@ -31,6 +32,7 @@ vi.mock('../api/auth', () => ({
 }))
 
 beforeEach(() => {
+  mockAuthValue.user = mockUser
   mockUpdateProfile.mockReset()
   mockRefreshUser.mockReset()
   mockGetApiTokenStatus.mockReset()
@@ -89,5 +91,24 @@ describe('Account — email change re-authentication', () => {
     fireEvent.change(screen.getByLabelText('Current Password'), { target: { value: 'wrong' } })
     fireEvent.click(screen.getByRole('button', { name: /save profile/i }))
     await waitFor(() => expect(screen.getByText('Incorrect password.')).toBeInTheDocument())
+  })
+})
+
+describe('Account — SSO-managed email', () => {
+  it('disables the email field and explains why', () => {
+    mockAuthValue.user = mockSsoUser
+    render(<Account />)
+    expect(screen.getByLabelText('Email')).toBeDisabled()
+    expect(screen.getByText(/managed by your sign-in provider/i)).toBeInTheDocument()
+  })
+
+  it('omits email from the save payload for SSO-linked accounts', async () => {
+    mockAuthValue.user = mockSsoUser
+    mockUpdateProfile.mockResolvedValueOnce({})
+    render(<Account />)
+    fireEvent.change(screen.getByLabelText('Display Name'), { target: { value: 'Renamed' } })
+    fireEvent.click(screen.getByRole('button', { name: /save profile/i }))
+    await waitFor(() => expect(mockUpdateProfile).toHaveBeenCalledWith({ name: 'Renamed' }))
+    expect(screen.queryByLabelText('Current Password')).not.toBeInTheDocument()
   })
 })

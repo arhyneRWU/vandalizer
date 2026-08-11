@@ -39,6 +39,9 @@ def _make_user(**overrides):
         "is_examiner": False,
         "current_team": None,
         "password_hash": hash_password("correct-password"),
+        # Explicit None: a bare MagicMock attribute is truthy and would trip
+        # the provider-managed-email guard in update_profile.
+        "sso_provider": None,
         "token_version": 0,
         "is_demo_user": False,
         "demo_status": None,
@@ -536,6 +539,52 @@ class TestUpdateProfile:
 
         assert resp.status_code == 400
         assert user.email == "test@example.com"
+
+    @pytest.mark.asyncio
+    async def test_update_profile_email_sso_hybrid_rejected(self, client):
+        """SSO-linked accounts that ALSO have a local password can't change
+        email: the next SSO login would silently sync it back from the IdP."""
+        user = _make_user(sso_provider="saml")
+        csrf_token = secrets.token_urlsafe(32)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.put(
+                "/api/auth/profile",
+                json={"email": "new@example.com", "current_password": "correct-password"},
+                cookies={"access_token": "valid-token", "csrf_token": csrf_token},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 400
+        assert user.email == "test@example.com"
+        user.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_profile_name_allowed_for_sso_hybrid(self, client):
+        """Locking the email must not lock the rest of the profile."""
+        user = _make_user(sso_provider="saml")
+        csrf_token = secrets.token_urlsafe(32)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.auth._user_response", new_callable=AsyncMock, return_value=_MOCK_USER_RESPONSE_DATA),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.put(
+                "/api/auth/profile",
+                json={"name": "New Name"},
+                cookies={"access_token": "valid-token", "csrf_token": csrf_token},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 200
+        assert user.name == "New Name"
+        user.save.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_update_profile_invalid_email_rejected(self, client):

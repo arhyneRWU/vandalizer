@@ -262,6 +262,21 @@ def _remove_images_from_markdown(markdown_text: str) -> str:
     return text.strip()
 
 
+def _notify_document_processing_failed(db, document_uuid: str, message: str) -> None:
+    """Tell the uploader their document never became readable.
+
+    Both callers swallow the exception and return "" rather than re-raising, so
+    the document simply sits in the file list with an error state nobody is told
+    about — the bell is the only signal the uploader gets.
+    """
+    from app.services.failure_notifications import notify_document_failed
+
+    doc = db.smart_document.find_one(
+        {"uuid": document_uuid}, {"uuid": 1, "title": 1, "user_id": 1},
+    )
+    notify_document_failed(db, doc=doc, error=message)
+
+
 @celery_app.task(
     bind=True,
     name="tasks.document.extraction",
@@ -304,6 +319,10 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
 
         raw_text = ""
         text_markers: list[dict] = []
+        # Only paginated formats get a page count. Marker count is not a
+        # substitute: XLSX markers are sheets, and PyMuPDF emits no marker for
+        # a page that has no text layer and no form fields.
+        num_pages: int | None = None
 
         if extension == "xlsx":
             from app.services.document_readers import extract_text_with_markers
@@ -327,8 +346,15 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
                     raw_text = (raw_text or "").rstrip() + "\n\n" + extras
 
         elif extension == "pdf":
-            from app.services.document_readers import extract_text_with_markers
+            from app.services.document_readers import (
+                extract_text_with_markers,
+                pdf_page_count,
+            )
             raw_text, text_markers = extract_text_with_markers(str(absolute_path), extension)
+            # Read from the PDF rather than the markers so the count is exact on
+            # both the OCR and the direct-extraction path. Returns 0 if the file
+            # can't be opened, which is the same as the model default.
+            num_pages = pdf_page_count(str(absolute_path))
 
         else:
             raw_text = extract_text_from_file(str(absolute_path), extension)
@@ -337,6 +363,9 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         # pre-flight oversize check is accurate.
         from app.services.context_budget import count_tokens
         token_count = count_tokens(raw_text) if raw_text else 0
+
+        from app.utils.extraction_quality import nonletter_ratio
+        extraction_ratio = nonletter_ratio(raw_text) if raw_text else None
 
         # An "extracted successfully but got zero text" outcome is almost always
         # a silent OCR/extraction failure (image-only PDF, OCR endpoint down,
@@ -355,6 +384,10 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
                         "processing": False,
                         "token_count": 0,
                         "text_markers": [],
+                        "extraction_nonletter_ratio": None,
+                        # Don't leave a stale page count beside empty text when
+                        # a previously-good document is reprocessed.
+                        "num_pages": 0,
                         "task_status": "error",
                         "error_message": (
                             "We couldn't extract any text from this document. "
@@ -368,17 +401,20 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
             )
             return ""
 
+        update_fields: dict = {
+            "raw_text": raw_text,
+            "processing": False,
+            "token_count": token_count,
+            "text_markers": text_markers,
+            "extraction_nonletter_ratio": extraction_ratio,
+            "error_message": None,
+        }
+        if num_pages is not None:
+            update_fields["num_pages"] = num_pages
+
         db.smart_document.update_one(
             {"uuid": document_uuid},
-            {
-                "$set": {
-                    "raw_text": raw_text,
-                    "processing": False,
-                    "token_count": token_count,
-                    "text_markers": text_markers,
-                    "error_message": None,
-                }
-            },
+            {"$set": update_fields},
         )
 
         return raw_text
@@ -392,35 +428,41 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
             "Source file missing for document %s — skipping extraction: %s",
             document_uuid, e,
         )
+        message = (
+            "The uploaded file is no longer available "
+            "(it may have been deleted during processing)."
+        )
         db.smart_document.update_one(
             {"uuid": document_uuid},
             {
                 "$set": {
                     "raw_text": "",
                     "processing": False,
+                    "extraction_nonletter_ratio": None,
                     "task_status": "error",
-                    "error_message": (
-                        "The uploaded file is no longer available "
-                        "(it may have been deleted during processing)."
-                    ),
+                    "error_message": message,
                 }
             },
         )
+        _notify_document_processing_failed(db, document_uuid, message)
         return ""
 
     except Exception as e:
         logger.exception("Error extracting text from document %s", document_uuid)
+        message = f"Text extraction failed: {str(e)[:300]}"
         db.smart_document.update_one(
             {"uuid": document_uuid},
             {
                 "$set": {
                     "raw_text": "",
                     "processing": False,
+                    "extraction_nonletter_ratio": None,
                     "task_status": "error",
-                    "error_message": f"Text extraction failed: {str(e)[:300]}",
+                    "error_message": message,
                 }
             },
         )
+        _notify_document_processing_failed(db, document_uuid, message)
         return ""
 
 
@@ -590,6 +632,14 @@ def _check_folder_watch_automations(db, document_uuid: str) -> None:
                 _run_automation_extraction(db, auto, action_id, doc)
             except Exception as e:
                 logger.error("Extraction automation '%s' failed: %s", auto.get("name"), e)
+                from app.services.failure_notifications import notify_automation_failed
+
+                notify_automation_failed(
+                    db,
+                    automation=auto,
+                    error=e,
+                    detail=f'Extraction on "{doc.get("title") or "a document"}" failed.',
+                )
 
         else:
             logger.info("Skipping automation %s: unsupported action_type '%s'", auto.get("name"), action_type)

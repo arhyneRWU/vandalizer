@@ -1286,3 +1286,60 @@ async def test_notify_examiners_swallows_errors(mock_name, mock_user_cls):
     mock_user_cls.find_one = AsyncMock(side_effect=RuntimeError("db down"))
 
     await _notify_examiners(_make_verification_request())
+
+
+# ---------------------------------------------------------------------------
+# get_visible_verified_item_ids — kind filter
+# ---------------------------------------------------------------------------
+
+
+def _make_verified_library_item(item_id, kind):
+    item = MagicMock()
+    item.item_id = item_id
+    item.kind = MagicMock(value=kind)
+    return item
+
+
+@pytest.mark.asyncio
+@patch(f"{MODULE}.VerifiedItemMetadata")
+@patch(f"{MODULE}.LibraryItem")
+async def test_get_visible_verified_item_ids_no_kind(mock_li, mock_vim):
+    """Without a kind, all verified items count and the query has no kind key."""
+    from app.services.verification_service import get_visible_verified_item_ids
+
+    chain = MagicMock()
+    chain.to_list = AsyncMock(return_value=[
+        _make_verified_library_item("kb-1", "knowledge_base"),
+        _make_verified_library_item("wf-1", "workflow"),
+    ])
+    mock_li.find.return_value = chain
+    meta_chain = MagicMock()
+    meta_chain.to_list = AsyncMock(return_value=[])
+    mock_vim.find_all.return_value = meta_chain
+
+    result = await get_visible_verified_item_ids()
+
+    assert result == {"kb-1", "wf-1"}
+    assert mock_li.find.call_args[0][0] == {"verified": True}
+
+
+@pytest.mark.asyncio
+@patch(f"{MODULE}.VerifiedItemMetadata")
+@patch(f"{MODULE}.LibraryItem")
+async def test_get_visible_verified_item_ids_kind_filter(mock_li, mock_vim):
+    """A kind restricts the DB query so single-kind views count only that kind."""
+    from app.services.verification_service import get_visible_verified_item_ids
+
+    chain = MagicMock()
+    chain.to_list = AsyncMock(return_value=[
+        _make_verified_library_item("kb-1", "knowledge_base"),
+    ])
+    mock_li.find.return_value = chain
+    meta_chain = MagicMock()
+    meta_chain.to_list = AsyncMock(return_value=[])
+    mock_vim.find_all.return_value = meta_chain
+
+    result = await get_visible_verified_item_ids(kind="knowledge_base")
+
+    assert result == {"kb-1"}
+    assert mock_li.find.call_args[0][0] == {"verified": True, "kind": "knowledge_base"}

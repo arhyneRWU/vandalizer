@@ -8,54 +8,40 @@ import {
 } from 'recharts'
 import { getEmailAnalytics } from '../../api/admin'
 import type { EmailAnalyticsResponse } from '../../api/admin'
-import { formatNumber } from './shared/format'
+import { downloadCSV, formatDateTime, formatNumber } from './shared/format'
 import {
   KpiCard, ExportButton, TimeRangeSelector,
 } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDateTime(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 export function EmailAnalyticsTab() {
   const [data, setData] = useState<EmailAnalyticsResponse | null>(null)
   const [days, setDays] = useState(30)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
+    setError(null)
     getEmailAnalytics(days)
-      .then(d => setData(d))
-      .finally(() => setLoading(false))
+      .then(d => { if (!cancelled) setData(d) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load email analytics') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   if (loading && !data) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading email analytics...</div>
+  }
+  if (error && !data) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>
+        <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+        <div style={{ fontSize: 14, color: '#374151' }}>{error}</div>
+      </div>
+    )
   }
   if (!data) return null
 
@@ -94,6 +80,15 @@ export function EmailAnalyticsTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {error && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '10px 16px', borderRadius: 'var(--ui-radius, 12px)',
+          background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 13,
+        }}>
+          <AlertCircle size={14} /> {error}
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <TimeRangeSelector value={days} onChange={v => setDays(typeof v === 'number' ? v : 30)} onRefresh={load} />
         <div style={{ flex: 1 }} />

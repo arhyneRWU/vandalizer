@@ -1,6 +1,7 @@
 """SystemConfig model  - singleton for runtime-editable settings."""
 
 import datetime
+import uuid
 from copy import deepcopy
 from typing import Optional
 
@@ -106,6 +107,23 @@ DEFAULT_EXTRACTION_CONFIG = {
 }
 
 
+def ensure_stable_ids(entries: list[dict]) -> bool:
+    """Assign a stable uuid4 `id` to any dict in `entries` that lacks one.
+
+    Mutates the dicts in place (so callers pass e.g. `cfg.available_models` or
+    `cfg.oauth_providers` directly). An existing `id` is never touched, so IDs
+    stay stable once assigned — calling this repeatedly on already-backfilled
+    entries is a no-op. Returns True if any entry was changed, so callers know
+    whether the config needs to be persisted.
+    """
+    changed = False
+    for entry in entries:
+        if isinstance(entry, dict) and not entry.get("id"):
+            entry["id"] = str(uuid.uuid4())
+            changed = True
+    return changed
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge override into base, modifying base in place."""
     for key, value in override.items():
@@ -135,6 +153,17 @@ class SystemConfig(Document):
 
     ocr_endpoint: str = ""
     ocr_api_key: str = ""
+    # Request/response contract the OCR endpoint speaks — "raw" (POST a file,
+    # body is the text) or "docling" (docling-serve convert API). See
+    # app/services/ocr_client.py. Existing installs default to "raw", which is
+    # the behavior they already had.
+    ocr_provider: str = "raw"
+    # Provider-specific conversion options (docling: do_ocr, ocr_engine,
+    # ocr_lang, table_mode, picture_description_api, ...) sent with every
+    # conversion request.
+    ocr_options: dict = {}
+    ocr_async: bool = False
+    ocr_timeout_seconds: int = 120
     llm_endpoint: str = ""
     available_models: list[dict] = []
     # Name of the model to use when no explicit model is chosen. Empty = fall

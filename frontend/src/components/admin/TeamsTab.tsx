@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeft, Building2, CheckCircle2, ChevronDown, ChevronUp, Cpu, FileText, MessageSquare, Plus, Users, XCircle,
+  AlertCircle, ArrowLeft, Building2, CheckCircle2, ChevronDown, ChevronUp, Cpu, FileText, MessageSquare, Plus, Users, XCircle,
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 
 import { useConfirm } from '../shared/useConfirm'
+import { nameWithoutEmail } from '../../lib/displayName'
+import { useToast } from '../../contexts/ToastContext'
 import { getTeamMembers } from '../../api/teams'
 import {
   getTeamLeaderboard,
@@ -17,42 +19,10 @@ import {
   type TeamDetailResponse,
   type AdminTeamItem, type IsolatedUserItem,
 } from '../../api/admin'
-import { formatNumber, formatDuration } from './shared/format'
+import { downloadCSV, formatDate, formatDateTime, formatDuration, formatNumber } from './shared/format'
 import {
   StatusBadge, RoleBadge, KpiCard, UserAvatar, SortableHeader, SearchInput, ExportButton, TimeRangeSelector, type DayOption,
 } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function formatDateTime(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 type TeamSortKey = 'name' | 'tokens_total' | 'workflows_completed' | 'active_users' | 'member_count' | 'avg_latency_ms'
 
@@ -63,15 +33,20 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
     setError(null)
-    getTeamDetail(teamId, days).then(setData).catch(e => setError(e?.message || 'Failed to load')).finally(() => setLoading(false))
+    getTeamDetail(teamId, days)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [teamId, days])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const prev = data?.previous_period
-  const maxMemberTokens = data?.members.length ? Math.max(...data.members.map(m => m.tokens_total), 1) : 1
+  const maxMemberTokens = (data?.members ?? []).reduce((max, m) => Math.max(max, m.tokens_total), 1)
 
   if (loading && !data) return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading team details...</div>
   if (error) return (
@@ -112,7 +87,7 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
             d.workflows_completed, d.workflows_failed, d.tokens_in, d.tokens_out, d.active_users,
           ])
           const memberRows = data.members.map(m => [
-            m.name || m.user_id, m.email || '', m.role,
+            nameWithoutEmail(m.name, m.email) || m.user_id, m.email || '', m.role,
             m.tokens_total, m.workflows_run, m.conversations, m.last_active,
           ])
           downloadCSV(
@@ -189,9 +164,9 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
                 <tr key={m.user_id} style={{ borderBottom: '1px solid #f3f4f6' }}>
                   <td style={{ padding: '10px 16px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <UserAvatar name={m.name || m.email} />
+                      <UserAvatar name={nameWithoutEmail(m.name, m.email) || m.email} />
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 500 }}>{m.name || 'Unknown'}</div>
+                        <div style={{ fontSize: 14, fontWeight: 500 }}>{nameWithoutEmail(m.name, m.email) || 'Unknown'}</div>
                         <div style={{ fontSize: 12, color: '#6b7280' }}>{m.email || m.user_id}</div>
                       </div>
                     </div>
@@ -255,11 +230,14 @@ function TeamDrillDown({ teamId, onBack }: { teamId: string; onBack: () => void 
 
 export function TeamsTab() {
   const confirm = useConfirm()
+  const { toast } = useToast()
   const [subTab, setSubTab] = useState<'manage' | 'stats' | 'isolated'>('manage')
 
   // ── Manage sub-tab state ──────────────────────────────────────────────────
   const [allTeams, setAllTeams] = useState<AdminTeamItem[]>([])
+  const [allTeamsCapped, setAllTeamsCapped] = useState(false)
   const [loadingAll, setLoadingAll] = useState(true)
+  const [allTeamsError, setAllTeamsError] = useState<string | null>(null)
   const [newTeamName, setNewTeamName] = useState('')
   const [creating, setCreating] = useState(false)
   const [expandedTeamUuid, setExpandedTeamUuid] = useState<string | null>(null)
@@ -271,7 +249,9 @@ export function TeamsTab() {
 
   // ── Stats sub-tab state ───────────────────────────────────────────────────
   const [statsTeams, setStatsTeams] = useState<TeamLeaderboardItem[]>([])
+  const [statsCapped, setStatsCapped] = useState(false)
   const [loadingStats, setLoadingStats] = useState(false)
+  const [statsError, setStatsError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: TeamSortKey; dir: 'asc' | 'desc' }>({ key: 'tokens_total', dir: 'desc' })
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null)
@@ -279,8 +259,10 @@ export function TeamsTab() {
 
   // ── Isolated sub-tab state ───────────────────────────────────────────────
   const [isolated, setIsolated] = useState<IsolatedUserItem[]>([])
+  const [isolatedCapped, setIsolatedCapped] = useState(false)
   const [isolatedLoaded, setIsolatedLoaded] = useState(false)
   const [loadingIsolated, setLoadingIsolated] = useState(false)
+  const [isolatedError, setIsolatedError] = useState<string | null>(null)
   const [assignTargets, setAssignTargets] = useState<Record<string, string>>({})
   const [assignLoading, setAssignLoading] = useState<Record<string, boolean>>({})
 
@@ -288,39 +270,67 @@ export function TeamsTab() {
   const [addUserErrors, setAddUserErrors] = useState<Record<string, string>>({})
 
   const refreshAllTeams = useCallback(() => {
+    let cancelled = false
     setLoadingAll(true)
-    adminListAllTeams().then(t => {
-      setAllTeams(t)
-      const def = t.find(x => x.is_default)
+    setAllTeamsError(null)
+    adminListAllTeams().then(res => {
+      if (cancelled) return
+      setAllTeams(res.items)
+      setAllTeamsCapped(res.capped)
+      const def = res.items.find(x => x.is_default)
       if (def) setDefaultTeamUuid(def.uuid)
-    }).catch(() => setAllTeams([])).finally(() => setLoadingAll(false))
+    }).catch(e => { if (!cancelled) setAllTeamsError(e?.message || 'Failed to load teams') })
+      .finally(() => { if (!cancelled) setLoadingAll(false) })
+    return () => { cancelled = true }
   }, [])
 
   const refreshIsolated = useCallback(() => {
+    let cancelled = false
     setLoadingIsolated(true)
-    getIsolatedUsers().then(users => {
-      setIsolated(users)
+    setIsolatedError(null)
+    getIsolatedUsers().then(res => {
+      if (cancelled) return
+      setIsolated(res.items)
+      setIsolatedCapped(res.capped)
       setIsolatedLoaded(true)
-    }).catch(() => setIsolatedLoaded(true)).finally(() => setLoadingIsolated(false))
+    }).catch(e => {
+      if (cancelled) return
+      setIsolatedError(e?.message || 'Failed to load isolated users')
+      setIsolatedLoaded(true)
+    }).finally(() => { if (!cancelled) setLoadingIsolated(false) })
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
-    refreshAllTeams()
-    refreshIsolated()  // Load eagerly so badge shows immediately
+    const cancelAllTeams = refreshAllTeams()
+    const cancelIsolated = refreshIsolated()  // Load eagerly so badge shows immediately
+    let cfgCancelled = false
     getSystemConfig().then(cfg => {
+      if (cfgCancelled) return
       if (cfg.default_team_id) setDefaultTeamUuid(cfg.default_team_id)
     }).catch(() => {})
+    return () => {
+      cancelAllTeams()
+      cancelIsolated()
+      cfgCancelled = true
+    }
   }, [refreshAllTeams, refreshIsolated])
 
   const refreshStats = useCallback(() => {
+    let cancelled = false
     setLoadingStats(true)
+    setStatsError(null)
     const arg = typeof statsDays === 'number' ? statsDays : undefined
-    getTeamLeaderboard(arg).then(setStatsTeams).catch(() => setStatsTeams([])).finally(() => setLoadingStats(false))
+    getTeamLeaderboard(arg)
+      .then(res => { if (!cancelled) { setStatsTeams(res.items); setStatsCapped(res.capped) } })
+      .catch(e => { if (!cancelled) setStatsError(e?.message || 'Failed to load team stats') })
+      .finally(() => { if (!cancelled) setLoadingStats(false) })
+    return () => { cancelled = true }
   }, [statsDays])
 
   useEffect(() => {
     if (subTab === 'stats') {
-      refreshStats()
+      return refreshStats()
     }
   }, [subTab, refreshStats])
 
@@ -331,6 +341,8 @@ export function TeamsTab() {
       await adminCreateTeam(newTeamName.trim())
       setNewTeamName('')
       refreshAllTeams()
+    } catch (e) {
+      toast(`Failed to create team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setCreating(false)
     }
@@ -342,6 +354,8 @@ export function TeamsTab() {
       await updateSystemConfig({ default_team_id: teamUuid === defaultTeamUuid ? '' : teamUuid })
       setDefaultTeamUuid(teamUuid === defaultTeamUuid ? '' : teamUuid)
       refreshAllTeams()
+    } catch (e) {
+      toast(`Failed to update default team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setSettingDefault(false)
     }
@@ -391,11 +405,15 @@ export function TeamsTab() {
       destructive: true,
     })
     if (!ok) return
-    await adminRemoveUserFromTeam(teamUuid, userId)
-    const members = await getTeamMembers(teamUuid)
-    setTeamMembers(prev => ({ ...prev, [teamUuid]: members }))
-    refreshAllTeams()
-    refreshIsolated()
+    try {
+      await adminRemoveUserFromTeam(teamUuid, userId)
+      const members = await getTeamMembers(teamUuid)
+      setTeamMembers(prev => ({ ...prev, [teamUuid]: members }))
+      refreshAllTeams()
+      refreshIsolated()
+    } catch (e) {
+      toast(`Failed to remove ${userName} from team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
+    }
   }
 
   const handleAssignIsolated = async (userId: string) => {
@@ -405,8 +423,8 @@ export function TeamsTab() {
     try {
       await adminAddUserToTeam(teamUuid, userId)
       setIsolated(prev => prev.filter(u => u.user_id !== userId))
-    } catch {
-      // assignment failed — leave user in list
+    } catch (e) {
+      toast(`Failed to assign user to team: ${e instanceof Error ? e.message : 'unknown error'}`, 'error')
     } finally {
       setAssignLoading(prev => ({ ...prev, [userId]: false }))
     }
@@ -435,7 +453,7 @@ export function TeamsTab() {
       return sort.dir === 'asc' ? cmp : -cmp
     })
   }, [statsTeams, search, sort])
-  const maxTokens = statsTeams.length > 0 ? Math.max(...statsTeams.map(t => t.tokens_total), 1) : 1
+  const maxTokens = statsTeams.reduce((max, t) => Math.max(max, t.tokens_total), 1)
 
   if (selectedTeamId) {
     return <TeamDrillDown teamId={selectedTeamId} onBack={() => setSelectedTeamId(null)} />
@@ -516,10 +534,24 @@ export function TeamsTab() {
                 Click a team to manage its members. Star to set as the default for new users.
               </span>
             </div>
+            {allTeamsCapped && (
+              <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertCircle size={14} /> Showing the first {allTeams.length} teams only — there are more teams than fit here, and this view has no way to reach them yet.
+              </div>
+            )}
+            {allTeamsError && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                color: '#991b1b', fontSize: 13,
+              }}>
+                <AlertCircle size={14} /> {allTeamsError}
+              </div>
+            )}
             {loadingAll ? (
               <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>Loading...</div>
             ) : allTeams.length === 0 ? (
-              <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>No teams yet.</div>
+              !allTeamsError && <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>No teams yet.</div>
             ) : allTeams.map(team => (
               <div key={team.uuid} style={{ borderBottom: '1px solid #f3f4f6' }}>
                 {/* Team row */}
@@ -611,7 +643,7 @@ export function TeamsTab() {
                         {(teamMembers[team.uuid] || []).map(m => (
                           <div key={m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px', background: '#fff', borderRadius: 6, border: '1px solid #f3f4f6' }}>
                             <div style={{ flex: 1 }}>
-                              <span style={{ fontSize: 13, fontWeight: 500 }}>{m.name || m.user_id}</span>
+                              <span style={{ fontSize: 13, fontWeight: 500 }}>{nameWithoutEmail(m.name, m.email) || m.user_id}</span>
                               {m.email && <span style={{ fontSize: 12, color: '#9ca3af', marginLeft: 8 }}>{m.email}</span>}
                             </div>
                             <span style={{
@@ -660,10 +692,24 @@ export function TeamsTab() {
             <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 15, fontWeight: 600 }}>
               Team Leaderboard ({filteredStats.length}) {statsDays !== 'all' && <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 400 }}>· last {statsDays} days</span>}
             </div>
+            {statsCapped && (
+              <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertCircle size={14} /> Showing the top {statsTeams.length} teams by token usage — this list is truncated. Sorting and export cover only these loaded rows, not every team.
+              </div>
+            )}
+            {statsError && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                color: '#991b1b', fontSize: 13,
+              }}>
+                <AlertCircle size={14} /> {statsError}
+              </div>
+            )}
             {loadingStats ? (
               <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading...</div>
             ) : filteredStats.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No teams found.</div>
+              !statsError && <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No teams found.</div>
             ) : (
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
@@ -714,16 +760,32 @@ export function TeamsTab() {
           <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb', fontSize: 14, fontWeight: 600 }}>
             Isolated Users (only on their personal team) ({isolated.length})
           </div>
+          {isolatedCapped && (
+            <div style={{ padding: '10px 20px', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 13, color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <AlertCircle size={14} /> Showing the first {isolated.length} isolated users only — there are more than fit here.
+            </div>
+          )}
+          {isolatedError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+              color: '#991b1b', fontSize: 13,
+            }}>
+              <AlertCircle size={14} /> {isolatedError}
+            </div>
+          )}
           {loadingIsolated && !isolatedLoaded ? (
             <div style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>Loading...</div>
           ) : isolated.length === 0 ? (
-            <div style={{ padding: 32, textAlign: 'center', color: '#6b7280' }}>
-              No isolated users. Everyone is on at least one shared team.
-            </div>
+            !isolatedError && (
+              <div style={{ padding: 32, textAlign: 'center', color: '#6b7280' }}>
+                No isolated users. Everyone is on at least one shared team.
+              </div>
+            )
           ) : isolated.map(u => (
             <div key={u.user_id} style={{ padding: '12px 20px', borderBottom: '1px solid #f3f4f6', display: 'flex', alignItems: 'center', gap: 12 }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500 }}>{u.name || u.user_id}</div>
+                <div style={{ fontSize: 14, fontWeight: 500 }}>{nameWithoutEmail(u.name, u.email) || u.user_id}</div>
                 {u.email && <div style={{ fontSize: 12, color: '#9ca3af' }}>{u.email}</div>}
               </div>
               <select

@@ -397,6 +397,31 @@ class TestCanDeleteAttachment:
         assert _can_delete_attachment(self._att("alice"), self._user("agent"), True)
 
 
+class TestCanDeleteMessage:
+    def _msg(self, user_id: str = "alice") -> dict:
+        return {"uuid": "m-1", "content": "hi", "user_id": user_id}
+
+    def _user(self, uid: str, is_admin: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(user_id=uid, is_admin=is_admin)
+
+    def test_author_can_delete_own_message(self):
+        from app.routers.support import _can_delete_message
+        assert _can_delete_message(self._msg("alice"), self._user("alice"))
+
+    def test_admin_can_delete_any_message(self):
+        from app.routers.support import _can_delete_message
+        assert _can_delete_message(
+            self._msg("alice"), self._user("admin", is_admin=True),
+        )
+
+    def test_non_author_non_admin_cannot_delete(self):
+        # Unlike attachments, support-agent status alone grants nothing here:
+        # the helper only looks at authorship and is_admin, so a regular
+        # agent can't delete someone else's words.
+        from app.routers.support import _can_delete_message
+        assert not _can_delete_message(self._msg("alice"), self._user("agent"))
+
+
 # ---------------------------------------------------------------------------
 # Router payload stripping — what each caller is allowed to see
 # ---------------------------------------------------------------------------

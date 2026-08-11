@@ -102,3 +102,4 @@ class UserResponse(BaseModel):
     is_demo_user: bool = False
     current_team: Optional[str] = None
     current_team_uuid: Optional[str] = None
+    sso_provider: Optional[str] = None

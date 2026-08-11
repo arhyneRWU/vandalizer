@@ -498,8 +498,14 @@ async def run_extraction_sync(
     model: str | None = None,
     extraction_config_override: dict | None = None,
     combined_context: bool = False,
+    capture_sources: bool = False,
 ) -> list:
-    """Run extraction synchronously via asyncio.to_thread."""
+    """Run extraction synchronously via asyncio.to_thread.
+
+    With ``capture_sources``, each returned entity carries a
+    ``SOURCE_KEY`` sidecar mapping field names to the verified verbatim
+    passage + page the value came from (see ``extraction_sources``).
+    """
     keys = await get_extraction_keys(search_set_uuid)
     if not keys:
         logger.warning(
@@ -541,9 +547,15 @@ async def run_extraction_sync(
 
     doc_texts: list[str] = []
     doc_file_paths: list[str] = []
+    doc_metadata: list[dict] = []
     empty_text_docs: list[str] = []
     for doc_uuid in document_uuids:
         doc = await SmartDocument.find_one(SmartDocument.uuid == doc_uuid)
+        doc_metadata.append({
+            "uuid": doc_uuid,
+            "title": doc.title if doc else None,
+            "text_markers": (doc.text_markers if doc else None) or [],
+        })
         if doc and doc.raw_text:
             doc_texts.append(doc.raw_text)
         else:
@@ -568,10 +580,37 @@ async def run_extraction_sync(
     if not any(doc_texts) and not any(doc_file_paths):
         return []
 
-    # Combined context: merge all documents into a single text for extraction
+    # Combined context: merge all documents into a single text for extraction.
+    # Markers and per-doc spans are re-offset into the merged text so source
+    # passages still resolve to the right page and document.
     if combined_context and len(doc_texts) > 1:
-        merged = "\n\n---\n\n".join(t for t in doc_texts if t)
-        doc_texts = [merged]
+        sep = "\n\n---\n\n"
+        merged_parts: list[str] = []
+        merged_markers: list[dict] = []
+        doc_spans: list[dict] = []
+        cursor = 0
+        for text, meta in zip(doc_texts, doc_metadata):
+            if not text:
+                continue
+            if merged_parts:
+                cursor += len(sep)
+            for m in meta.get("text_markers") or []:
+                merged_markers.append({**m, "char_offset": m.get("char_offset", 0) + cursor})
+            doc_spans.append({
+                "start": cursor,
+                "end": cursor + len(text),
+                "uuid": meta.get("uuid"),
+                "title": meta.get("title"),
+            })
+            merged_parts.append(text)
+            cursor += len(text)
+        doc_texts = [sep.join(merged_parts)]
+        doc_metadata = [{
+            "uuid": None,
+            "title": None,
+            "text_markers": merged_markers,
+            "doc_spans": doc_spans,
+        }]
         doc_file_paths = []  # image mode not supported for combined
 
     # Resolve model
@@ -603,5 +642,7 @@ async def run_extraction_sync(
         extraction_config_override=combined_override or None,
         field_metadata=field_metadata,
         doc_file_paths=doc_file_paths,
+        capture_sources=capture_sources,
+        doc_metadata=doc_metadata,
     )
     return result

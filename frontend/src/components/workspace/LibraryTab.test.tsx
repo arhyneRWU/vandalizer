@@ -46,6 +46,7 @@ vi.mock('../library/ExploreTab', () => ({ ExploreTab: () => null }))
 vi.mock('../library/ShareWithTeamDialog', () => ({ ShareWithTeamDialog: () => null }))
 
 const mockItems: { current: LibraryItem[] } = { current: [] }
+const removeItemMock = vi.fn()
 
 vi.mock('../../hooks/useLibrary', () => ({
   useLibraries: () => ({
@@ -59,7 +60,7 @@ vi.mock('../../hooks/useLibrary', () => ({
     loading: false,
     refresh: vi.fn(),
     add: vi.fn(),
-    remove: vi.fn(),
+    remove: (...args: unknown[]) => removeItemMock(...args),
     update: vi.fn(),
   }),
   useLibraryFolders: () => ({
@@ -180,5 +181,60 @@ describe('LibraryTab prompt preview', () => {
     fireEvent.click(screen.getByText('Budget Workflow'))
     expect(openWorkflow).toHaveBeenCalledWith('wf-1')
     await waitFor(() => expect(touchItem).toHaveBeenCalledWith('li-2'))
+  })
+})
+
+describe('LibraryTab delete flow', () => {
+  function makeOwnedWorkflow(overrides: Partial<LibraryItem> = {}): LibraryItem {
+    return makePrompt({
+      id: 'li-wf',
+      item_id: 'wf-1',
+      item_uuid: null,
+      kind: 'workflow',
+      set_type: null,
+      name: 'NSF Proposal Extractor',
+      can_delete_underlying: true,
+      ...overrides,
+    })
+  }
+
+  async function openDeleteDialog() {
+    render(<LibraryTab />)
+    // Row actions only render while the row is hovered
+    fireEvent.mouseOver(screen.getByText('NSF Proposal Extractor'))
+    fireEvent.click(await screen.findByLabelText('More actions'))
+    fireEvent.click(screen.getByText('Delete'))
+    expect(await screen.findByText('Delete permanently')).toBeTruthy()
+  }
+
+  it('offers permanent delete when the user can manage the underlying workflow', async () => {
+    mockItems.current = [makeOwnedWorkflow()]
+    removeItemMock.mockResolvedValue(undefined)
+    await openDeleteDialog()
+    fireEvent.click(screen.getByText('Delete permanently'))
+    await waitFor(() =>
+      expect(removeItemMock).toHaveBeenCalledWith('li-wf', { deleteUnderlying: true }),
+    )
+  })
+
+  it('removes only the bookmark from the choice dialog', async () => {
+    mockItems.current = [makeOwnedWorkflow()]
+    removeItemMock.mockResolvedValue(undefined)
+    await openDeleteDialog()
+    fireEvent.click(screen.getByText('Remove from library only'))
+    await waitFor(() => expect(removeItemMock).toHaveBeenCalledWith('li-wf', undefined))
+  })
+
+  it('skips the choice dialog for items the user cannot permanently delete', async () => {
+    mockItems.current = [makeOwnedWorkflow({ can_delete_underlying: false })]
+    removeItemMock.mockResolvedValue(undefined)
+    render(<LibraryTab />)
+    fireEvent.mouseOver(screen.getByText('NSF Proposal Extractor'))
+    fireEvent.click(await screen.findByLabelText('More actions'))
+    fireEvent.click(screen.getByText('Delete'))
+    // Bookmark-only removal goes through the (mocked, auto-confirming) confirm
+    // dialog — no "Delete permanently" option should ever render.
+    await waitFor(() => expect(removeItemMock).toHaveBeenCalledWith('li-wf'))
+    expect(screen.queryByText('Delete permanently')).toBeNull()
   })
 })

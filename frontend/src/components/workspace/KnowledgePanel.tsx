@@ -238,6 +238,24 @@ export function KnowledgePanel() {
     }
   }
 
+  // Clone lands an owned, editable copy in My KBs (sources re-ingest in the
+  // background, so it opens in 'building' status).
+  const handleClone = async (uuid: string) => {
+    try {
+      const clone = await api.cloneKnowledgeBase(uuid)
+      const newUuid = (clone as { uuid?: string }).uuid
+      toast('Knowledge base cloned — sources are re-indexing', 'success')
+      refresh()
+      if (newUuid) {
+        setActiveTab('mine')
+        loadDetail(newUuid)
+      }
+    } catch (err) {
+      console.error('Failed to clone KB:', err)
+      toast(err instanceof Error ? err.message : 'Failed to clone knowledge base', 'error')
+    }
+  }
+
   const handleSharedDeleteChoice = async (choice: SharedKBDeleteChoice) => {
     const kb = sharedDeleteTarget
     if (!kb) return
@@ -635,6 +653,9 @@ export function KnowledgePanel() {
     // hit "You don't have permission to manage this knowledge base." on submit.
     const canManageKB = selectedKB.can_manage !== false
     const noManageReason = "You don't have permission to manage this knowledge base."
+    // A ready KB with zero indexed chunks has nothing to retrieve — chatting
+    // with it only produces a misleading "still indexing" reply.
+    const canChatKB = selectedKB.status === 'ready' && selectedKB.total_chunks > 0
     return (
       <>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#1e1e1e', position: 'relative' }}>
@@ -699,29 +720,31 @@ export function KnowledgePanel() {
           ) : (
             <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
               <span
-                onClick={() => { setTitleDraft(selectedKB.title); setEditingTitle(true) }}
-                title="Click to rename"
+                onClick={canManageKB ? () => { setTitleDraft(selectedKB.title); setEditingTitle(true) } : undefined}
+                title={canManageKB ? 'Click to rename' : noManageReason}
                 style={{
                   fontSize: 16, fontWeight: 600, color: '#fff',
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  cursor: 'text', borderRadius: 4, padding: '2px 0',
+                  cursor: canManageKB ? 'text' : 'default', borderRadius: 4, padding: '2px 0',
                   minWidth: 0,
                 }}
               >
                 {selectedKB.title}
               </span>
-              <button
-                type="button"
-                aria-label="Edit title"
-                onClick={() => { setTitleDraft(selectedKB.title); setEditingTitle(true) }}
-                title="Edit title"
-                style={{
-                  background: 'transparent', border: 'none', cursor: 'pointer',
-                  padding: 2, display: 'flex', color: '#888', flexShrink: 0,
-                }}
-              >
-                <Pencil size={13} />
-              </button>
+              {canManageKB && (
+                <button
+                  type="button"
+                  aria-label="Edit title"
+                  onClick={() => { setTitleDraft(selectedKB.title); setEditingTitle(true) }}
+                  title="Edit title"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    padding: 2, display: 'flex', color: '#888', flexShrink: 0,
+                  }}
+                >
+                  <Pencil size={13} />
+                </button>
+              )}
             </div>
           )}
           {selectedKB.shared_with_team && (
@@ -861,24 +884,28 @@ export function KnowledgePanel() {
                     fontStyle: selectedKB.description ? 'normal' : 'italic',
                     whiteSpace: 'pre-wrap',
                   }}>
-                    {selectedKB.description || 'No description yet — add one to help others understand what this KB is for.'}
+                    {selectedKB.description || (canManageKB
+                      ? 'No description yet — add one to help others understand what this KB is for.'
+                      : 'No description.')}
                   </div>
-                  <button
-                    type="button"
-                    aria-label="Edit description"
-                    onClick={() => {
-                      setDescriptionDraft(selectedKB.description || '')
-                      setEditingDescription(true)
-                    }}
-                    title="Edit description"
-                    style={{
-                      background: 'transparent', border: 'none', cursor: 'pointer',
-                      padding: 2, display: 'flex', color: '#888', flexShrink: 0,
-                      marginTop: 2,
-                    }}
-                  >
-                    <Pencil size={13} />
-                  </button>
+                  {canManageKB && (
+                    <button
+                      type="button"
+                      aria-label="Edit description"
+                      onClick={() => {
+                        setDescriptionDraft(selectedKB.description || '')
+                        setEditingDescription(true)
+                      }}
+                      title="Edit description"
+                      style={{
+                        background: 'transparent', border: 'none', cursor: 'pointer',
+                        padding: 2, display: 'flex', color: '#888', flexShrink: 0,
+                        marginTop: 2,
+                      }}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -953,16 +980,19 @@ export function KnowledgePanel() {
               </button>
               <button
                 onClick={handleChat}
-                disabled={selectedKB.status !== 'ready'}
+                disabled={!canChatKB}
+                title={!canChatKB && selectedKB.status === 'ready'
+                  ? 'This knowledge base has no indexed content yet'
+                  : undefined}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
-                  color: selectedKB.status === 'ready' ? 'var(--highlight-text-color, #000)' : '#666',
-                  backgroundColor: selectedKB.status === 'ready' ? 'var(--highlight-color, #eab308)' : '#2a2a2a',
-                  border: selectedKB.status === 'ready' ? 'none' : '1px solid #3a3a3a',
+                  color: canChatKB ? 'var(--highlight-text-color, #000)' : '#666',
+                  backgroundColor: canChatKB ? 'var(--highlight-color, #eab308)' : '#2a2a2a',
+                  border: canChatKB ? 'none' : '1px solid #3a3a3a',
                   borderRadius: 6,
-                  cursor: selectedKB.status === 'ready' ? 'pointer' : 'default',
-                  opacity: selectedKB.status === 'ready' ? 1 : 0.5,
+                  cursor: canChatKB ? 'pointer' : 'default',
+                  opacity: canChatKB ? 1 : 0.5,
                 }}
               >
                 <MessageSquare size={13} />
@@ -996,13 +1026,17 @@ export function KnowledgePanel() {
                 role="switch"
                 aria-checked={!!selectedKB.shared_with_team}
                 onClick={() => handleToggleShare(selectedKB)}
+                disabled={!canManageKB}
+                title={canManageKB ? undefined : noManageReason}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
                   color: selectedKB.shared_with_team ? 'rgb(0, 128, 128)' : '#e5e5e5',
                   backgroundColor: selectedKB.shared_with_team ? 'rgba(0, 128, 128, 0.1)' : '#2a2a2a',
                   border: selectedKB.shared_with_team ? '1px solid rgba(0, 128, 128, 0.3)' : '1px solid #3a3a3a',
-                  borderRadius: 6, cursor: 'pointer',
+                  borderRadius: 6,
+                  cursor: canManageKB ? 'pointer' : 'default',
+                  opacity: canManageKB ? 1 : 0.5,
                 }}
               >
                 <Users size={13} />
@@ -1105,7 +1139,7 @@ export function KnowledgePanel() {
             {/* Tags editor */}
             <KBTagsEditor
               tags={selectedKB.tags || []}
-              canManage={!!user && (selectedKB.user_id === user.user_id || isExaminerOrAdmin)}
+              canManage={canManageKB}
               onSave={async (next) => {
                 await api.updateKnowledgeBase(selectedKB.uuid, { tags: next })
                 setSelectedKB(prev => prev ? { ...prev, tags: next } : prev)
@@ -1308,24 +1342,28 @@ export function KnowledgePanel() {
                           >
                             {isTruncated && <title>Page too long — text was cut off; later sections aren’t in this source.</title>}
                           </StatusIcon>
-                          <button
-                            type="button"
-                            aria-label="Rename source"
-                            onClick={(e) => { e.stopPropagation(); beginRenameSource(source) }}
-                            title={source.custom_name ? 'Rename (or clear to revert to original)' : 'Rename source'}
-                            style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2, display: 'flex' }}
-                          >
-                            <Pencil size={12} style={{ color: '#888' }} />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="Remove source"
-                            onClick={(e) => { e.stopPropagation(); handleRemoveSource(source.uuid) }}
-                            title="Remove source"
-                            style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2, display: 'flex' }}
-                          >
-                            <X size={12} style={{ color: '#666' }} />
-                          </button>
+                          {canManageKB && (
+                            <>
+                              <button
+                                type="button"
+                                aria-label="Rename source"
+                                onClick={(e) => { e.stopPropagation(); beginRenameSource(source) }}
+                                title={source.custom_name ? 'Rename (or clear to revert to original)' : 'Rename source'}
+                                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2, display: 'flex' }}
+                              >
+                                <Pencil size={12} style={{ color: '#888' }} />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="Remove source"
+                                onClick={(e) => { e.stopPropagation(); handleRemoveSource(source.uuid) }}
+                                title="Remove source"
+                                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2, display: 'flex' }}
+                              >
+                                <X size={12} style={{ color: '#666' }} />
+                              </button>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -1338,7 +1376,7 @@ export function KnowledgePanel() {
             <KBValidationPanel
               kbUuid={selectedKB.uuid}
               kbReady={selectedKB.status === 'ready'}
-              canManage={!!user && (selectedKB.user_id === user.user_id || isExaminerOrAdmin)}
+              canManage={canManageKB}
               onCloned={(newUuid) => { refresh(); loadDetail(newUuid) }}
               collapsed={validationCollapsed}
               onToggleCollapsed={() => setValidationCollapsed(c => !c)}
@@ -1696,6 +1734,7 @@ export function KnowledgePanel() {
             onChat={(uuid, title) => activateKB(uuid, title)}
             onEdit={loadDetail}
             onDelete={activeTab === 'mine' ? handleDelete : undefined}
+            onClone={handleClone}
             onAdopt={activeTab === 'team'
               ? async (uuid) => {
                   try {

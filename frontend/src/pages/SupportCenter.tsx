@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Navigate, useNavigate, useSearch } from '@tanstack/react-router'
 import {
   ArrowLeft, Check, MessageSquare, Send, Plus, Paperclip, Pencil, X, Loader2, Link2, Tag,
-  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles,
+  Eye, UserPlus, Search, Flag, Lock, Layers, Heart, Sparkles, Trash2,
 } from 'lucide-react'
 import { PageLayout } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
@@ -56,6 +56,8 @@ const CLASSIFICATION_LABELS: Record<string, string> = {
 
 type Stats = { total: number; open: number; in_progress: number; closed: number }
 
+const PAGE_SIZE = 200
+
 const statCardStyle = (color: string): React.CSSProperties => ({
   flex: 1, padding: '16px 20px', background: '#fff', borderRadius: 'var(--ui-radius, 12px)',
   border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
@@ -69,6 +71,10 @@ export default function SupportCenter() {
 
   const [view, setView] = useState<View>('list')
   const [tickets, setTickets] = useState<SupportTicketSummary[]>([])
+  // Total tickets matching the active filters server-side — may exceed the
+  // number fetched so far; drives the "Showing X of Y" label and Load more.
+  const [totalMatching, setTotalMatching] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   // Default to "open" — agents care about the active queue, not the archive.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('open')
@@ -99,13 +105,14 @@ export default function SupportCenter() {
       const [s, t, tagList] = await Promise.all([
         supportApi.getTicketStats(),
         supportApi.listTickets(
-          statusParam, 200, 0, undefined, tagParam, undefined,
+          statusParam, PAGE_SIZE, 0, undefined, tagParam, undefined,
           searchParam, priorityParam, classificationParam,
         ),
         supportApi.listAllTags(),
       ])
       setStats(s)
       setTickets(t.tickets)
+      setTotalMatching(t.total)
       setAllTags(tagList.tags)
     } catch {
       toast('Failed to load tickets', 'error')
@@ -113,6 +120,32 @@ export default function SupportCenter() {
       setLoading(false)
     }
   }, [toast, statusFilter, priorityFilter, classificationFilter, tagFilter, search])
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true)
+    try {
+      const statusParam = statusFilter === 'all' ? undefined : statusFilter
+      const priorityParam = priorityFilter === 'all' ? undefined : priorityFilter
+      const classificationParam = classificationFilter === 'all' ? undefined : classificationFilter
+      const tagParam = tagFilter || undefined
+      const searchParam = search || undefined
+      const t = await supportApi.listTickets(
+        statusParam, PAGE_SIZE, tickets.length, undefined, tagParam, undefined,
+        searchParam, priorityParam, classificationParam,
+      )
+      // Tickets can shift between pages as they're updated (the sort is by
+      // updated_at), so dedupe on append rather than trusting the offset.
+      setTickets((prev) => {
+        const seen = new Set(prev.map((x) => x.uuid))
+        return [...prev, ...t.tickets.filter((x) => !seen.has(x.uuid))]
+      })
+      setTotalMatching(t.total)
+    } catch {
+      toast('Failed to load more tickets', 'error')
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [toast, statusFilter, priorityFilter, classificationFilter, tagFilter, search, tickets.length])
 
   useEffect(() => { load() }, [load])
 
@@ -150,6 +183,9 @@ export default function SupportCenter() {
       {view === 'list' && (
         <ListView
           tickets={tickets}
+          totalMatching={totalMatching}
+          onLoadMore={loadMore}
+          loadingMore={loadingMore}
           stats={stats}
           loading={loading}
           statusFilter={statusFilter}
@@ -334,7 +370,8 @@ function WhatsWorkingView({ onBack }: { onBack: () => void }) {
 // ---------------------------------------------------------------------------
 
 function ListView({
-  tickets, stats, loading, statusFilter, onStatusFilterChange,
+  tickets, totalMatching, onLoadMore, loadingMore,
+  stats, loading, statusFilter, onStatusFilterChange,
   priorityFilter, onPriorityFilterChange,
   classificationFilter, onClassificationFilterChange,
   tagFilter, onTagFilterChange, allTags,
@@ -342,6 +379,9 @@ function ListView({
   currentUserId, onNew, onSelect, onWhatsWorking,
 }: {
   tickets: SupportTicketSummary[]
+  totalMatching: number
+  onLoadMore: () => void
+  loadingMore: boolean
   stats: Stats | null
   loading: boolean
   statusFilter: StatusFilter
@@ -440,9 +480,11 @@ function ListView({
               <div style={{ fontSize: 15, fontWeight: 600 }}>Tickets</div>
               {!loading && (
                 <span style={{ fontSize: 13, color: '#6b7280' }}>
-                  {hasFilters
-                    ? `Showing ${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`
-                    : `${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`}
+                  {tickets.length < totalMatching
+                    ? `Showing ${tickets.length} of ${totalMatching} tickets`
+                    : hasFilters
+                      ? `Showing ${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`
+                      : `${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`}
                 </span>
               )}
             </div>
@@ -701,6 +743,29 @@ function ListView({
                 </div>
               )
             })}
+            {tickets.length < totalMatching && (
+              <div style={{ padding: '14px 20px', textAlign: 'center', borderTop: '1px solid #f3f4f6' }}>
+                <button
+                  onClick={onLoadMore}
+                  disabled={loadingMore}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '6px 16px', fontSize: 13, fontWeight: 600,
+                    borderRadius: 9999, border: '1px solid #e5e7eb',
+                    background: '#fff', color: '#374151',
+                    cursor: loadingMore ? 'default' : 'pointer', fontFamily: 'inherit',
+                    opacity: loadingMore ? 0.6 : 1,
+                  }}
+                >
+                  {loadingMore && (
+                    <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                  )}
+                  {loadingMore
+                    ? 'Loading…'
+                    : `Load more (${totalMatching - tickets.length} remaining)`}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -945,12 +1010,14 @@ function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }, [reply])
 
-  const loadTicket = useCallback(async () => {
+  // Error toasts persist until dismissed, so the 15s refresh stays silent on
+  // failure — only the initial load reports.
+  const loadTicket = useCallback(async (isPoll = false) => {
     try {
       const data = await supportApi.getTicket(ticketUuid)
       setTicket(data)
     } catch {
-      toast('Failed to load ticket', 'error')
+      if (!isPoll) toast('Failed to load ticket', 'error')
     } finally {
       setLoading(false)
     }
@@ -959,7 +1026,7 @@ function ChatView({
   useEffect(() => {
     loadTicket()
     supportApi.markTicketRead(ticketUuid).catch(() => {})
-    const interval = setInterval(loadTicket, 15000)
+    const interval = setInterval(() => loadTicket(true), 15000)
     return () => clearInterval(interval)
   }, [loadTicket, ticketUuid])
 
@@ -1034,6 +1101,22 @@ function ChatView({
       toast(err instanceof Error ? err.message : 'Could not save edit', 'error')
     } finally {
       setSavingEdit(false)
+    }
+  }
+
+  const handleDeleteMessage = async (messageUuid: string) => {
+    if (!(await confirm({
+      title: 'Delete this comment?',
+      message: "This can't be undone.",
+      confirmLabel: 'Delete',
+      destructive: true,
+    }))) return
+    try {
+      const updated = await supportApi.deleteMessage(ticketUuid, messageUuid)
+      setTicket(updated)
+      toast('Message deleted', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete message', 'error')
     }
   }
 
@@ -1317,6 +1400,9 @@ function ChatView({
             const isSupport = m.is_support_reply
             const isInternal = m.is_internal_note
             const isMine = m.user_id === user?.user_id
+            // Author or admin — regular support agents can't delete other
+            // people's messages (mirrors the backend gate).
+            const canDeleteMsg = !!user && (user.is_admin || m.user_id === user.user_id)
             const isEditing = editingMessageUuid === m.uuid
             const msgAttachments = ticket.attachments.filter((a) => a.message_uuid === m.uuid)
             // Internal notes get a distinct yellow card and span full width so
@@ -1433,21 +1519,41 @@ function ChatView({
                     {m.edited_at && <span style={{ marginLeft: 4, fontStyle: 'italic' }}>(edited)</span>}
                   </div>
                 </div>
-                {isMine && !isEditing && (
-                  <button
-                    onClick={() => startEdit(m)}
-                    title="Edit message"
-                    style={{
-                      marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 3,
-                      padding: '2px 6px', fontSize: 11, color: '#9ca3af',
-                      background: 'transparent', border: 'none', cursor: 'pointer',
-                      borderRadius: 4, fontFamily: 'inherit',
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#374151' }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
-                  >
-                    <Pencil size={10} /> Edit
-                  </button>
+                {(isMine || canDeleteMsg) && !isEditing && (
+                  <div style={{ marginTop: 2, display: 'flex', gap: 2 }}>
+                    {isMine && (
+                      <button
+                        onClick={() => startEdit(m)}
+                        title="Edit message"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '2px 6px', fontSize: 11, color: '#9ca3af',
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          borderRadius: 4, fontFamily: 'inherit',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#374151' }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
+                      >
+                        <Pencil size={10} /> Edit
+                      </button>
+                    )}
+                    {canDeleteMsg && (
+                      <button
+                        onClick={() => handleDeleteMessage(m.uuid)}
+                        title="Delete message"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '2px 6px', fontSize: 11, color: '#9ca3af',
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          borderRadius: 4, fontFamily: 'inherit',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#dc2626' }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af' }}
+                      >
+                        <Trash2 size={10} /> Delete
+                      </button>
+                    )}
+                  </div>
                 )}
                 {msgAttachments.length > 0 && (
                   <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6, alignItems: isSupport ? 'flex-end' : 'flex-start' }}>

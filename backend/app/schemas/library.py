@@ -54,6 +54,9 @@ class LibraryItemResponse(BaseModel):
     quality_tier: Optional[str] = None
     quality_score: Optional[float] = None
     created_by: Optional[AuthorRef] = None
+    # Whether the requesting user may permanently delete the backing
+    # workflow/extraction (vs. only removing this bookmark).
+    can_delete_underlying: bool = False
 
 
 class AddItemRequest(BaseModel):

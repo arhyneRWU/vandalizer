@@ -1,36 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 
 import { getWorkflowEvents, type PaginatedWorkflows } from '../../api/admin'
-import { formatDuration, formatNumber } from './shared/format'
+import { downloadCSV, formatDateTime, formatDuration, formatNumber } from './shared/format'
 import { ExportButton, SearchInput, StatusBadge, UserAvatar } from './shared/primitives'
-
-function parseUtcDate(d: string): Date {
-  // Backend stores UTC but may omit timezone suffix; ensure JS treats it as UTC
-  if (!d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) return new Date(d + 'Z')
-  return new Date(d)
-}
-
-function formatDateTime(d: string | null): string {
-  if (!d) return '-'
-  return parseUtcDate(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-}
-
-function downloadCSV(filename: string, headers: string[], rows: (string | number | null)[][]) {
-  const escape = (v: string | number | null) => {
-    if (v === null || v === undefined) return ''
-    const s = String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const csv = [headers.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 export function WorkflowsTab() {
   const [data, setData] = useState<PaginatedWorkflows | null>(null)
@@ -39,21 +12,31 @@ export function WorkflowsTab() {
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoading(true)
-    getWorkflowEvents(page, status || undefined, search || undefined).then(setData).catch(() => setData(null)).finally(() => setLoading(false))
+    setError(null)
+    getWorkflowEvents(page, status || undefined, search || undefined)
+      .then(res => { if (!cancelled) setData(res) })
+      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load workflow events') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [page, status, search])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => load(), [load])
 
   const handleSearchChange = (v: string) => {
     setSearchInput(v)
     if (searchDebounce.current) clearTimeout(searchDebounce.current)
     searchDebounce.current = setTimeout(() => { setSearch(v); setPage(1) }, 400)
   }
+
+  // Clear any pending debounce timer on unmount so it can't fire after teardown.
+  useEffect(() => () => { if (searchDebounce.current) clearTimeout(searchDebounce.current) }, [])
 
   const filters = ['', 'completed', 'running', 'failed', 'queued', 'canceled']
 
@@ -118,10 +101,24 @@ export function WorkflowsTab() {
       <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', overflow: 'hidden' }}>
         {loading && !data ? (
           <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading workflows...</div>
+        ) : error && !data ? (
+          <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>
+            <AlertCircle size={28} color="#d1d5db" style={{ marginBottom: 12 }} />
+            <div style={{ fontSize: 14, color: '#374151' }}>{error}</div>
+          </div>
         ) : !data || data.items.length === 0 ? (
           <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>No workflow events found.</div>
         ) : (
           <>
+            {error && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '10px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                color: '#991b1b', fontSize: 13,
+              }}>
+                <AlertCircle size={14} /> {error}
+              </div>
+            )}
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>

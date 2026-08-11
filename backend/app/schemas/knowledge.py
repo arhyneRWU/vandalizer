@@ -80,6 +80,8 @@ class KBSourceDetailResponse(KBSourceResponse):
     max_crawl_pages: int = 5
     parent_source_uuid: Optional[str] = None
     crawled_urls: Optional[list[str]] = None
+    # Navigation pages the crawl followed for links but did not embed
+    skipped_urls: Optional[list[str]] = None
     child_sources: list[KBSourceResponse] = []  # Crawled children (when this is a parent)
     processed_at: Optional[str] = None
 
