@@ -18,8 +18,10 @@ import { randomBytes } from 'node:crypto'
  * two in step.
  *
  * The row is seeded under a uuid this file owns and is deleted in `afterAll`
- * whether the test passed or failed. It never touches any other row: the
- * deployment's `quality_alerts` collection is shared, production-shaped data.
+ * whether the test passed or failed, and `beforeAll` sweeps the same uuid
+ * prefix first so a run that was killed outright still cannot leave a row
+ * behind. It never touches any other row: the deployment's `quality_alerts`
+ * collection is shared, production-shaped data.
  */
 
 // Directory holding the compose project that serves the deployment under test.
@@ -33,14 +35,22 @@ const ALERT_UUID = `e2e-token-undercount-${randomBytes(8).toString('hex')}`
 const MODEL = `e2e-undercount-model-${randomBytes(4).toString('hex')}`
 
 // Mirrors the wording built in `record_shortfall`, including the thousands
-// separators, so this also guards the message an admin actually reads.
+// separators, so the seeded row is a realistic one rather than a placeholder.
+// It does NOT guard that wording: this constant is seeded by this file, so
+// rewording `record_shortfall` leaves the assertion green. What the assertion
+// guards is that whatever message the API returns reaches the screen verbatim
+// — no truncation, no summarising, no dropped digits — which is worth having,
+// and which is why the constant is a full sentence with separators in it.
 const ESTIMATED = 91_000
 const CHARGED = 104_500
+const BUDGET = 120_000
 const MESSAGE =
   `Token estimate read low for ${MODEL}: estimated ${ESTIMATED.toLocaleString('en-US')} ` +
-  `but the model charged ${CHARGED.toLocaleString('en-US')}. Budgets for this model are ` +
-  `optimistic, which can cause requests to fail near the context limit. ` +
-  `Calibrate the model or check that its name matches its published identifier.`
+  `but the model charged ${CHARGED.toLocaleString('en-US')}, read low by ` +
+  `${(CHARGED - ESTIMATED).toLocaleString('en-US')} tokens. It still fit the input budget ` +
+  `of ${BUDGET.toLocaleString('en-US')}, but budgets for this model are optimistic and ` +
+  `will fail nearer the context limit. Raise token_safety_margin on this model's config, ` +
+  `or check that its name matches its published identifier.`
 
 const DB = process.env.E2E_MONGO_DB || 'vandalizer'
 
@@ -128,6 +138,16 @@ test.describe('Token-undercount alerts reach an admin', () => {
   )
 
   test.beforeAll(() => {
+    // Sweep debris from an earlier run that never reached `afterAll` — a
+    // timeout kill, a stopped container, a Ctrl-C. Without this, a SIGKILLed
+    // worker leaves a token-undercount alert permanently visible in a real
+    // admin UI, which is exactly what this file's header promises it will not
+    // do. Scoped to this spec's own uuid prefix, which no real alert can
+    // carry; anything broader could reach a genuine alert.
+    mongosh(
+      `print(db.quality_alerts.deleteMany({ uuid: /^e2e-token-undercount-/ }).deletedCount)`,
+    )
+
     const out = mongosh(
       `print(db.quality_alerts.insertOne(Object.assign(${JSON.stringify(SEED_DOC)}, ` +
         `{ created_at: new Date() })).acknowledged)`,
