@@ -174,6 +174,50 @@ def annotate_pages(text: str, markers: list[dict] | None) -> str:
     return "".join(out)
 
 
+def page_note_for(markers: list[dict] | None, *, annotated: bool) -> str:
+    """The instruction that tells the model how to cite pages in this document.
+
+    Returns "" when the document got no page markers — promising citations the
+    model has no way to make is worse than saying nothing (non-PDF formats, or
+    PDFs ingested before page markers existed).
+
+    The two notes are deliberately parallel in force. An earlier version made
+    the measured-page note conditional ("cite when you quote or reference a
+    specific passage") while the interpolated one was a directive, so the
+    document whose page numbers were *trustworthy* carried the weaker
+    instruction. Measured against a live 30B: the scanned document was cited,
+    the digital one on one question in three.
+
+    The interpolated note rules out asserting exactness by name. Telling a
+    model to hedge left room for it to hedge *and* claim a passage was
+    "explicitly stated" on a page, which is what it did — five times out of
+    five at temperature 0, on a document whose page markers are 100%
+    interpolated.
+    """
+    if not annotated or not _has_page_markers(markers):
+        return ""
+    if _has_approximate_pages(markers):
+        # Boundaries were interpolated from character offsets, so an
+        # exact-sounding citation is invented precision.
+        return (
+            "\n_`[p. ~N]` marks the *estimated* start of page N — this document "
+            "was scanned, so page positions are approximate. Always give pages "
+            "as approximate, e.g. \"around p. 4\". Never state a page as exact "
+            "and never say a passage is \"explicitly\" or \"clearly\" on a given "
+            "page._\n"
+        )
+    return (
+        "\n_`[p. N]` marks the start of page N. Cite the page for every fact you "
+        "take from this document, e.g. \"p. 3\"._\n"
+    )
+
+
+def _has_page_markers(markers: list[dict] | None) -> bool:
+    return any(
+        isinstance(m, dict) and m.get("kind") == "page" for m in (markers or [])
+    )
+
+
 def _has_approximate_pages(markers: list[dict] | None) -> bool:
     """True when any usable page marker came from interpolation, not measurement."""
     return any(
@@ -202,24 +246,7 @@ def build_document_segments(
         if doc.raw_text:
             markers = getattr(doc, "text_markers", None)
             body = annotate_pages(doc.raw_text, markers)
-            # Only explain the markers when the document actually got some —
-            # otherwise the note would promise page citations the model has no
-            # way to make (non-PDF formats, or PDFs ingested before #603).
-            if body == doc.raw_text:
-                page_note = ""
-            elif _has_approximate_pages(markers):
-                # Scanned/OCR'd document: boundaries are interpolated, so an
-                # exact-sounding citation would be invented precision.
-                page_note = (
-                    "\n_`[p. ~N]` marks the approximate start of page N — this "
-                    "document was scanned, so page positions are estimated. Cite "
-                    "pages as approximate, e.g. \"around p. 4\"._\n"
-                )
-            else:
-                page_note = (
-                    "\n_`[p. N]` marks the start of page N. Cite the page when you "
-                    "quote or reference a specific passage._\n"
-                )
+            page_note = page_note_for(markers, annotated=body != doc.raw_text)
             segments.append(DocumentSegment(
                 label=f"doc:{doc.title or doc.uuid}",
                 text=f"\n\n## Document: {doc.title}\n{page_note}{body}",
