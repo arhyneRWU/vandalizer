@@ -91,10 +91,19 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
 
     Never raises. It is called off the back of a chat response, and a
     diagnostic that can break the product is worse than no diagnostic.
+
+    Logging is coalesced on the same key as the alert, deliberately. Chat calls
+    this once per response, so warning on entry would emit a line per turn,
+    forever, for a defect a single alert row already captures — the per-request
+    noise this feature exists to avoid. A WARNING marks a state change (a new
+    alert, or an escalation); a repeat that changes nothing goes to DEBUG,
+    where the per-request numbers are still available for calibrating a model.
     """
-    logger.warning(
+    summary = (
         "token estimate read low for %s: estimated %d, charged %d "
-        "(budget %d, severity %s)",
+        "(budget %d, severity %s)"
+    )
+    details = (
         shortfall.model, shortfall.estimated, shortfall.charged,
         shortfall.input_budget, shortfall.severity,
     )
@@ -113,6 +122,9 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
             if shortfall.severity == "critical" and existing.severity != "critical":
                 existing.severity = "critical"
                 await existing.save()
+                logger.warning(summary, *details)
+            else:
+                logger.debug(summary, *details)
             return
 
         await QualityAlert(
@@ -131,6 +143,7 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
             ),
             created_at=datetime.datetime.now(tz=datetime.timezone.utc),
         ).insert()
+        logger.warning(summary, *details)
     except Exception:
         logger.exception(
             "could not record token-estimate alert for %s", shortfall.model

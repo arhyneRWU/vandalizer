@@ -165,6 +165,15 @@ class TestCheckAndRecord:
                 model="m", estimated=2_154, charged=2_527, input_budget=24_576
             )
             rec.assert_awaited_once()
+            # Not just "something was recorded": the numbers have to survive
+            # the hand-off intact. Swapping estimated/charged, or attributing
+            # the shortfall to the wrong model, would otherwise pass.
+            handed_over = rec.await_args[0][0]
+            assert handed_over.model == "m"
+            assert handed_over.estimated == 2_154
+            assert handed_over.charged == 2_527
+            assert handed_over.input_budget == 24_576
+            assert handed_over.severity == "warning"
 
     @pytest.mark.asyncio
     async def test_records_nothing_when_the_estimate_was_safe(self):
@@ -187,3 +196,73 @@ class TestCheckAndRecord:
             await check_and_record(
                 model="m", estimated=1, charged=2, input_budget=3
             )  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_a_failure_while_recording_does_not_raise_either(self):
+        """Pins the docstring's "wrapped end to end" claim.
+
+        `record_shortfall` opens its own `try` only around the database block,
+        so its logging sits outside its never-raises guarantee. The guard here
+        has to cover the await as well as the evaluate, and without this test
+        shrinking it to the first statement passes unnoticed.
+        """
+        with patch(
+            "app.services.token_estimate_check.record_shortfall",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            await check_and_record(
+                model="m", estimated=2_154, charged=2_527, input_budget=24_576
+            )  # must not raise
+
+
+import logging
+
+_LOGGER = "app.services.token_estimate_check"
+
+
+def _warnings(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+class TestShortfallLoggingIsCoalesced:
+    """Chat calls `record_shortfall` once per response. Warning on every call
+    would emit a line per turn, forever, for a defect one alert row already
+    captures -- the per-request noise this feature exists to remove."""
+
+    @pytest.mark.asyncio
+    async def test_the_first_occurrence_warns(self, caplog):
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=None)
+            MockAlert.return_value.insert = AsyncMock()
+            with caplog.at_level(logging.DEBUG, logger=_LOGGER):
+                await record_shortfall(_shortfall())
+
+        assert len(_warnings(caplog)) == 1
+        assert "estimate read low" in _warnings(caplog)[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_deduped_repeat_does_not_warn_again(self, caplog):
+        """The second and every later response for an already-alerted model."""
+        existing = MagicMock(severity="warning")
+        existing.save = AsyncMock()
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=existing)
+            with caplog.at_level(logging.DEBUG, logger=_LOGGER):
+                await record_shortfall(_shortfall())
+
+        assert _warnings(caplog) == []
+        # Still recorded, just quietly: the per-request numbers are what you
+        # calibrate a model from.
+        assert any(r.levelno == logging.DEBUG for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_an_escalation_warns_because_it_changed_something(self, caplog):
+        existing = MagicMock(severity="warning")
+        existing.save = AsyncMock()
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=existing)
+            with caplog.at_level(logging.DEBUG, logger=_LOGGER):
+                await record_shortfall(_shortfall(severity="critical"))
+
+        assert len(_warnings(caplog)) == 1
