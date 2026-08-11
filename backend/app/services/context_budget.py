@@ -13,6 +13,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,25 +25,128 @@ logger = logging.getLogger(__name__)
 
 _CHAR_TO_TOKEN_RATIO = 4
 
-# How much to inflate a tiktoken estimate for a model tiktoken does not model.
+# Fallback only: how much to inflate a tiktoken estimate for a model whose real
+# vocabulary we do not have. Models we can tokenize exactly get no margin at
+# all — see `resolve_exact_tokenizer`.
 #
-# tiktoken is OpenAI's tokenizer. For every other model it is a proxy, and
-# measurement says it is a systematically *optimistic* one: across 97 harness
-# runs against three self-hosted Qwen models, spanning requests from 307 to
-# 46,916 tokens, the estimate came in under the `prompt_tokens` the server
-# reported every single time, by 4.2% to 17.3% (mean 14.5%). It was never once
-# equal or over.
+# tiktoken is OpenAI's tokenizer, and for anything else it is a proxy that
+# reads *low* — the direction that hard-fails. Measured against the models'
+# own `prompt_tokens`, the divergence is driven by content, not request size:
 #
-# The error only bites near the window boundary — which is exactly where this
-# product's flagship use case lives, reading a whole proposal on a 32k model.
+#   flowing prose                    1.000
+#   project description              1.019
+#   real budget justification        1.171
+#   synthetic dense currency table   1.455
 #
-# 1.20 covers the worst observation with headroom. The asymmetry justifies
-# rounding up rather than fitting tightly: this is a budget estimate, not an
-# invoice. Guessing high costs slightly-early routing to a bigger model.
-# Guessing low costs a hard error and no answer, which is the bug this exists
-# to prevent. Deployments that have measured their own models can set
-# `token_safety_margin` on the model config instead of living with this.
+# So no single constant is right. 1.20 covers ordinary prose and the real
+# documents measured here, and is *known to be insufficient* for heavily
+# numeric or tabular content — which is why exact tokenization, not a better
+# constant, is the actual fix. This value only governs models where exactness
+# is unavailable (hosted APIs), for which no measurements exist on this
+# deployment; a deployment that has measured its own should set
+# `token_safety_margin` on the model config. A configured value below 1.0 is
+# refused, since that re-creates the original bug by configuration.
 DEFAULT_TOKEN_SAFETY_MARGIN = 1.20
+
+
+# Where vLLM leaves the vocabulary for every model it serves. Tokenizing needs
+# the vocabulary, not the weights and not the GPU, so this is pure local CPU
+# work — roughly 1.5 ms for a 36-page proposal, against 0.3 ms for the tiktoken
+# call it replaces. Overridable per model, and per deployment, because this
+# path is a property of how the host mounts its model cache.
+DEFAULT_TOKENIZER_CACHE_ROOT = "/hf-cache"
+
+# Tokens a request costs beyond the text it carries.
+#
+# The server wraps every request in a chat template, and the agent framework
+# adds its own preamble around the instructions. Neither appears in any string
+# we count, so even a perfectly exact text count comes in short — in the unsafe
+# direction.
+#
+# Measured, twice over. Against a bare server the chat template is a flat 13
+# tokens and stays 13 across a 5000x payload range. End to end through the app
+# the true overhead is 37 tokens, and it came out identical on a 25,000-token
+# request and a 50,000-token one — so this is a fixed cost, not a multiplier.
+#
+# 512 is deliberately far above the measured 37. It is a flat 2% of a 32k
+# model's input budget, which is a cheap price for absorbing whatever the
+# framework adds around `instructions` in a future version, and for history-
+# heavy turns where per-message wrappers accumulate. Tightening it buys
+# almost nothing and re-opens the direction that hard-fails.
+#
+# This is the piece the old 1.20 margin was incidentally covering. Making it
+# explicit is what allows the margin to be dropped for models we can tokenize
+# exactly.
+REQUEST_SCAFFOLD_TOKENS = 512
+
+
+@lru_cache(maxsize=32)
+def _load_tokenizer(path: str):
+    """Load a `tokenizer.json` from disk, or return None if it is unusable.
+
+    Cached: a real vocabulary is several megabytes and takes milliseconds to
+    parse, so loading it per request would make this the performance problem it
+    exists to avoid.
+    """
+    try:
+        from tokenizers import Tokenizer
+
+        return Tokenizer.from_file(path)
+    except Exception as exc:
+        logger.warning(
+            "could not load tokenizer at %s (%s); falling back to estimation",
+            path, exc,
+        )
+        return None
+
+
+@lru_cache(maxsize=32)
+def _find_vocabulary(model_name: str, cache_root: str) -> Optional[str]:
+    """Locate a model's `tokenizer.json` inside an HF-style cache.
+
+    "Qwen/Qwen3-VL-8B-Instruct" lives at
+    ``<root>/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/<rev>/``.
+    Newest snapshot wins, so a re-pulled model is picked up without config
+    changes.
+    """
+    if not model_name or not cache_root:
+        return None
+    slug = "models--" + model_name.replace("/", "--")
+    for base in (Path(cache_root) / "hub", Path(cache_root)):
+        snapshots = base / slug / "snapshots"
+        try:
+            if not snapshots.is_dir():
+                continue
+            found = sorted(
+                snapshots.glob("*/tokenizer.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            continue
+        if found:
+            return str(found[0])
+    return None
+
+
+def resolve_exact_tokenizer(model_name: str, model_config: Optional[dict] = None):
+    """This model's real tokenizer, or None when we do not have it.
+
+    None is an ordinary outcome, not an error: hosted models (Claude, and any
+    provider we call over an API) have no local vocabulary, and those keep the
+    estimate-plus-margin path.
+
+    Priority: an explicit ``tokenizer_path`` on the model config, then
+    discovery in the deployment's model cache.
+    """
+    cfg = model_config or {}
+    explicit = cfg.get("tokenizer_path")
+    if explicit:
+        return _load_tokenizer(str(explicit))
+
+    root = cfg.get("tokenizer_cache_root") or DEFAULT_TOKENIZER_CACHE_ROOT
+    path = _find_vocabulary(model_name or "", str(root))
+    return _load_tokenizer(path) if path else None
 
 
 @lru_cache(maxsize=8)
@@ -107,6 +211,9 @@ def token_safety_margin(
                 model_name,
             )
 
+    # An exact count needs no correction. Inflating it would only route early.
+    if resolve_exact_tokenizer(model_name, model_config) is not None:
+        return 1.0
     if _is_openai_model(model_name):
         return 1.0
     return DEFAULT_TOKEN_SAFETY_MARGIN
@@ -119,16 +226,32 @@ def _apply_margin(raw_tokens: int, margin: float) -> int:
     return math.ceil(raw_tokens * margin)
 
 
-def _count_raw_tokens(text: str, model_name: str = "") -> int:
-    """tiktoken's count, with no safety margin applied.
+def _count_raw_tokens(
+    text: str, model_name: str = "", model_config: Optional[dict] = None
+) -> int:
+    """Token count with no safety margin applied.
 
-    Internal: callers that are sizing a request want :func:`count_tokens`.
-    This exists so the margin is applied exactly once per aggregate, and so
-    truncation can convert a margin-inflated budget back into real token
-    offsets for slicing.
+    Uses the model's own vocabulary when the deployment has it, which makes the
+    count exact and the margin unnecessary. Falls back to tiktoken, and then to
+    a character heuristic.
+
+    Internal: callers sizing a request want :func:`count_tokens`. This exists so
+    the margin is applied exactly once per aggregate, and so truncation can
+    convert a margin-inflated budget back into real token offsets for slicing.
     """
     if not text:
         return 0
+
+    tokenizer = resolve_exact_tokenizer(model_name, model_config)
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False).ids)
+        except Exception:
+            logger.warning(
+                "exact tokenizer failed for %s; falling back to estimation",
+                model_name, exc_info=True,
+            )
+
     encoder = _get_encoder(_encoding_for(model_name))
     if encoder is not None:
         try:
@@ -138,7 +261,9 @@ def _count_raw_tokens(text: str, model_name: str = "") -> int:
     return max(1, len(text) // _CHAR_TO_TOKEN_RATIO)
 
 
-def count_raw_tokens(text: str, model_name: str = "") -> int:
+def count_raw_tokens(
+    text: str, model_name: str = "", model_config: Optional[dict] = None
+) -> int:
     """Count with no safety margin, for values *stored* rather than spent.
 
     A document's ``token_count`` is written once at ingestion and read later
@@ -149,14 +274,14 @@ def count_raw_tokens(text: str, model_name: str = "") -> int:
     an uncorrected number. So the stored figure stays a raw baseline and the
     margin is applied at comparison time, by :func:`find_oversize_documents`.
     """
-    return _count_raw_tokens(text, model_name)
+    return _count_raw_tokens(text, model_name, model_config)
 
 
 def count_tokens(
     text: str, model_name: str = "", model_config: Optional[dict] = None
 ) -> int:
     """Estimate token count for ``text``, erring high for non-OpenAI models."""
-    raw = _count_raw_tokens(text, model_name)
+    raw = _count_raw_tokens(text, model_name, model_config)
     return _apply_margin(raw, token_safety_margin(model_name, model_config))
 
 
@@ -175,7 +300,7 @@ def count_message_tokens(
         content = getattr(part, "content", None)
         if content is None:
             content = str(part)
-        total += _count_raw_tokens(str(content), model_name)
+        total += _count_raw_tokens(str(content), model_name, model_config)
     return _apply_margin(total, token_safety_margin(model_name, model_config))
 
 
@@ -279,11 +404,15 @@ class BudgetPlan:
     history_tokens: int = 0
     documents_tokens: int = 0
     attachments_tokens: int = 0
+    # Chat template + framework preamble: sent on every request, present in
+    # none of the strings above. See REQUEST_SCAFFOLD_TOKENS.
+    scaffold_tokens: int = REQUEST_SCAFFOLD_TOKENS
 
     @property
     def total_input_tokens(self) -> int:
         return (
-            self.system_tokens
+            self.scaffold_tokens
+            + self.system_tokens
             + self.user_message_tokens
             + self.history_tokens
             + self.documents_tokens
@@ -306,6 +435,7 @@ class BudgetPlan:
             "history_tokens": self.history_tokens,
             "documents_tokens": self.documents_tokens,
             "attachments_tokens": self.attachments_tokens,
+            "scaffold_tokens": self.scaffold_tokens,
             "headroom_tokens": self.input_budget - self.total_input_tokens,
         }
 
@@ -426,7 +556,8 @@ def estimate_input_tokens(
     estimate which reads low will decline to move a request that does not fit.
     """
     return (
-        (
+        REQUEST_SCAFFOLD_TOKENS
+        + (
             count_tokens(system_prompt, model_name, model_config)
             if system_prompt
             else 0
@@ -508,7 +639,7 @@ def plan_and_compact_context(
 
     # Non-compactable floor covers the system prompt, user message, and an
     # allowance for prompt scaffolding ("--- BEGIN REFERENCE DOCUMENTS ---" etc.).
-    floor = plan.system_tokens + plan.user_message_tokens + 64
+    floor = plan.system_tokens + plan.user_message_tokens + plan.scaffold_tokens
     if floor >= input_budget:
         actions.append(
             CompactionAction(
