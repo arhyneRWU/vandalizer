@@ -20,7 +20,11 @@ Two things make this dangerous if built naively, and both are tested here:
   trimming a document without saying so.
 """
 
-from app.services.model_routing import PRIVACY_RANK, choose_document_model
+from app.services.model_routing import (
+    PRIVACY_RANK,
+    choose_document_model,
+    suggest_document_model,
+)
 
 
 def _model(name, window, privacy="internal"):
@@ -144,3 +148,57 @@ class TestTheReasonIsUsable:
         # The notice goes to a person, so it names both models and the size.
         assert "small" in d.reason and "large" in d.reason
         assert d.reason.endswith(".")
+
+
+class TestSuggestingAModel:
+    """The context-limit dialog offers the user a way out, so it needs a
+    candidate — chosen by the server, under the same privacy rule. Picking it
+    in the browser from the model list would walk straight around the gate."""
+
+    MODELS = [
+        _model("small", 32768),
+        _model("medium", 131072),
+        _model("large", 262144),
+        _model("cloud", 1_000_000, privacy="external"),
+    ]
+
+    def test_suggests_nothing_when_the_request_already_fits(self):
+        assert suggest_document_model(
+            current_name="small", current_config=SMALL,
+            models=self.MODELS, input_tokens=1000,
+        ) is None
+
+    def test_suggests_the_smallest_model_that_fits(self):
+        """Least disruptive: jumping straight to the biggest window changes the
+        answering model more than the problem requires."""
+        s = suggest_document_model(
+            current_name="small", current_config=SMALL,
+            models=self.MODELS, input_tokens=41213,
+        )
+        assert s is not None and s["name"] == "medium"
+
+    def test_skips_models_that_would_not_fit_either(self):
+        s = suggest_document_model(
+            current_name="small", current_config=SMALL,
+            models=self.MODELS, input_tokens=200_000,
+        )
+        assert s is not None and s["name"] == "large"
+
+    def test_never_suggests_weaker_privacy_even_when_it_is_the_only_fit(self):
+        s = suggest_document_model(
+            current_name="small", current_config=SMALL,
+            models=self.MODELS, input_tokens=900_000,
+        )
+        assert s is None
+
+    def test_never_suggests_the_current_model(self):
+        s = suggest_document_model(
+            current_name="large", current_config=LARGE,
+            models=self.MODELS, input_tokens=300_000,
+        )
+        assert s is None or s["name"] != "large"
+
+    def test_no_configured_models_is_not_an_error(self):
+        assert suggest_document_model(
+            current_name="small", current_config=SMALL, models=[], input_tokens=41213,
+        ) is None

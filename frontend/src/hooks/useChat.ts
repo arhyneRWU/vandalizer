@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import { streamChat, getHistory } from '../api/chat'
-import type { ChatMessage, Citation, ContextBudgetPlan, OversizeDocument, StreamChunk } from '../types/chat'
+import type { ChatMessage, Citation, ContextBudgetPlan, OversizeDocument, StreamChunk, SuggestedModel } from '../types/chat'
 
 export interface ContextNotice {
   action: string
@@ -32,6 +32,9 @@ export function useChat() {
   const [contextMode, setContextMode] = useState<'full' | 'truncated' | 'compacted'>('full')
   const [contextCutoffIndex, setContextCutoffIndex] = useState(0)
   const [contextPlan, setContextPlan] = useState<ContextBudgetPlan | null>(null)
+  // Null unless the server found a larger model that fits and passes its
+  // privacy rule. The context dialog offers it only when it is set.
+  const [suggestedModel, setSuggestedModel] = useState<SuggestedModel | null>(null)
   const [contextNotices, setContextNotices] = useState<ContextNotice[]>([])
 
   const streamingRef = useRef('')
@@ -79,6 +82,7 @@ export function useChat() {
             } else if (chunk.kind === 'usage') {
               setContextTokens(chunk.request_tokens ?? 0)
             } else if (chunk.kind === 'context_budget') {
+              setSuggestedModel(chunk.suggested_model ?? null)
               if (chunk.plan) {
                 setContextPlan(chunk.plan)
                 // Use the planner's estimate until the real usage chunk arrives.
@@ -205,6 +209,7 @@ export function useChat() {
     contextMode,
     contextCutoffIndex,
     contextPlan,
+    suggestedModel,
     contextNotices,
     setContextTokens,
     setContextMode,
