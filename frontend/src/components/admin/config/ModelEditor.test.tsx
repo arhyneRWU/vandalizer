@@ -235,6 +235,56 @@ describe('ModelEditor — edit survives a concurrent delete (wrong-record race)'
   })
 })
 
+describe('ModelEditor — sampling temperature', () => {
+  // Temperature is the one sampling control the product never sent, so the
+  // same question on the same document could return a different answer.
+  // Nothing here is useful unless the value actually reaches the save call.
+
+  it('sends the temperature an admin typed', async () => {
+    mockUpdateModel.mockResolvedValue({ status: 'ok', models: MODELS })
+
+    renderPanel()
+    fireEvent.click(screen.getAllByTitle('Edit model')[1])
+    fireEvent.change(screen.getByLabelText(/Temperature/i), { target: { value: '0.2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(mockUpdateModel).toHaveBeenCalledTimes(1))
+    expect(mockUpdateModel.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ temperature: 0.2 }),
+    )
+  })
+
+  it('sends 0 rather than dropping it as empty', async () => {
+    // 0 is the deterministic setting — the entire reason for the field. A
+    // `value || undefined` guard would silently discard it.
+    mockUpdateModel.mockResolvedValue({ status: 'ok', models: MODELS })
+
+    renderPanel()
+    fireEvent.click(screen.getAllByTitle('Edit model')[1])
+    fireEvent.change(screen.getByLabelText(/Temperature/i), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(mockUpdateModel).toHaveBeenCalledTimes(1))
+    expect(mockUpdateModel.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ temperature: 0 }),
+    )
+  })
+
+  it('sends null when the field is left blank, so the provider default applies', async () => {
+    mockUpdateModel.mockResolvedValue({ status: 'ok', models: MODELS })
+
+    renderPanel()
+    fireEvent.click(screen.getAllByTitle('Edit model')[1])
+    fireEvent.change(screen.getByLabelText(/Temperature/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & test connection' }))
+
+    await waitFor(() => expect(mockUpdateModel).toHaveBeenCalledTimes(1))
+    expect(mockUpdateModel.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ temperature: null }),
+    )
+  })
+})
+
 describe('ModelEditor — delete and default', () => {
   it('deletes by id and hands the parent the remaining list', async () => {
     renderPanel()

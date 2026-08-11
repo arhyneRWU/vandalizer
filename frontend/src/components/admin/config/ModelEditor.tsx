@@ -131,12 +131,15 @@ type ModelDraft = {
   // computed value).
   request_timeout_seconds: number
   response_reserve_tokens: number
+  // Not the 0-means-unset convention above: 0 is a real temperature (the
+  // deterministic one), so "unset" has to be null.
+  temperature: number | null
 }
 
 const EMPTY_MODEL_DRAFT: ModelDraft = {
   name: '', tag: '', external: false, thinking: false, endpoint: '', api_protocol: '', api_key: '',
   speed: '', tier: '', privacy: '', supports_structured: true, multimodal: false, supports_pdf: false,
-  context_window: 128000, request_timeout_seconds: 0, response_reserve_tokens: 0,
+  context_window: 128000, request_timeout_seconds: 0, response_reserve_tokens: 0, temperature: null,
 }
 
 // Provider presets power the "Add a Model" wizard. Selecting one fills in the
@@ -483,6 +486,7 @@ export function ModelEditor({
       context_window: typeof m.context_window === 'number' && m.context_window > 0 ? m.context_window : 128000,
       request_timeout_seconds: typeof m.request_timeout_seconds === 'number' && m.request_timeout_seconds > 0 ? m.request_timeout_seconds : 0,
       response_reserve_tokens: typeof m.response_reserve_tokens === 'number' && m.response_reserve_tokens > 0 ? m.response_reserve_tokens : 0,
+      temperature: typeof m.temperature === 'number' ? m.temperature : null,
     })
     setProbeResult(null)
     setModelTest(null)
@@ -938,6 +942,32 @@ export function ModelEditor({
                         />
                         <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
                           Tokens reserved for the model&rsquo;s answer; also caps runaway reasoning. More output room means less input room. Blank = scaled to the context window.
+                        </div>
+                      </div>
+                      <div>
+                        <label htmlFor="admin-model-temperature" style={labelStyle}>Temperature</label>
+                        <input
+                          id="admin-model-temperature"
+                          type="number"
+                          min={0}
+                          max={2}
+                          step={0.1}
+                          value={newModel.temperature ?? ''}
+                          onChange={e => {
+                            const raw = e.target.value
+                            const v = parseFloat(raw)
+                            setNewModel(prev => ({
+                              ...prev,
+                              // Blank means "use the provider default"; 0 is a
+                              // real value and must survive.
+                              temperature: raw === '' || !Number.isFinite(v) ? null : v,
+                            }))
+                          }}
+                          placeholder="provider default"
+                          style={inputStyle}
+                        />
+                        <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+                          How much randomness the model uses. 0 gives the same answer to the same question every time &mdash; use it for extraction and document Q&amp;A. Blank = whatever the provider defaults to (often 0.7).
                         </div>
                       </div>
                     </div>
