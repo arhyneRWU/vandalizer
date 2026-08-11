@@ -288,6 +288,8 @@ describe('ModelEditor — sampling temperature', () => {
     expect(mockUpdateModel.mock.calls[0][1]).toEqual(
       expect.objectContaining({ temperature: null }),
     )
+  })
+})
 
 describe('ModelEditor — long-document model', () => {
   // A grant proposal arrives as one file. When it doesn't fit the chosen
