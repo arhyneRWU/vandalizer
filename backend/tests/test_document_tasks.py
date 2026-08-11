@@ -12,6 +12,29 @@ import pytest
 from bson import ObjectId
 
 
+
+def _set_containing(db, key):
+    """The $set of the write that carried `key`.
+
+    Ingestion writes bookkeeping and the status transition separately (the
+    status write is guarded so it cannot resurrect a failed extraction), so
+    these look up a write by what it carries rather than by position.
+    """
+    for call in db.smart_document.update_one.call_args_list:
+        payload = call[0][1].get("$set", {})
+        if key in payload:
+            return payload
+    raise AssertionError(f"no update wrote {key!r}")
+
+
+def _status_sequence(db):
+    return [
+        call[0][1]["$set"]["task_status"]
+        for call in db.smart_document.update_one.call_args_list
+        if "task_status" in call[0][1].get("$set", {})
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _remove_images_from_markdown
 # ---------------------------------------------------------------------------
@@ -723,8 +746,8 @@ class TestPerformSemanticIngestion:
             raw_text="content",
             text_markers=[],
         )
-        # The final update should reflect the chunk count and ready flag.
-        final_update = db.smart_document.update_one.call_args_list[-1][0][1]["$set"]
+        # The bookkeeping write should reflect the chunk count and ready flag.
+        final_update = _set_containing(db, "chromadb_ready")
         assert final_update["chromadb_ready"] is True
         assert final_update["chunk_count"] == 5
 
@@ -746,10 +769,8 @@ class TestPerformSemanticIngestion:
 
         perform_semantic_ingestion(raw_text="text", document_uuid="doc-1", user_id="u1")
 
-        # First update: readying, second: complete
-        updates = db.smart_document.update_one.call_args_list
-        assert updates[0][0][1]["$set"]["task_status"] == "readying"
-        assert updates[1][0][1]["$set"]["task_status"] == "complete"
+        # readying while it works, complete once it has.
+        assert _status_sequence(db) == ["readying", "complete"]
 
     @patch("app.services.document_manager.DocumentManager")
     @patch("app.config.Settings")
@@ -772,7 +793,7 @@ class TestPerformSemanticIngestion:
         with pytest.raises(RuntimeError):
             perform_semantic_ingestion(raw_text="text", document_uuid="doc-1", user_id="u1")
 
-        final_update = db.smart_document.update_one.call_args_list[-1][0][1]["$set"]
+        final_update = _set_containing(db, "ingest_error")
         assert final_update["chromadb_ready"] is False
         assert "embedding service down" in final_update["ingest_error"]
 
@@ -883,3 +904,189 @@ class TestSyncProjectKbOnMove:
         inc = db.knowledge_bases.update_one.call_args[0][1]["$inc"]
         assert inc["total_chunks"] == -3
         assert inc["total_sources"] == -1
+
+
+# ---------------------------------------------------------------------------
+# An extraction failure must survive the rest of the pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestIngestionDoesNotResurrectFailedExtraction:
+    """A document that extracted nothing must not end up marked "complete".
+
+    Observed on the live deployment, 2026-08-11 17:41 UTC. A scanned PDF was
+    uploaded while a 36 GB vLLM engine held the shared GPU. The OCR bridge
+    answered `503 GPU held by llm-svc — retry shortly` three times in 3.5s,
+    extraction returned "", and the guard in `perform_extraction_and_update`
+    correctly set task_status="error" with a user-facing message.
+
+    `update_document_fields` ran next and correctly declined to overwrite it.
+    Then `perform_semantic_ingestion` finished and set task_status="complete"
+    unconditionally, and the document was left with an error message it never
+    showed, zero characters, and a green checkmark. Chat then answered "the
+    document doesn't mention that" about a document containing nothing at all.
+
+    The trigger was GPU contention, but the silence is this status write: any
+    empty extraction is resurrected the same way, whatever caused it. That is
+    why this is testable without OCR running — the failure is a *state*.
+    """
+
+    def _doc(self) -> dict:
+        return {
+            "uuid": "doc-1",
+            "title": "05_Budget_Justification_degraded.pdf",
+            "path": "uploads/scan.pdf",
+            "raw_text": "",
+            "task_status": "error",
+            "error_message": "We couldn't extract any text from this document.",
+        }
+
+    def _status_writes(self, db) -> list:
+        """Every task_status this call attempted to write, in order."""
+        return [
+            call[0][1]["$set"]["task_status"]
+            for call in db.smart_document.update_one.call_args_list
+            if "task_status" in call[0][1].get("$set", {})
+        ]
+
+    def _unguarded_status_writes(self, db) -> list:
+        """*Any* status write that could land on an already-failed document.
+
+        Checking only the terminal "complete" write is not enough, and missing
+        that is what let the live bug survive a first fix: ingestion sets
+        "readying" before it starts, which erases the error, after which the
+        terminal write advances a document that no longer looks failed. Every
+        status write has to carry the exclusion.
+
+        The guard belongs in the query filter, not in a preceding read: these
+        tasks run concurrently on separate queues, so a read-then-write check
+        can be overtaken between the read and the update.
+        """
+        unguarded = []
+        for call in db.smart_document.update_one.call_args_list:
+            query, update = call[0][0], call[0][1]
+            if "task_status" not in update.get("$set", {}):
+                continue
+            if query.get("task_status") != {"$ne": "error"}:
+                unguarded.append((query, update["$set"]["task_status"]))
+        return unguarded
+
+    @patch("app.services.document_manager.DocumentManager")
+    @patch("app.config.Settings")
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_successful_ingestion_does_not_clear_an_error_status(
+        self, mock_get_db, MockSettings, MockDM
+    ):
+        from app.tasks.document_tasks import perform_semantic_ingestion
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = self._doc()
+
+        settings = MagicMock()
+        settings.chromadb_persist_dir = "/data/chroma"
+        MockSettings.return_value = settings
+
+        dm_instance = MagicMock()
+        dm_instance.add_document.return_value = 0  # nothing to chunk: no text
+        MockDM.return_value = dm_instance
+
+        perform_semantic_ingestion(
+            raw_text="", document_uuid="doc-1", user_id="user1"
+        )
+
+        assert self._unguarded_status_writes(db) == [], (
+            "semantic ingestion wrote a task_status without excluding errored "
+            "documents — this is the silent data loss"
+        )
+
+    @patch("app.services.document_manager.DocumentManager")
+    @patch("app.config.Settings")
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_ingestion_failure_does_not_clear_an_error_status_either(
+        self, mock_get_db, MockSettings, MockDM
+    ):
+        """The exception path writes "complete" too, and is if anything more
+        likely to run on a document that already failed extraction."""
+        from app.tasks.document_tasks import perform_semantic_ingestion
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = self._doc()
+
+        settings = MagicMock()
+        settings.chromadb_persist_dir = "/data/chroma"
+        MockSettings.return_value = settings
+
+        dm_instance = MagicMock()
+        dm_instance.add_document.side_effect = RuntimeError("chroma unavailable")
+        MockDM.return_value = dm_instance
+
+        with pytest.raises(RuntimeError):
+            perform_semantic_ingestion(
+                raw_text="", document_uuid="doc-1", user_id="user1"
+            )
+
+        assert self._unguarded_status_writes(db) == []
+
+    @patch("app.services.document_manager.DocumentManager")
+    @patch("app.config.Settings")
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_a_healthy_document_is_still_marked_complete(
+        self, mock_get_db, MockSettings, MockDM
+    ):
+        """The guard must not strand ordinary documents in a non-complete state."""
+        from app.tasks.document_tasks import perform_semantic_ingestion
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = {
+            "uuid": "doc-1", "title": "Report.pdf", "path": "uploads/report.pdf",
+            "raw_text": "real content", "task_status": "extracting",
+        }
+
+        settings = MagicMock()
+        settings.chromadb_persist_dir = "/data/chroma"
+        MockSettings.return_value = settings
+
+        dm_instance = MagicMock()
+        dm_instance.add_document.return_value = 5
+        MockDM.return_value = dm_instance
+
+        perform_semantic_ingestion(
+            raw_text="real content", document_uuid="doc-1", user_id="user1"
+        )
+
+        assert "complete" in self._status_writes(db)
+
+    @patch("app.services.document_manager.DocumentManager")
+    @patch("app.config.Settings")
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_ingestion_bookkeeping_is_still_recorded_on_a_failed_document(
+        self, mock_get_db, MockSettings, MockDM
+    ):
+        """Withholding "complete" must not also withhold chunk_count and
+        chromadb_ready — those stay accurate regardless of extraction state."""
+        from app.tasks.document_tasks import perform_semantic_ingestion
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = self._doc()
+
+        settings = MagicMock()
+        settings.chromadb_persist_dir = "/data/chroma"
+        MockSettings.return_value = settings
+
+        dm_instance = MagicMock()
+        dm_instance.add_document.return_value = 0
+        MockDM.return_value = dm_instance
+
+        perform_semantic_ingestion(
+            raw_text="", document_uuid="doc-1", user_id="user1"
+        )
+
+        written = {}
+        for call in db.smart_document.update_one.call_args_list:
+            written.update(call[0][1].get("$set", {}))
+        assert written.get("chromadb_ready") is False
+        assert written.get("chunk_count") == 0
