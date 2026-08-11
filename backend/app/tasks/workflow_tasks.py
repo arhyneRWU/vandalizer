@@ -125,6 +125,25 @@ def _bson_safe(value):
     return str(value)
 
 
+def _default_model_from_config(sys_config: dict) -> str:
+    """Resolve the configured default model from a raw SystemConfig dict.
+
+    The sync mirror of :func:`app.services.config_service.get_default_model_name`
+    for Celery tasks, which hold the config as a pymongo document rather than a
+    Beanie model. Returns "" when no model is configured at all.
+    """
+    models = [m for m in (sys_config.get("available_models") or []) if isinstance(m, dict)]
+
+    configured_default = (sys_config.get("default_model") or "").strip()
+    if configured_default and any(m.get("name") == configured_default for m in models):
+        return configured_default
+
+    for m in models:
+        if m.get("name"):
+            return m["name"]
+    return ""
+
+
 def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
     """Materialize a workflow's steps into engine-ready ``steps_data``.
 
@@ -1162,12 +1181,20 @@ def resume_workflow_after_approval(self, approval_uuid):
 
     update_progress = _make_progress_updater(db, workflow_result_id)
 
+    # Steps after an approval gate must run on the model the run started with.
+    # That model is snapshotted on the result at dispatch; runs that predate the
+    # field fall back to the configured default rather than to a hardcoded model
+    # name, which is never a configured model and so reaches the provider with
+    # no API key.
+    model = result_doc.get("model") or _default_model_from_config(sys_config)
+
     engine = build_workflow_engine(
         steps_data=steps_data,
-        model=workflow_doc.get("resource_config", {}).get("model", "gpt-4o-mini"),
+        model=model,
         user_id=user_id,
         system_config_doc=sys_config,
         allow_code_execution=is_admin,
+        config_override=workflow_doc.get("config_override"),
     )
 
     # Resolved before the try so the failure handler below can always reach it.
