@@ -75,3 +75,63 @@ def evaluate_estimate(
         input_budget=input_budget,
         severity=severity,
     )
+
+
+async def record_shortfall(shortfall: EstimateShortfall) -> None:
+    """Raise (or escalate) an admin-visible alert for an optimistic estimate.
+
+    Deduped by unacknowledged alert for the same model, which is the
+    convention in ``quality_tasks.py``. ``QualityAlert`` has no
+    occurrence-counting — that belongs to ``Notification`` — and adding a
+    second coalescing mechanism here would be two ways to do one thing.
+
+    An existing warning escalates to critical, but never the reverse: if the
+    mild case were allowed to mask the severe one, this alert would reproduce
+    the failure it exists to report.
+
+    Never raises. It is called off the back of a chat response, and a
+    diagnostic that can break the product is worse than no diagnostic.
+    """
+    logger.warning(
+        "token estimate read low for %s: estimated %d, charged %d "
+        "(budget %d, severity %s)",
+        shortfall.model, shortfall.estimated, shortfall.charged,
+        shortfall.input_budget, shortfall.severity,
+    )
+    try:
+        import datetime
+
+        from app.models.quality_alert import QualityAlert
+
+        existing = await QualityAlert.find_one(
+            QualityAlert.alert_type == "token_undercount",
+            QualityAlert.item_kind == "model",
+            QualityAlert.item_id == shortfall.model,
+            QualityAlert.acknowledged == False,  # noqa: E712
+        )
+        if existing is not None:
+            if shortfall.severity == "critical" and existing.severity != "critical":
+                existing.severity = "critical"
+                await existing.save()
+            return
+
+        await QualityAlert(
+            alert_type="token_undercount",
+            item_kind="model",
+            item_id=shortfall.model,
+            item_name=shortfall.model,
+            severity=shortfall.severity,
+            message=(
+                f"Token estimate read low for {shortfall.model}: estimated "
+                f"{shortfall.estimated:,} but the model charged "
+                f"{shortfall.charged:,}. Budgets for this model are "
+                f"optimistic, which can cause requests to fail near the "
+                f"context limit. Calibrate the model or check that its name "
+                f"matches its published identifier."
+            ),
+            created_at=datetime.datetime.now(tz=datetime.timezone.utc),
+        ).insert()
+    except Exception:
+        logger.exception(
+            "could not record token-estimate alert for %s", shortfall.model
+        )

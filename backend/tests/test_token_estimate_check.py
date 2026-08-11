@@ -71,3 +71,81 @@ class TestEvaluateEstimate:
         assert evaluate_estimate(
             model="m", estimated=100, charged=0, input_budget=1_000
         ) is None
+
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from app.services.token_estimate_check import EstimateShortfall, record_shortfall
+
+
+def _shortfall(severity="warning"):
+    return EstimateShortfall(
+        model="Qwen/Qwen3.5-9B", estimated=2_154, charged=2_527,
+        input_budget=24_576, severity=severity,
+    )
+
+
+class TestRecordShortfall:
+    @pytest.mark.asyncio
+    async def test_creates_an_alert_when_none_is_outstanding(self):
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=None)
+            MockAlert.return_value.insert = AsyncMock()
+
+            await record_shortfall(_shortfall())
+
+            MockAlert.assert_called_once()
+            kwargs = MockAlert.call_args.kwargs
+            assert kwargs["alert_type"] == "token_undercount"
+            assert kwargs["item_kind"] == "model"
+            assert kwargs["item_id"] == "Qwen/Qwen3.5-9B"
+            assert kwargs["severity"] == "warning"
+
+    @pytest.mark.asyncio
+    async def test_does_not_duplicate_an_unacknowledged_alert(self):
+        """Dedupe-by-unacknowledged is the convention in quality_tasks.py.
+        Chat volume would otherwise bury the alerts table."""
+        existing = MagicMock(severity="warning")
+        existing.save = AsyncMock()
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=existing)
+
+            await record_shortfall(_shortfall())
+
+            MockAlert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_escalates_an_existing_warning_to_critical(self):
+        """Otherwise the first mild case masks the real failure — which is
+        the exact shape of bug this feature exists to catch."""
+        existing = MagicMock(severity="warning")
+        existing.save = AsyncMock()
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=existing)
+
+            await record_shortfall(_shortfall(severity="critical"))
+
+            assert existing.severity == "critical"
+            existing.save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_downgrade_an_existing_critical(self):
+        existing = MagicMock(severity="critical")
+        existing.save = AsyncMock()
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(return_value=existing)
+
+            await record_shortfall(_shortfall(severity="warning"))
+
+            assert existing.severity == "critical"
+            existing.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_database_failure_does_not_propagate(self):
+        """This runs off the back of a chat response. A diagnostic must never
+        break the product it is diagnosing."""
+        with patch("app.models.quality_alert.QualityAlert") as MockAlert:
+            MockAlert.find_one = AsyncMock(side_effect=RuntimeError("mongo down"))
+
+            await record_shortfall(_shortfall())  # must not raise
