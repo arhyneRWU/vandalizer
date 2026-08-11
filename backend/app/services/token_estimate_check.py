@@ -135,3 +135,21 @@ async def record_shortfall(shortfall: EstimateShortfall) -> None:
         logger.exception(
             "could not record token-estimate alert for %s", shortfall.model
         )
+
+
+async def check_and_record(
+    *, model: str, estimated: int, charged: int, input_budget: int
+) -> None:
+    """Entry point for callers holding a completed response.
+
+    Wrapped end to end: a diagnostic must never surface as a chat failure.
+    """
+    try:
+        shortfall = evaluate_estimate(
+            model=model, estimated=estimated,
+            charged=charged, input_budget=input_budget,
+        )
+        if shortfall is not None:
+            await record_shortfall(shortfall)
+    except Exception:
+        logger.exception("token estimate self-check failed for %s", model)

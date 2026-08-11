@@ -149,3 +149,41 @@ class TestRecordShortfall:
             MockAlert.find_one = AsyncMock(side_effect=RuntimeError("mongo down"))
 
             await record_shortfall(_shortfall())  # must not raise
+
+
+from app.services.token_estimate_check import check_and_record
+
+
+class TestCheckAndRecord:
+    @pytest.mark.asyncio
+    async def test_records_when_the_estimate_read_low(self):
+        with patch(
+            "app.services.token_estimate_check.record_shortfall",
+            new_callable=AsyncMock,
+        ) as rec:
+            await check_and_record(
+                model="m", estimated=2_154, charged=2_527, input_budget=24_576
+            )
+            rec.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_records_nothing_when_the_estimate_was_safe(self):
+        with patch(
+            "app.services.token_estimate_check.record_shortfall",
+            new_callable=AsyncMock,
+        ) as rec:
+            await check_and_record(
+                model="m", estimated=25_877, charged=25_402, input_budget=24_576
+            )
+            rec.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_never_raises_into_the_caller(self):
+        """The caller is mid-response to a user."""
+        with patch(
+            "app.services.token_estimate_check.evaluate_estimate",
+            side_effect=RuntimeError("boom"),
+        ):
+            await check_and_record(
+                model="m", estimated=1, charged=2, input_budget=3
+            )  # must not raise

@@ -848,6 +848,19 @@ async def chat_stream(
                     citations=kb_sources or None,
                 )
 
+                # Ground truth has just arrived. The planner's belief and what
+                # the model charged are both in hand exactly once per request —
+                # compare them, because an estimate that reads low is how bug
+                # #1 hard-failed ordinary documents for months without a trace.
+                from app.services.token_estimate_check import check_and_record
+
+                await check_and_record(
+                    model=compacted.plan.model,
+                    estimated=compacted.plan.total_input_tokens,
+                    charged=(usage.input_tokens if usage else 0) or 0,
+                    input_budget=compacted.plan.input_budget,
+                )
+
                 # Stream token usage so the frontend can display context utilization
                 input_toks = usage.input_tokens if usage else 0
                 output_toks = usage.output_tokens if usage else 0
