@@ -79,6 +79,31 @@ DEFAULT_TOKENIZER_CACHE_ROOT = "/hf-cache"
 # exactly.
 REQUEST_SCAFFOLD_TOKENS = 512
 
+# Models already warned about, so the fallback is reported once per process
+# rather than once per request. Per-request logging would be noise at chat
+# volume; per-process is enough to be seen after a deploy or a config change,
+# and resets naturally on restart.
+_ESTIMATED_MODELS_WARNED: set[str] = set()
+
+
+def _warn_estimated_once(model_name: str) -> None:
+    """Say plainly that this model's budget is a guess, not a measurement.
+
+    Silence here is the alias bug: a model registered as "Qwen-30b" rather
+    than its full name resolves no vocabulary and drops to the default
+    margin, which measurement shows is wrong for numeric content. The guess
+    is a reasonable last resort; not saying so is not.
+    """
+    if model_name in _ESTIMATED_MODELS_WARNED:
+        return
+    _ESTIMATED_MODELS_WARNED.add(model_name)
+    logger.warning(
+        "token counts for %r are estimated, not exact: no local vocabulary "
+        "and no stored calibration. Budgets use a default margin of %.2f, "
+        "which is known to under-count numeric and tabular content.",
+        model_name, DEFAULT_TOKEN_SAFETY_MARGIN,
+    )
+
 
 @lru_cache(maxsize=32)
 def _load_tokenizer(path: str):
@@ -216,6 +241,7 @@ def token_safety_margin(
         return 1.0
     if _is_openai_model(model_name):
         return 1.0
+    _warn_estimated_once(model_name or "<unnamed>")
     return DEFAULT_TOKEN_SAFETY_MARGIN
 
 

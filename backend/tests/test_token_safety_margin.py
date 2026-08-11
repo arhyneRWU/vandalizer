@@ -418,3 +418,45 @@ class TestPreflightOversizeCheck:
             model_config=self.CONFIG,
         )
         assert found == []
+
+
+class TestLoudFallback:
+    """A model that silently drops to a guessed margin is the alias bug.
+
+    Verified before this existed: 'Qwen/Qwen3-VL-30B-A3B-Instruct ' (one
+    trailing space) resolved no vocabulary and fell to 1.2 with no signal
+    anywhere. The guess is acceptable; the silence is not.
+    """
+
+    def setup_method(self):
+        from app.services import context_budget
+
+        context_budget._ESTIMATED_MODELS_WARNED.clear()
+
+    def test_warns_when_falling_back_to_a_guessed_margin(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            token_safety_margin("some-unknown-model")
+
+        assert any(
+            "some-unknown-model" in r.getMessage() for r in caplog.records
+        ), "falling back to a guessed margin must be visible"
+
+    def test_warns_only_once_per_model(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                token_safety_margin("some-unknown-model")
+
+        hits = [r for r in caplog.records if "estimated" in r.getMessage()]
+        assert len(hits) == 1, "per-request logging would be noise at chat volume"
+
+    def test_does_not_warn_for_models_counted_exactly(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            token_safety_margin("gpt-4o")
+
+        assert not [r for r in caplog.records if "estimated" in r.getMessage()]
