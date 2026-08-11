@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 MIN_PDF_TEXT_LENGTH = 100
 MAX_XLSX_COMMENT_LEN = 500
 
+# The conventional page break in paginated plain text; Tesseract and pdftotext
+# emit it, and an OCR service that preserves it is telling us where its pages
+# ended. See _measured_page_markers_from_text.
+_OCR_PAGE_SEPARATOR = "\f"
+
 # Below this classifier confidence we don't trust the local fast path and
 # fall through to the existing OCR-first flow — same "prefer accuracy over
 # speed when unsure" posture as the rest of this module.
@@ -588,6 +593,67 @@ def _interpolate_page_markers(text: str, num_pages: int) -> list[dict]:
     ]
 
 
+def _measured_page_markers_from_text(
+    text: str, num_pages: int
+) -> tuple[str, list[dict]] | None:
+    """Recover real page boundaries from an OCR response that marked them.
+
+    Vandalizer's ``raw`` OCR contract makes the response body *be* the text, so
+    there is no field for a page number. But the form feed is the long-standing
+    convention for a page break in paginated plain text — Tesseract and
+    pdftotext both emit one — and a service that preserves it is handing us the
+    boundaries that ``_interpolate_page_markers`` would otherwise guess.
+
+    Returns ``(text_without_separators, markers)`` when the split is
+    trustworthy, or ``None`` to tell the caller to interpolate as before.
+
+    "Trustworthy" means the number of segments equals the page count PyMuPDF
+    reads from the PDF itself — an independent oracle we already have. Without
+    that check a stray form feed inside a page body would shift every later
+    page by one, silently, and a confidently wrong page number is worse than an
+    openly estimated one. This is the same reasoning that makes the markers
+    returned here carry no ``approximate`` flag: they are measured.
+    """
+    if num_pages <= 0 or not text:
+        return None
+
+    segments = text.split(_OCR_PAGE_SEPARATOR)
+    # Tesseract terminates every page rather than separating them, so a
+    # trailing empty segment is the normal shape, not a malformed one.
+    if len(segments) == num_pages + 1 and not segments[-1].strip():
+        segments = segments[:-1]
+    if len(segments) != num_pages:
+        return None
+
+    markers: list[dict] = []
+    offset = 0
+    for index, segment in enumerate(segments):
+        markers.append({"char_offset": offset, "kind": "page", "value": index + 1})
+        # +1 for the newline the join puts back between pages.
+        offset += len(segment) + 1
+    return "\n".join(segments), markers
+
+
+def _ocr_text_with_page_markers(
+    ocr_text: str, num_pages: int
+) -> tuple[str, list[dict]]:
+    """OCR text plus the best page structure available for it.
+
+    Measured boundaries when the response carried them, interpolated ones
+    otherwise. Both callers of the OCR branch go through here so the two can
+    never disagree about which kind of marker a scanned document gets.
+    """
+    measured = _measured_page_markers_from_text(ocr_text, num_pages)
+    if measured is not None:
+        logger.info(
+            "OCR response carried %d page separators matching the PDF's page "
+            "count — using measured page boundaries",
+            num_pages,
+        )
+        return measured
+    return ocr_text, _interpolate_page_markers(ocr_text, num_pages)
+
+
 def pdf_page_count(pdf_path: str) -> int:
     """Cheap page-count read via PyMuPDF. Returns 0 if it can't open the file."""
     try:
@@ -743,8 +809,7 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
             logger.warning("OCR raised, falling back to PyMuPDF: %s", e)
             ocr_text = ""
         if ocr_text and len(ocr_text.strip()) >= MIN_PDF_TEXT_LENGTH:
-            num_pages = pdf_page_count(file_path)
-            return ocr_text, _interpolate_page_markers(ocr_text, num_pages)
+            return _ocr_text_with_page_markers(ocr_text, pdf_page_count(file_path))
         # OCR unavailable / too little text — PyMuPDF gives us exact boundaries.
         # The PyMuPDF pass is a page-boundary refinement over the OCR text, not a
         # hard requirement. If it fails (corrupt PDF, or the source file was
@@ -759,7 +824,7 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
                     "PyMuPDF page extraction failed for %s (%s); using OCR text",
                     file_path, e,
                 )
-                return ocr_text, _interpolate_page_markers(
+                return _ocr_text_with_page_markers(
                     ocr_text, pdf_page_count(file_path)
                 )
             raise

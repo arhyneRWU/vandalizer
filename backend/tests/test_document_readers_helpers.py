@@ -493,6 +493,146 @@ class TestPageMarkerProvenance:
         assert not any(m.get("approximate") for m in markers)
 
 
+class TestPageSeparatorsInOcrText:
+    """Some OCR services already mark page breaks with a form feed — it is the
+    long-standing convention for paginated plain text (Tesseract and pdftotext
+    both emit it). Vandalizer's ``raw`` contract makes the response body *be*
+    the text, so there is no field for a page number, and that separator is the
+    only page structure such a response carries. Interpolating over it throws
+    away boundaries we were handed.
+
+    Every case here is gated on agreeing with the PDF's own page count: a
+    split that disagrees is not trustworthy, and confidently wrong page numbers
+    are worse than admittedly estimated ones."""
+
+    def test_form_feed_split_matching_page_count_is_measured(self):
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("alpha\fbeta\fgamma", 3)
+
+        assert result is not None
+        text, markers = result
+        assert [m["value"] for m in markers] == [1, 2, 3]
+        assert not any(m.get("approximate") for m in markers)
+        # Offsets must index the returned text, not the original.
+        assert all(
+            text[marker["char_offset"]:].startswith(expected)
+            for marker, expected in zip(markers, ["alpha", "beta", "gamma"])
+        )
+
+    def test_trailing_form_feed_still_matches(self):
+        """Tesseract terminates every page, so the last split is empty."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("one\ftwo\f", 2)
+
+        assert result is not None
+        _, markers = result
+        assert [m["value"] for m in markers] == [1, 2]
+
+    def test_blank_middle_page_is_kept(self):
+        """A page that OCR'd to nothing is still a page — dropping it would
+        shift every later page number by one."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("one\f\fthree\f", 3)
+
+        assert result is not None
+        _, markers = result
+        assert [m["value"] for m in markers] == [1, 2, 3]
+
+    def test_count_mismatch_is_rejected(self):
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        assert _measured_page_markers_from_text("one\ftwo", 5) is None
+
+    def test_no_separator_in_multipage_text_is_rejected(self):
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        assert _measured_page_markers_from_text("no separators here", 4) is None
+
+    def test_single_page_needs_no_separator(self):
+        """One page is trivially exact — the text starts at offset 0."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("only page", 1)
+
+        assert result is not None
+        text, markers = result
+        assert text == "only page"
+        assert markers == [{"char_offset": 0, "kind": "page", "value": 1}]
+
+    def test_separators_are_removed_from_the_text(self):
+        """The form feed is a control character, not content. Leaving it in
+        would place it right where ``annotate_pages`` inserts ``[p. N]``."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("one\ftwo", 2)
+
+        assert result is not None
+        text, _ = result
+        assert "\f" not in text
+
+
+class TestExtractWithMarkersUsesPageSeparators:
+    """End to end through the OCR branch: a page-aware OCR response must
+    produce measured markers, and anything else must still interpolate."""
+
+    def test_ocr_with_form_feeds_yields_measured_markers(self):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        body = ("Page one text, long enough to clear the acceptance gate. " * 3
+                + "\f"
+                + "Page two text, also long enough to clear the gate. " * 3)
+
+        with patch.object(dr, "pdf_has_ocrable_content", return_value=True), \
+             patch.object(dr, "_local_markdown_extract_from_pdf", return_value=None), \
+             patch.object(dr, "ocr_extract_text_from_pdf", return_value=body), \
+             patch.object(dr, "pdf_page_count", return_value=2):
+            text, markers = dr.extract_text_with_markers("scan.pdf", "pdf")
+
+        assert [m["value"] for m in markers] == [1, 2]
+        assert not any(m.get("approximate") for m in markers), \
+            "boundaries came from the OCR response, so they must not be hedged"
+        assert text.startswith("Page one text")
+        assert "\f" not in text
+
+    def test_ocr_without_separators_still_interpolates(self):
+        """Regression guard: the common case must be untouched."""
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        body = "Flat OCR text with no page structure at all. " * 8
+
+        with patch.object(dr, "pdf_has_ocrable_content", return_value=True), \
+             patch.object(dr, "_local_markdown_extract_from_pdf", return_value=None), \
+             patch.object(dr, "ocr_extract_text_from_pdf", return_value=body), \
+             patch.object(dr, "pdf_page_count", return_value=4):
+            text, markers = dr.extract_text_with_markers("scan.pdf", "pdf")
+
+        assert [m["value"] for m in markers] == [1, 2, 3, 4]
+        assert all(m["approximate"] is True for m in markers)
+        assert text == body
+
+    def test_ocr_with_untrustworthy_split_interpolates(self):
+        """Three form-feed segments in a five-page PDF: the separator is there
+        but does not describe this document, so it must not be believed."""
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        body = "Alpha section. " * 8 + "\f" + "Beta section. " * 8 + "\f" + "Gamma. " * 8
+
+        with patch.object(dr, "pdf_has_ocrable_content", return_value=True), \
+             patch.object(dr, "_local_markdown_extract_from_pdf", return_value=None), \
+             patch.object(dr, "ocr_extract_text_from_pdf", return_value=body), \
+             patch.object(dr, "pdf_page_count", return_value=5):
+            _, markers = dr.extract_text_with_markers("scan.pdf", "pdf")
+
+        assert len(markers) == 5
+        assert all(m["approximate"] is True for m in markers)
+
+
 class TestExtractWithMarkersOcrFallback:
     """When OCR returns short-but-valid text and the PyMuPDF page-boundary
     refinement fails (corrupt PDF, or the source file removed mid-processing),
