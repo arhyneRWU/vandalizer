@@ -609,6 +609,10 @@ async def chat_stream(
     # Measured before any trimming: both routing and the dialog's suggestion
     # ask "could another model have held what the user actually sent?", and the
     # post-compaction total cannot answer that — it always fits by definition.
+    # `model_config` carries this model's token safety margin, so the estimate
+    # is an upper bound rather than an optimistic one. Routing decides off this
+    # number: an estimate that reads low makes the router see headroom that is
+    # not there and decline to move a request that does not fit.
     requested_input_tokens = estimate_input_tokens(
         model_name=model_name,
         system_prompt=system_prompt or "",
@@ -616,6 +620,7 @@ async def chat_stream(
         history=previous_messages,
         documents=doc_segments,
         attachments=attachment_segments,
+        model_config=model_config,
     )
 
     routing = RoutingDecision(model_name, False, "")

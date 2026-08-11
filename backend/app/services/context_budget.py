@@ -10,6 +10,7 @@ and to Sentry.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Optional
@@ -22,6 +23,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _CHAR_TO_TOKEN_RATIO = 4
+
+# How much to inflate a tiktoken estimate for a model tiktoken does not model.
+#
+# tiktoken is OpenAI's tokenizer. For every other model it is a proxy, and
+# measurement says it is a systematically *optimistic* one: across 97 harness
+# runs against three self-hosted Qwen models, spanning requests from 307 to
+# 46,916 tokens, the estimate came in under the `prompt_tokens` the server
+# reported every single time, by 4.2% to 17.3% (mean 14.5%). It was never once
+# equal or over.
+#
+# The error only bites near the window boundary — which is exactly where this
+# product's flagship use case lives, reading a whole proposal on a 32k model.
+#
+# 1.20 covers the worst observation with headroom. The asymmetry justifies
+# rounding up rather than fitting tightly: this is a budget estimate, not an
+# invoice. Guessing high costs slightly-early routing to a bigger model.
+# Guessing low costs a hard error and no answer, which is the bug this exists
+# to prevent. Deployments that have measured their own models can set
+# `token_safety_margin` on the model config instead of living with this.
+DEFAULT_TOKEN_SAFETY_MARGIN = 1.20
 
 
 @lru_cache(maxsize=8)
@@ -42,8 +63,70 @@ def _encoding_for(model_name: str) -> str:
     return "cl100k_base"
 
 
-def count_tokens(text: str, model_name: str = "") -> int:
-    """Estimate token count for ``text`` using tiktoken when available."""
+def _is_openai_model(name: str) -> bool:
+    """True when tiktoken is this model's *real* tokenizer, not a proxy.
+
+    Prefix-matching the o-series rather than substring-matching it: "o1" as a
+    substring matches far too much to be safe on a registry of self-hosted
+    model names.
+    """
+    n = (name or "").lower()
+    if n.startswith(("gpt-", "o1", "o3", "o4")):
+        return True
+    return any(tok in n for tok in ("gpt-3.5", "gpt-4"))
+
+
+def token_safety_margin(
+    model_name: str, model_config: Optional[dict] = None
+) -> float:
+    """Multiplier that turns a tiktoken estimate into a safe upper bound.
+
+    Returns 1.0 for OpenAI models, where the count is exact and inflating it
+    would only trigger premature routing.
+
+    An explicit ``token_safety_margin`` on the model config wins for any model,
+    so a deployment can tune against its own measurements. A configured value
+    below 1.0 is refused — that re-creates the original bug by configuration,
+    leaving the planner optimistic in the direction that hard-fails.
+    """
+    if model_config:
+        raw = model_config.get("token_safety_margin")
+        if isinstance(raw, bool):
+            raw = None  # bool is an int subclass; never a meaningful margin
+        try:
+            value = float(raw) if raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            value = 0.0
+        if value >= 1.0:
+            return value
+        if value:
+            logger.warning(
+                "ignoring token_safety_margin=%r for %s: a margin below 1.0 "
+                "would under-count the request",
+                raw,
+                model_name,
+            )
+
+    if _is_openai_model(model_name):
+        return 1.0
+    return DEFAULT_TOKEN_SAFETY_MARGIN
+
+
+def _apply_margin(raw_tokens: int, margin: float) -> int:
+    """Round up — a fractional token still has to be paid for."""
+    if raw_tokens <= 0:
+        return 0
+    return math.ceil(raw_tokens * margin)
+
+
+def _count_raw_tokens(text: str, model_name: str = "") -> int:
+    """tiktoken's count, with no safety margin applied.
+
+    Internal: callers that are sizing a request want :func:`count_tokens`.
+    This exists so the margin is applied exactly once per aggregate, and so
+    truncation can convert a margin-inflated budget back into real token
+    offsets for slicing.
+    """
     if not text:
         return 0
     encoder = _get_encoder(_encoding_for(model_name))
@@ -55,15 +138,45 @@ def count_tokens(text: str, model_name: str = "") -> int:
     return max(1, len(text) // _CHAR_TO_TOKEN_RATIO)
 
 
-def count_message_tokens(message: Any, model_name: str = "") -> int:
-    """Estimate tokens for one pydantic-ai ``ModelMessage``."""
+def count_raw_tokens(text: str, model_name: str = "") -> int:
+    """Count with no safety margin, for values *stored* rather than spent.
+
+    A document's ``token_count`` is written once at ingestion and read later
+    against whichever model the user happens to pick, but the safety margin is
+    a property of that model, not of the document. Baking a margin into the
+    stored value would freeze one model's correction into every future
+    comparison — and would still leave every already-ingested document holding
+    an uncorrected number. So the stored figure stays a raw baseline and the
+    margin is applied at comparison time, by :func:`find_oversize_documents`.
+    """
+    return _count_raw_tokens(text, model_name)
+
+
+def count_tokens(
+    text: str, model_name: str = "", model_config: Optional[dict] = None
+) -> int:
+    """Estimate token count for ``text``, erring high for non-OpenAI models."""
+    raw = _count_raw_tokens(text, model_name)
+    return _apply_margin(raw, token_safety_margin(model_name, model_config))
+
+
+def count_message_tokens(
+    message: Any, model_name: str = "", model_config: Optional[dict] = None
+) -> int:
+    """Estimate tokens for one pydantic-ai ``ModelMessage``.
+
+    The margin covers the role wrapper too. The per-message overhead below is a
+    flat guess at chat-template scaffolding that real templates exceed, and
+    under-counting it is most of why small requests showed the *largest*
+    proportional error in measurement.
+    """
     total = 4  # per-message overhead for role wrapping
     for part in getattr(message, "parts", ()):
         content = getattr(part, "content", None)
         if content is None:
             content = str(part)
-        total += count_tokens(str(content), model_name)
-    return total
+        total += _count_raw_tokens(str(content), model_name)
+    return _apply_margin(total, token_safety_margin(model_name, model_config))
 
 
 # ---------------------------------------------------------------------------
@@ -225,38 +338,49 @@ def _truncate_text_to_tokens(
     max_tokens: int,
     model_name: str,
     marker: str = "\n\n…[truncated]…\n\n",
+    model_config: Optional[dict] = None,
 ) -> tuple[str, int]:
     """Truncate ``text`` to ≤ ``max_tokens``, preserving head and tail.
 
-    Returns ``(truncated_text, dropped_tokens)``.
+    ``max_tokens`` is a margin-inflated budget, but the encoder slices by real
+    token offsets, so the budget is converted back to raw token space before
+    slicing. Slicing ``toks`` by an inflated count would take *more* text than
+    the budget allows and leave the caller still over, which the last-ditch
+    loop would then have to iterate its way out of.
+
+    Returns ``(truncated_text, dropped_tokens)``, both in inflated space.
     """
-    original_tokens = count_tokens(text, model_name)
+    margin = token_safety_margin(model_name, model_config)
+    original_tokens = count_tokens(text, model_name, model_config)
     if max_tokens <= 0:
         return "", original_tokens
     if original_tokens <= max_tokens:
         return text, 0
 
-    marker_tokens = count_tokens(marker, model_name)
+    marker_tokens = count_tokens(marker, model_name, model_config)
     usable = max(1, max_tokens - marker_tokens)
+    raw_usable = max(1, int(usable / margin))
 
     encoder = _get_encoder(_encoding_for(model_name))
     if encoder is not None:
         try:
             toks = encoder.encode(text, disallowed_special=())
-            head_n = int(usable * 0.75)
-            tail_n = max(0, usable - head_n)
+            head_n = int(raw_usable * 0.75)
+            tail_n = max(0, raw_usable - head_n)
             head_text = encoder.decode(toks[:head_n]) if head_n else ""
             tail_text = encoder.decode(toks[-tail_n:]) if tail_n else ""
             new_text = head_text + marker + tail_text
-            return new_text, original_tokens - count_tokens(new_text, model_name)
+            return new_text, original_tokens - count_tokens(
+                new_text, model_name, model_config
+            )
         except Exception:
             pass
 
-    approx_chars = usable * _CHAR_TO_TOKEN_RATIO
+    approx_chars = raw_usable * _CHAR_TO_TOKEN_RATIO
     head_chars = int(approx_chars * 0.75)
     tail_chars = max(0, approx_chars - head_chars)
     new_text = text[:head_chars] + marker + (text[-tail_chars:] if tail_chars else "")
-    return new_text, original_tokens - count_tokens(new_text, model_name)
+    return new_text, original_tokens - count_tokens(new_text, model_name, model_config)
 
 
 def input_budget_for(
@@ -287,6 +411,7 @@ def estimate_input_tokens(
     history: list,
     documents: list[DocumentSegment],
     attachments: list[DocumentSegment],
+    model_config: Optional[dict] = None,
 ) -> int:
     """Input size of a request before any trimming.
 
@@ -295,13 +420,21 @@ def estimate_input_tokens(
     prompt scaffolding, so a caller can ask "would this fit?" without building
     a context and having the very documents it wants to measure trimmed out
     from under it. Kept next to the planner so the two stay in step.
+
+    Carries the model's safety margin, so the answer is an upper bound rather
+    than an optimistic guess. Routing depends on this: a router that trusts an
+    estimate which reads low will decline to move a request that does not fit.
     """
     return (
-        (count_tokens(system_prompt, model_name) if system_prompt else 0)
-        + count_tokens(user_message, model_name)
-        + sum(count_message_tokens(m, model_name) for m in history)
-        + sum(count_tokens(d.text, model_name) for d in documents)
-        + sum(count_tokens(a.text, model_name) for a in attachments)
+        (
+            count_tokens(system_prompt, model_name, model_config)
+            if system_prompt
+            else 0
+        )
+        + count_tokens(user_message, model_name, model_config)
+        + sum(count_message_tokens(m, model_name, model_config) for m in history)
+        + sum(count_tokens(d.text, model_name, model_config) for d in documents)
+        + sum(count_tokens(a.text, model_name, model_config) for a in attachments)
     )
 
 
@@ -342,12 +475,26 @@ def plan_and_compact_context(
     )
     actions: list[CompactionAction] = []
 
-    plan.system_tokens = count_tokens(system_prompt, model_name) if system_prompt else 0
-    plan.user_message_tokens = count_tokens(user_message, model_name)
-    plan.history_tokens = sum(count_message_tokens(m, model_name) for m in history)
-    plan.documents_tokens = sum(count_tokens(d.text, model_name) for d in documents)
+    # Bound to this model and its config once, so no call site below can
+    # silently size a segment with a different (optimistic) ruler than the one
+    # the budget was planned against.
+    def _ct(text: str) -> int:
+        return count_tokens(text, model_name, model_config)
+
+    def _cmt(message: Any) -> int:
+        return count_message_tokens(message, model_name, model_config)
+
+    def _trunc(text: str, max_tokens: int) -> tuple[str, int]:
+        return _truncate_text_to_tokens(
+            text, max_tokens, model_name, model_config=model_config
+        )
+
+    plan.system_tokens = _ct(system_prompt) if system_prompt else 0
+    plan.user_message_tokens = _ct(user_message)
+    plan.history_tokens = sum(_cmt(m) for m in history)
+    plan.documents_tokens = sum(_ct(d.text) for d in documents)
     plan.attachments_tokens = sum(
-        count_tokens(a.text, model_name) for a in attachments
+        _ct(a.text) for a in attachments
     )
 
     if not plan.over_budget:
@@ -390,11 +537,11 @@ def plan_and_compact_context(
     if plan.history_tokens > hist_target:
         dropped = 0
         while history and sum(
-            count_message_tokens(m, model_name) for m in history
+            _cmt(m) for m in history
         ) > hist_target:
             m = history.pop(0)
-            dropped += count_message_tokens(m, model_name)
-        plan.history_tokens = sum(count_message_tokens(m, model_name) for m in history)
+            dropped += _cmt(m)
+        plan.history_tokens = sum(_cmt(m) for m in history)
         if dropped:
             actions.append(
                 CompactionAction(
@@ -411,17 +558,17 @@ def plan_and_compact_context(
         for i, a in enumerate(attachments):
             if a.required:
                 continue
-            raw = count_tokens(a.text, model_name)
+            raw = _ct(a.text)
             allowed = max(256, int(raw * scale))
             if allowed >= raw:
                 continue
-            new_text, loss = _truncate_text_to_tokens(a.text, allowed, model_name)
+            new_text, loss = _trunc(a.text, allowed)
             dropped += loss
             attachments[i] = DocumentSegment(
                 label=a.label, text=new_text, required=a.required
             )
         plan.attachments_tokens = sum(
-            count_tokens(a.text, model_name) for a in attachments
+            _ct(a.text) for a in attachments
         )
         if dropped:
             actions.append(
@@ -439,17 +586,17 @@ def plan_and_compact_context(
         for i, d in enumerate(documents):
             if d.required:
                 continue
-            raw = count_tokens(d.text, model_name)
+            raw = _ct(d.text)
             allowed = max(512, int(raw * scale))
             if allowed >= raw:
                 continue
-            new_text, loss = _truncate_text_to_tokens(d.text, allowed, model_name)
+            new_text, loss = _trunc(d.text, allowed)
             dropped += loss
             documents[i] = DocumentSegment(
                 label=d.label, text=new_text, required=d.required
             )
         plan.documents_tokens = sum(
-            count_tokens(d.text, model_name) for d in documents
+            _ct(d.text) for d in documents
         )
         if dropped:
             actions.append(
@@ -476,9 +623,7 @@ def plan_and_compact_context(
             for seg in bucket:
                 if seg.required:
                     continue
-                if candidate is None or count_tokens(
-                    seg.text, model_name
-                ) > count_tokens(candidate.text, model_name):
+                if candidate is None or _ct(seg.text) > _ct(candidate.text):
                     candidate = seg
                     bucket_name = bucket_name_try
                     container = bucket
@@ -495,7 +640,7 @@ def plan_and_compact_context(
             )
             break
 
-        raw = count_tokens(candidate.text, model_name)
+        raw = _ct(candidate.text)
         target = raw - overflow - 8  # shave 8 extra tokens of slack
         if target < _MIN_USEFUL_TOKENS:
             # Not worth keeping a tiny sliver — drop the segment entirely.
@@ -508,9 +653,7 @@ def plan_and_compact_context(
                 )
             )
         else:
-            new_text, loss = _truncate_text_to_tokens(
-                candidate.text, target, model_name
-            )
+            new_text, loss = _trunc(candidate.text, target)
             if loss <= 0:
                 # No forward progress possible on this segment; drop it.
                 container.remove(candidate)
@@ -534,10 +677,10 @@ def plan_and_compact_context(
                     )
                 )
         plan.documents_tokens = sum(
-            count_tokens(d.text, model_name) for d in documents
+            _ct(d.text) for d in documents
         )
         plan.attachments_tokens = sum(
-            count_tokens(a.text, model_name) for a in attachments
+            _ct(a.text) for a in attachments
         )
 
     return CompactedContext(
@@ -582,14 +725,21 @@ def find_oversize_documents(
     ``documents`` is a list of dicts each with at least ``uuid``, ``title``,
     ``token_count``. Accepting dicts (not the Beanie model) keeps this usable
     from sync Celery code.
+
+    ``token_count`` is a raw tiktoken figure (see :func:`count_raw_tokens`), so
+    the model's safety margin is applied here rather than trusted from storage.
+    Without it this check under-warns by the same 4–17% the planner did, and a
+    workflow that will fail is not flagged before it runs. Applying it at read
+    time also corrects documents ingested before any of this existed.
     """
     context_window = resolve_context_window(model_name, model_config)
     reserve = _default_response_reserve(context_window)
     budget = max(1, context_window - reserve - overhead_tokens)
+    margin = token_safety_margin(model_name, model_config)
 
     oversize: list[OversizeDocument] = []
     for d in documents:
-        tc = int(d.get("token_count") or 0)
+        tc = _apply_margin(int(d.get("token_count") or 0), margin)
         if tc > budget:
             oversize.append(OversizeDocument(
                 uuid=str(d.get("uuid") or ""),
