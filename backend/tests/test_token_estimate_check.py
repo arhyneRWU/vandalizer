@@ -42,6 +42,21 @@ class TestEvaluateEstimate:
         assert result.severity == "critical"
         assert result.shortfall == 1_810
 
+    def test_a_charge_that_exactly_fills_the_budget_still_fit(self):
+        """The severity boundary, which the cases above sit far away from.
+
+        24,576 charged against a 24,576 budget fits exactly -- the request was
+        answered -- so the low estimate is latent, not the bug #1 failure. Pins
+        the comparison as ``>`` and not ``>=``, which an off-by-one refactor
+        would otherwise flip without failing a single other test.
+        """
+        result = evaluate_estimate(
+            model="m", estimated=24_000, charged=24_576, input_budget=24_576
+        )
+        assert result is not None
+        assert result.severity == "warning"
+        assert result.shortfall == 576
+
     def test_carries_the_numbers_needed_to_act(self):
         result = evaluate_estimate(
             model="Qwen/Qwen3.5-9B", estimated=100, charged=150, input_budget=1_000
