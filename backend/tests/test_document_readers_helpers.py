@@ -562,6 +562,65 @@ class TestPageSeparatorsInOcrText:
         assert text == "only page"
         assert markers == [{"char_offset": 0, "kind": "page", "value": 1}]
 
+    def test_a_stray_separator_inside_a_page_is_rejected(self):
+        """The failure this gate exists for.
+
+        A form feed that is part of a page's own content, rather than a page
+        break, yields one segment too many. Believing it would shift every page
+        after it by one — silently, and only on the documents unlucky enough to
+        contain the character.
+        """
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        assert _measured_page_markers_from_text("one\fstray\ftwo", 2) is None
+
+    def test_a_coincidental_match_is_the_known_limit(self):
+        """Honest about what the count check cannot do.
+
+        Two stray separators in a document whose real breaks were dropped can
+        add up to the right total, and this accepts it. The check is a cheap
+        guard against the common case, not a proof of correctness — which is
+        why the page-aware contract (a JSON page array) is the durable fix and
+        this is the opportunistic one.
+        """
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("a\fb\fc", 3)
+
+        assert result is not None  # accepted, and possibly wrong
+
+    def test_windows_line_endings_around_the_separator(self):
+        """OCR services that emit CRLF must not defeat the trailing-page trim."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("one\r\n\ftwo\r\n\f", 2)
+
+        assert result is not None
+        _, markers = result
+        assert [m["value"] for m in markers] == [1, 2]
+
+    def test_zero_pages_is_rejected(self):
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        assert _measured_page_markers_from_text("text", 0) is None
+
+    def test_empty_text_is_rejected(self):
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        assert _measured_page_markers_from_text("", 3) is None
+
+    def test_offsets_index_the_returned_text_not_the_original(self):
+        """Removing the separators shifts every offset after the first. A marker
+        computed against the pre-strip string would drift one character per
+        page — invisible on page 1, wrong by the end of a long document."""
+        from app.services.document_readers import _measured_page_markers_from_text
+
+        result = _measured_page_markers_from_text("aaa\fbbb\fccc", 3)
+
+        assert result is not None
+        text, markers = result
+        assert [text[m["char_offset"]] for m in markers] == ["a", "b", "c"]
+
     def test_separators_are_removed_from_the_text(self):
         """The form feed is a control character, not content. Leaving it in
         would place it right where ``annotate_pages`` inserts ``[p. N]``."""

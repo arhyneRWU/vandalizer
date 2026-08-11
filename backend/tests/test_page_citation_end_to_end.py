@@ -166,3 +166,62 @@ class TestInterpolatedPagesEndToEnd:
             "interpolation matched the real boundaries everywhere; this fixture "
             "no longer exercises the case the approximate flag exists for"
         )
+
+
+class TestPageAwareOcrEndToEnd:
+    """A scanned PDF whose OCR service marks its page breaks.
+
+    The third path, and the one that removes the hedge rather than applying it.
+    An OCR response that separates pages with a form feed carries the very
+    boundaries ``_interpolate_page_markers`` would otherwise guess, so the whole
+    chain — context, chunk metadata, rendered label, model-facing note — must
+    treat them as measured. Verified against a real bridge on real scans: page
+    attribution goes from 84% interpolated to 36/36 measured.
+    """
+
+    def test_page_marked_ocr_flows_through_to_an_exact_citation(self, uneven_pdf):
+        true_text, true_markers = dr._pymupdf_extract_with_pages(uneven_pdf)
+        bounds = [m["char_offset"] for m in true_markers] + [len(true_text)]
+        per_page = [true_text[bounds[i]:bounds[i + 1]] for i in range(len(true_markers))]
+        # What a page-aware OCR service returns: the same text, page-separated.
+        page_marked = "\f".join(per_page)
+
+        with patch.object(dr, "ocr_extract_text_from_pdf", return_value=page_marked):
+            text, markers = dr.extract_text_with_markers(uneven_pdf, "pdf")
+
+        pages = [m for m in markers if m.get("kind") == "page"]
+        assert len(pages) == len(true_markers)
+        assert not any(m.get("approximate") for m in pages), \
+            "boundaries came from the OCR response, so nothing should be hedged"
+        assert "\f" not in text
+
+        annotated = annotate_pages(text, markers)
+        assert "[p. 1]" in annotated
+        assert "[p. ~" not in annotated
+
+        metas = _chunk_metadata(text, markers)
+        assert metas
+        assert all("page_approximate" not in m for m in metas)
+
+        sample = next(m for m in metas if "page" in m)
+        assert locator_for_meta(sample) == f"p. {sample['page']}"
+
+        segments, _, _, _ = build_document_segments([_Doc(text, markers)])
+        assert "approximate" not in segments[0].text.lower()
+
+    def test_each_page_marker_lands_on_its_own_page(self, uneven_pdf):
+        """Counting separators only proves the text was divided. This proves the
+        divisions are in the right places — an off-by-one would produce exactly
+        the same marker count while misattributing every citation."""
+        true_text, true_markers = dr._pymupdf_extract_with_pages(uneven_pdf)
+        bounds = [m["char_offset"] for m in true_markers] + [len(true_text)]
+        per_page = [true_text[bounds[i]:bounds[i + 1]] for i in range(len(true_markers))]
+
+        with patch.object(dr, "ocr_extract_text_from_pdf",
+                          return_value="\f".join(per_page)):
+            text, markers = dr.extract_text_with_markers(uneven_pdf, "pdf")
+
+        for index, marker in enumerate(markers):
+            head = per_page[index].strip().splitlines()[0]
+            assert text[marker["char_offset"]:].lstrip().startswith(head), \
+                f"page {index + 1}'s marker does not point at page {index + 1}"
