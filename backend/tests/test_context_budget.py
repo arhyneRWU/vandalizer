@@ -254,6 +254,65 @@ def test_find_oversize_documents_flags_giants():
     assert oversize[0].token_count == 50_000
 
 
+def test_find_oversize_documents_corrects_a_stored_count_for_an_exact_model(
+    tmp_path,
+):
+    """A stored `token_count` is always a tiktoken figure, whatever the model.
+
+    Exact tokenization made `token_safety_margin` return 1.0 for models whose
+    vocabulary is on disk, which is right when the planner counts the text
+    itself. It is wrong here: this consumer never sees the text, only a
+    tiktoken count taken at ingestion. Passing that through uncorrected makes
+    the pre-flight check under-warn by exactly the divergence the exact
+    counting exists to remove, so a workflow that will overflow is not flagged
+    before it runs.
+    """
+    import json
+
+    from app.services.context_budget import find_oversize_documents
+
+    snap = (
+        tmp_path / "hub" / "models--Qwen--Qwen3-VL-8B-Instruct" / "snapshots" / "r1"
+    )
+    snap.mkdir(parents=True)
+    (snap / "tokenizer.json").write_text(json.dumps({
+        "version": "1.0", "truncation": None, "padding": None,
+        "added_tokens": [], "normalizer": None,
+        "pre_tokenizer": {"type": "Whitespace"}, "post_processor": None,
+        "decoder": None,
+        "model": {"type": "WordLevel", "vocab": {"[UNK]": 0}, "unk_token": "[UNK]"},
+    }))
+
+    # 32,768 window -> 8,192 reserve -> 23,552 budget after 1,024 overhead.
+    # A stored 23,000 looks like it fits, and does not once corrected.
+    docs = [{"uuid": "a", "title": "proposal.pdf", "token_count": 23_000}]
+    oversize = find_oversize_documents(
+        documents=docs,
+        model_name="Qwen/Qwen3-VL-8B-Instruct",
+        model_config={
+            "context_window": 32_768,
+            "tokenizer_cache_root": str(tmp_path),
+        },
+    )
+    assert [o.uuid for o in oversize] == ["a"], (
+        "a stored tiktoken count was compared against the budget with no "
+        "divergence allowance, so an overflowing document was not flagged"
+    )
+
+
+def test_find_oversize_documents_does_not_inflate_for_openai_models():
+    """tiktoken *is* the tokenizer there, so the stored count is already exact
+    and inflating it would flag documents that genuinely fit."""
+    from app.services.context_budget import find_oversize_documents
+
+    docs = [{"uuid": "a", "title": "doc.txt", "token_count": 23_000}]
+    assert find_oversize_documents(
+        documents=docs,
+        model_name="gpt-4o",
+        model_config={"context_window": 32_768},
+    ) == []
+
+
 def test_find_oversize_documents_respects_model_config_override():
     from app.services.context_budget import find_oversize_documents
 

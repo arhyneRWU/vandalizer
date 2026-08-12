@@ -244,23 +244,9 @@ def token_safety_margin(
     below 1.0 is refused — that re-creates the original bug by configuration,
     leaving the planner optimistic in the direction that hard-fails.
     """
-    if model_config:
-        raw = model_config.get("token_safety_margin")
-        if isinstance(raw, bool):
-            raw = None  # bool is an int subclass; never a meaningful margin
-        try:
-            value = float(raw) if raw not in (None, "") else 0.0
-        except (TypeError, ValueError):
-            value = 0.0
-        if value >= 1.0:
-            return value
-        if value:
-            logger.warning(
-                "ignoring token_safety_margin=%r for %s: a margin below 1.0 "
-                "would under-count the request",
-                raw,
-                model_name,
-            )
+    configured = _configured_margin(model_name, model_config)
+    if configured is not None:
+        return configured
 
     # An exact count needs no correction. Inflating it would only route early.
     if resolve_exact_tokenizer(model_name, model_config) is not None:
@@ -268,6 +254,62 @@ def token_safety_margin(
     if _is_openai_model(model_name):
         return 1.0
     _warn_estimated_once(model_name or "<unnamed>")
+    return DEFAULT_TOKEN_SAFETY_MARGIN
+
+
+def _configured_margin(
+    model_name: str, model_config: Optional[dict]
+) -> Optional[float]:
+    """A deployment's own measured margin, or None when it set none.
+
+    Shared by both margin functions: a deployment that measured its own
+    divergence knows better than either default, whichever question is being
+    asked.
+    """
+    if not model_config:
+        return None
+    raw = model_config.get("token_safety_margin")
+    if isinstance(raw, bool):
+        raw = None  # bool is an int subclass; never a meaningful margin
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        value = 0.0
+    if value >= 1.0:
+        return value
+    if value:
+        logger.warning(
+            "ignoring token_safety_margin=%r for %s: a margin below 1.0 "
+            "would under-count the request",
+            raw,
+            model_name,
+        )
+    return None
+
+
+def stored_count_margin(
+    model_name: str, model_config: Optional[dict] = None
+) -> float:
+    """Allowance for a token count taken with tiktoken and stored earlier.
+
+    Deliberately not :func:`token_safety_margin`. That one answers "how safe
+    is a count I am about to take?", and returns 1.0 once the model's own
+    vocabulary is on disk, because the planner then counts the text exactly.
+
+    This answers a different question: "how safe is a count someone else took
+    earlier, with tiktoken, when I do not have the text to recount?" A stored
+    ``token_count`` is a tiktoken figure whatever we could compute now, so the
+    divergence is still there and still has to be allowed for. Reusing the
+    other function here made the oversize check pass a raw tiktoken count
+    straight through for exactly the models exact tokenization serves,
+    under-warning by the divergence it exists to remove.
+    """
+    configured = _configured_margin(model_name, model_config)
+    if configured is not None:
+        return configured
+    # tiktoken *is* the tokenizer for these, so the stored figure is exact.
+    if _is_openai_model(model_name):
+        return 1.0
     return DEFAULT_TOKEN_SAFETY_MARGIN
 
 
@@ -938,16 +980,21 @@ def find_oversize_documents(
     from sync Celery code.
 
     ``token_count`` is a raw tiktoken figure (see :func:`count_raw_tokens`), so
-    the model's safety margin is applied here rather than trusted from storage.
+    a divergence allowance is applied here rather than trusted from storage.
     Without it this check under-warns by the same 4–17% the planner did, and a
     workflow that will fail is not flagged before it runs. Applying it at read
     time also corrects documents ingested before any of this existed.
+
+    The allowance comes from :func:`stored_count_margin`, not
+    :func:`token_safety_margin` — this consumer never sees the document text,
+    only a count taken with tiktoken, so having the model's real vocabulary on
+    disk does not make that stored number exact.
     """
     budget = input_budget(model_name, model_config, overhead_tokens=overhead_tokens)
-    margin = token_safety_margin(model_name, model_config)
     # Stored counts are raw tiktoken figures, so the margin is applied at read
     # time rather than trusted from storage. That also corrects documents
     # ingested before any of this existed, without a backfill.
+    margin = stored_count_margin(model_name, model_config)
     oversize = [
         OversizeDocument(
             uuid=d.uuid,
