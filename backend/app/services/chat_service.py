@@ -237,12 +237,24 @@ def select_chat_system_prompt(
 
 
 def _suggest_model_for_overflow(
-    compacted, model_name: str, model_config: Optional[dict], sys_config_doc: dict
+    compacted,
+    model_name: str,
+    model_config: Optional[dict],
+    sys_config_doc: dict,
+    input_tokens: int,
 ) -> Optional[dict]:
     """A larger model to offer, or None when nothing needs offering.
 
     Only when the request actually overflowed — a suggestion on a request that
     fit would be noise, and the dialog it feeds only opens on overflow.
+
+    ``input_tokens`` must be the size of the request *before* compaction. The
+    question being asked is "could another model have held what the user
+    actually sent?", and the compacted total cannot answer it: compaction is
+    defined as making the request fit, so ``compacted.plan.total_input_tokens``
+    is always within the current model's budget. Passing it made
+    :func:`suggest_document_model` return None every time and the dialog's
+    fourth option could never appear.
     """
     if not compacted.actions:
         return None
@@ -250,7 +262,7 @@ def _suggest_model_for_overflow(
         current_name=model_name,
         current_config=model_config,
         models=(sys_config_doc or {}).get("available_models") or [],
-        input_tokens=compacted.plan.total_input_tokens,
+        input_tokens=input_tokens,
     )
     if not suggestion:
         return None
@@ -476,6 +488,18 @@ async def chat_stream(
     # arrives as one file and gets read as one. When it doesn't fit, trimming
     # answers from part of it. If the deployment nominated a bigger model, use
     # it rather than silently dropping the middle. See services/model_routing.
+    # Measured before any trimming: both routing and the dialog's suggestion
+    # ask "could another model have held what the user actually sent?", and the
+    # post-compaction total cannot answer that — it always fits by definition.
+    requested_input_tokens = estimate_input_tokens(
+        model_name=model_name,
+        system_prompt=system_prompt or "",
+        user_message=message,
+        history=previous_messages,
+        documents=doc_segments,
+        attachments=attachment_segments,
+    )
+
     routing = RoutingDecision(model_name, False, "")
     candidate_name = (sys_config_doc or {}).get("long_document_model") or ""
     if candidate_name and (doc_segments or attachment_segments):
@@ -485,14 +509,7 @@ async def chat_stream(
             current_config=model_config,
             candidate_name=candidate_name,
             candidate_config=candidate_config,
-            input_tokens=estimate_input_tokens(
-                model_name=model_name,
-                system_prompt=system_prompt or "",
-                user_message=message,
-                history=previous_messages,
-                documents=doc_segments,
-                attachments=attachment_segments,
-            ),
+            input_tokens=requested_input_tokens,
         )
         if routing.switched:
             logger.info(
@@ -522,6 +539,7 @@ async def chat_stream(
         # would walk around that gate.
         "suggested_model": _suggest_model_for_overflow(
             compacted, model_name, model_config, sys_config_doc,
+            requested_input_tokens,
         ),
     }) + "\n"
     # Switching the model without saying so is the same failure as trimming a
