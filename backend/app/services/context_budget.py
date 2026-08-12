@@ -49,12 +49,34 @@ _CHAR_TO_TOKEN_RATIO = 4
 DEFAULT_TOKEN_SAFETY_MARGIN = 1.20
 
 
-# Where vLLM leaves the vocabulary for every model it serves. Tokenizing needs
-# the vocabulary, not the weights and not the GPU, so this is pure local CPU
-# work — roughly 1.5 ms for a 36-page proposal, against 0.3 ms for the tiktoken
-# call it replaces. Overridable per model, and per deployment, because this
-# path is a property of how the host mounts its model cache.
+# Where a self-hosted server leaves the vocabulary for every model it serves.
+# Tokenizing needs the vocabulary, not the weights and not the GPU, so this is
+# pure local CPU work — roughly 1.5 ms for a 36-page proposal, against 0.3 ms
+# for the tiktoken call it replaces.
+#
+# Only the last-resort default. It is a property of how a particular host
+# mounts its model cache, so it is overridable per model
+# (``tokenizer_cache_root`` on the model config) and per deployment
+# (``TOKENIZER_CACHE_ROOT``). Resolution order is model config, then settings,
+# then this.
 DEFAULT_TOKENIZER_CACHE_ROOT = "/hf-cache"
+
+
+@lru_cache(maxsize=1)
+def _settings_tokenizer_cache_root() -> str:
+    """The deployment-wide cache root, or "" when it cannot be read.
+
+    Cached because this is consulted on every token count. Deliberately
+    forgiving: a settings failure must degrade to the default, not take down
+    the budget planner and with it chat.
+    """
+    try:
+        from app.config import Settings
+
+        return Settings().tokenizer_cache_root or ""
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("could not read tokenizer_cache_root from settings")
+        return ""
 
 # Tokens a request costs beyond the text it carries.
 #
@@ -169,7 +191,11 @@ def resolve_exact_tokenizer(model_name: str, model_config: Optional[dict] = None
     if explicit:
         return _load_tokenizer(str(explicit))
 
-    root = cfg.get("tokenizer_cache_root") or DEFAULT_TOKENIZER_CACHE_ROOT
+    root = (
+        cfg.get("tokenizer_cache_root")
+        or _settings_tokenizer_cache_root()
+        or DEFAULT_TOKENIZER_CACHE_ROOT
+    )
     path = _find_vocabulary(model_name or "", str(root))
     return _load_tokenizer(path) if path else None
 
@@ -599,8 +625,9 @@ def estimate_input_tokens(
     """Input size of a request before any trimming.
 
     Mirrors what ``plan_and_compact_context`` counts into
-    ``BudgetPlan.total_input_tokens``, including the same 64-token allowance for
-    prompt scaffolding, so a caller can ask "would this fit?" without building
+    ``BudgetPlan.total_input_tokens``, including the same
+    ``REQUEST_SCAFFOLD_TOKENS`` allowance for prompt scaffolding, so a caller
+    can ask "would this fit?" without building
     a context and having the very documents it wants to measure trimmed out
     from under it. Kept next to the planner so the two stay in step.
 

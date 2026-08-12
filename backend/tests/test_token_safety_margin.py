@@ -37,7 +37,7 @@ from app.services.context_budget import (
 
 # (model, planner's pre-fix estimate, prompt_tokens the model reported)
 #
-# Harvested from 97 harness runs in ~/vandalizer-workflow/evidence — every run
+# Harvested from 97 end-to-end runs against live model servers — every run
 # that produced BOTH a `context_budget` chunk (the planner's belief) and a
 # `usage` chunk (what the server actually charged), deduplicated to 26 distinct
 # observations. Three models, request sizes spanning 307 to 46,916 tokens.
