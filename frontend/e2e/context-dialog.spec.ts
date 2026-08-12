@@ -6,8 +6,8 @@ import { join } from 'node:path'
  * Screenshot evidence for the parts of the matrix that only exist on screen.
  *
  * Answer *content* — citations, hedging, determinism — is measured far more
- * reliably by the API harness (`~/vandalizer-workflow/harness/run_matrix.py`),
- * which reads the same stream this page renders without any DOM scraping.
+ * reliably against the streaming API directly, which carries the same data
+ * this page renders without any DOM scraping.
  * What genuinely needs a browser is small and structural:
  *
  *   - the context-limit dialog's options, and their order
