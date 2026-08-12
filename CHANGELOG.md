@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **A long document can now be answered by a bigger model instead of being trimmed.** A document larger than the chat model's context window was compacted — the middle was dropped — and the model then answered confidently from the part that survived. Measured on a 79-page proposal: 41,213 tokens against a 32,768-token model, with 33 of 79 pages reaching the model, while the same deployment had a 262,144-token model configured that holds it four times over. "The proposal doesn't mention X" can therefore mean "X was in the part you didn't send", and nothing on screen distinguishes the two. Two complementary paths are added, both off by default. **Automatic routing:** an admin nominates a long-document model in System Config, and a request that does not fit is moved to it *before* being sent — nothing is dispatched to a model to discover whether it fits. **Offered choice:** when nothing was nominated, the context-limit dialog now offers a larger model as its first option, ahead of the options that discard content. Both are gated on the stored `privacy` label as a relative ordering (internal is stricter than blank, blank stricter than external; equal-or-stricter is allowed), so a request never escalates to a weaker-privacy model, and the suggestion is computed server-side so the browser cannot route around the gate. A successful route is announced in the chat as an informational notice naming both models and the size, because switching the model without saying so is the same failure as trimming a document without saying so.
+
 ## [v4.10.0] - 2026-08-10
 
 ### Added
