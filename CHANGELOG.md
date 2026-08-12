@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **A per-model sampling temperature, settable by an admin.** The shared settings builder never sent a temperature, so every request built through it — chat, extraction, RAG, prompt agents, and workflows — went out with none and whatever the provider defaults to applied, with no way for an admin to change it. A `temperature` field already existed on `UserConfig` and the config API read and wrote it, but nothing consumed it when building a request: a control that looked like it worked and did nothing. **Admin → System Config → Available Models → Advanced settings** now carries a Temperature field per model, alongside the existing per-model `max_tokens` and `timeout` overrides. Leaving it blank sends nothing and keeps today's behaviour exactly, so existing deployments are unchanged. Setting it to `0` pins the model to greedy decoding, which is the case the field exists for — reproducible extraction runs. Values are coerced on the way in: bools and non-numerics rejected, ints accepted as floats, and anything outside `0.0`–`2.0` dropped rather than clamped, because providers reject out-of-range values outright and dropping keeps requests working instead of failing every call until an admin notices. Services that already pass their own explicit temperature (the extraction judge, the KB optimizer) are untouched.
+
 ## [v4.10.0] - 2026-08-10
 
 ### Added
