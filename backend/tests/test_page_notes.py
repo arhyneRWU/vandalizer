@@ -18,7 +18,7 @@ is the failure that matters — an estimated page boundary reaching the reader a
 measured fact, with nothing on screen to distinguish the two.
 
 These tests pin the shape of the instruction. They cannot make a model obey it;
-`~/vandalizer-workflow/harness/run_matrix.py` measures whether it did.
+only an end-to-end run against a live model measures whether it did.
 """
 
 from app.services.chat_service import page_note_for
@@ -109,7 +109,7 @@ class TestMixedMarkers:
 
         Those are overwhelmingly digital PDFs with real measured boundaries, so
         absence reads as measured. Documented because it is a real
-        false-negative source: the NOAA proposal's 79 interpolated markers
+        false-negative source: one 79-page proposal's interpolated markers
         predate the flag and will not hedge.
         """
         note = page_note_for(_pages(), annotated=True)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -84,6 +85,43 @@ class TestResolvingTheVocabulary:
             {"tokenizer_cache_root": str(vocab_dir)},
         )
         assert tok is not None
+
+    def test_the_deployment_setting_is_used_when_no_model_config_says_otherwise(
+        self, vocab_dir
+    ):
+        """A deployment that mounts its cache somewhere else must be able to
+        say so once, rather than per model.
+
+        Without this the only lever is `tokenizer_cache_root` on every model,
+        and the hardcoded default is a path that exists on exactly one host.
+        """
+        from app.services import context_budget
+
+        context_budget._settings_tokenizer_cache_root.cache_clear()
+        with patch.object(
+            context_budget,
+            "_settings_tokenizer_cache_root",
+            return_value=str(vocab_dir),
+        ):
+            assert (
+                resolve_exact_tokenizer("Qwen/Qwen3-VL-8B-Instruct", {}) is not None
+            )
+
+    def test_the_model_config_still_beats_the_deployment_setting(self, vocab_dir):
+        """Per-model wins, so one misconfigured model can be corrected without
+        moving the whole deployment's cache."""
+        from app.services import context_budget
+
+        context_budget._settings_tokenizer_cache_root.cache_clear()
+        with patch.object(
+            context_budget,
+            "_settings_tokenizer_cache_root",
+            return_value=str(vocab_dir),
+        ):
+            assert resolve_exact_tokenizer(
+                "Qwen/Qwen3-VL-8B-Instruct",
+                {"tokenizer_cache_root": "/nowhere-at-all"},
+            ) is None
 
     def test_an_explicit_path_on_the_model_config_wins(self, tmp_path):
         path = _write_tokenizer(tmp_path / "custom")
