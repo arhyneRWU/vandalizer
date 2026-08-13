@@ -884,6 +884,26 @@ async def reorder_steps(workflow_id: str, step_ids: list[str], user: User) -> bo
 # Validation Plan
 # ---------------------------------------------------------------------------
 
+def workflow_has_steps(wf_data: dict | None) -> bool:
+    """True when the dereferenced workflow definition has at least one step."""
+    return bool((wf_data or {}).get("steps"))
+
+
+def require_workflow_steps(wf_data: dict | None, action: str) -> None:
+    """Reject validation work on a workflow that has no steps yet.
+
+    Every validation surface reads the step list to decide what the output
+    should contain. With no steps that read silently yields nothing, so the
+    LLM drafts a plan from the name alone and grades a run whose only output
+    is an internal id — burning tokens to report failures against fields the
+    workflow does not have.
+    """
+    if not workflow_has_steps(wf_data):
+        raise ValueError(
+            f"This workflow has no steps yet — add at least one step before {action}.",
+        )
+
+
 def compute_workflow_definition_hash(wf_data: dict | None) -> str:
     """Deterministic hash of the parts of a workflow that a validation plan depends on.
 
@@ -1396,6 +1416,7 @@ async def generate_validation_plan(workflow_id: str, user: User) -> list[dict]:
     wf_data = await get_workflow(workflow_id)
     if not wf_data:
         raise ValueError("Workflow not found")
+    require_workflow_steps(wf_data, "generating a validation plan")
 
     # Build a data-flow-aware analysis of the workflow for the LLM.
     # For each step, describe what it does, what data it produces, and what
@@ -2399,11 +2420,12 @@ async def validate_workflow(workflow_id: str, user: User | None = None) -> dict:
         if not wf:
             raise ValueError("Workflow not found")
 
+    wf_data = await get_workflow(workflow_id)
+    require_workflow_steps(wf_data, "validating it")
+
     plan = wf.validation_plan
     if not plan:
         raise ValueError("No validation plan - generate or add checks first")
-
-    wf_data = await get_workflow(workflow_id)
 
     # Flag runs graded against a stale plan — the grade card renders a caveat
     # so a low grade caused by orphaned/drifted checks isn't mistaken for a

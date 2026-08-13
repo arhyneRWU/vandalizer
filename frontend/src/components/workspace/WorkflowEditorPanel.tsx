@@ -647,6 +647,10 @@ export function WorkflowEditorPanel() {
   // --- tab badge counts ---
   const inputBadge = 0
 
+  // Validation and export both describe a workflow's steps. With none, they
+  // have nothing to describe — the tabs prompt for a first step instead.
+  const hasSteps = (workflow.steps?.length ?? 0) > 0
+
   // --- render ---
 
   return (
@@ -963,21 +967,31 @@ export function WorkflowEditorPanel() {
 
         {activeTab === 'input' && <InputTab workflow={workflow} openWorkflowId={openWorkflowId} onRefresh={refresh} />}
         {activeTab === 'validate' && (
-          <ValidateTab
-            workflowId={openWorkflowId}
-            itemTitle={workflow?.name}
-            selectedDocUuids={selectedDocUuids}
-            bumpActivitySignal={bumpActivitySignal}
-            canManage={canManage}
-            onValidated={() => {
-              refreshSparkline()
-              if (openWorkflowId) getWorkflowQualityStatus(openWorkflowId).then(setQualityStatus).catch(() => {})
-            }}
-          />
+          hasSteps ? (
+            <ValidateTab
+              workflowId={openWorkflowId}
+              itemTitle={workflow?.name}
+              selectedDocUuids={selectedDocUuids}
+              bumpActivitySignal={bumpActivitySignal}
+              canManage={canManage}
+              onValidated={() => {
+                refreshSparkline()
+                if (openWorkflowId) getWorkflowQualityStatus(openWorkflowId).then(setQualityStatus).catch(() => {})
+              }}
+            />
+          ) : (
+            <NoStepsNotice
+              headline="Add a step before validating"
+              body="Validation grades what this workflow produces against a checklist drawn from its steps. With no steps there is nothing to run, grade, or improve yet."
+              actionLabel={canManage ? 'Go to Design' : undefined}
+              onAction={canManage ? () => setActiveTab('design') : undefined}
+            />
+          )
         )}
         {activeTab === 'advanced' && (
           <AdvancedTab
             workflowId={workflow.id}
+            hasSteps={hasSteps}
             onImportDefinition={() => importInputRef.current?.click()}
             onExportDefinition={() => window.open(exportWorkflowUrl(workflow.id), '_blank')}
           />
@@ -8163,41 +8177,55 @@ function AdvancedToolCard({
   title,
   description,
   onClick,
+  disabled = false,
+  disabledReason,
   style,
 }: {
   title: string
   description: string
   onClick: () => void
+  disabled?: boolean
+  disabledReason?: string
   style?: CSSProperties
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
+      title={disabled ? disabledReason : undefined}
       style={{
         display: 'flex', flexDirection: 'column', gap: 6, padding: 16,
-        border: '1px solid #e5e7eb', borderRadius: 8, backgroundColor: '#fff',
-        cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+        border: '1px solid #e5e7eb', borderRadius: 8,
+        backgroundColor: disabled ? '#f9fafb' : '#fff',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
+        textAlign: 'left', fontFamily: 'inherit',
         transition: 'box-shadow 0.15s', ...style,
       }}
     >
       <div style={{ fontSize: 14, fontWeight: 600, color: '#202124' }}>{title}</div>
-      <div style={{ fontSize: 12, color: '#5f6368', lineHeight: 1.4 }}>{description}</div>
+      <div style={{ fontSize: 12, color: '#5f6368', lineHeight: 1.4 }}>
+        {disabled && disabledReason ? disabledReason : description}
+      </div>
     </button>
   )
 }
 
 function AdvancedTab({
   workflowId,
+  hasSteps,
   onImportDefinition,
   onExportDefinition,
 }: {
   workflowId: string
+  hasSteps: boolean
   onImportDefinition: () => void
   onExportDefinition: () => void
 }) {
   return (
     <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Import / Export Definition */}
+      {/* Import / Export Definition — import stays available with no steps,
+          since importing is one way to fill an empty workflow. */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         <AdvancedToolCard
           title="Import Definition"
@@ -8208,10 +8236,66 @@ function AdvancedTab({
           title="Export Definition"
           description="Download as a shareable JSON file"
           onClick={onExportDefinition}
+          disabled={!hasSteps}
+          disabledReason="Add at least one step before exporting — there is nothing to share yet"
         />
       </div>
 
-      <WorkflowApiSection workflowId={workflowId} />
+      {hasSteps ? (
+        <WorkflowApiSection workflowId={workflowId} />
+      ) : (
+        <div style={{
+          padding: 16, backgroundColor: '#f9fafb', borderRadius: 8,
+          border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <Info style={{ width: 16, height: 16, color: '#6b7280', flexShrink: 0 }} />
+          <div style={{ fontSize: 12, color: '#6b7280', lineHeight: 1.5 }}>
+            Add at least one step to run this workflow via the API. Instructions
+            and code samples appear here once it does something.
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* Shown in place of a tab whose whole purpose needs steps to exist. */
+function NoStepsNotice({
+  headline,
+  body,
+  actionLabel,
+  onAction,
+}: {
+  headline: string
+  body: string
+  actionLabel?: string
+  onAction?: () => void
+}) {
+  return (
+    <div style={{ padding: 24 }}>
+      <div style={{
+        padding: 24, border: '1px solid #e5e7eb', borderRadius: 8,
+        backgroundColor: '#fafafa', display: 'flex', gap: 12, alignItems: 'flex-start',
+      }}>
+        <ClipboardCheck style={{ width: 20, height: 20, color: '#6b7280', flexShrink: 0, marginTop: 2 }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#202124' }}>{headline}</div>
+          <div style={{ fontSize: 13, color: '#5f6368', marginTop: 6, lineHeight: 1.5 }}>{body}</div>
+          {actionLabel && onAction && (
+            <button
+              type="button"
+              onClick={onAction}
+              style={{
+                marginTop: 14, padding: '6px 14px', fontSize: 12, fontWeight: 600,
+                fontFamily: 'inherit', borderRadius: 6, border: '1px solid #d1d5db',
+                backgroundColor: '#fff', color: '#374151', cursor: 'pointer',
+              }}
+            >
+              {actionLabel}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

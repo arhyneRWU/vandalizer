@@ -549,6 +549,11 @@ async def export_workflow(workflow_id: str, user: User = Depends(get_current_use
     wf = await get_authorized_workflow(workflow_id, user)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if not wf.steps:
+        raise HTTPException(
+            status_code=400,
+            detail="This workflow has no steps yet — add at least one step before exporting it.",
+        )
 
     from app.services import export_import_service as eis
 
