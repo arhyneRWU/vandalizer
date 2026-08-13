@@ -8,6 +8,7 @@ import {
   useNavigate,
   useRouterState,
 } from '@tanstack/react-router'
+import type { SupportSearch } from './types/support'
 import { useBranding } from './contexts/BrandingContext'
 import { ProtectedRoute } from './components/auth/ProtectedRoute'
 import { useCertificationPanel } from './contexts/CertificationPanelContext'
@@ -289,7 +290,10 @@ const supportRoute = createRoute({
   path: '/support',
   // Queue filters live in the URL so they survive a refresh (and can be shared
   // or bookmarked). Anything unrecognized falls back to the default.
-  validateSearch: (search: Record<string, unknown>) => {
+  // The explicit SupportSearch return type is load-bearing: without it the
+  // schema infers as six *required* keys, and every call site that patches a
+  // single filter fails to typecheck.
+  validateSearch: (search: Record<string, unknown>): SupportSearch => {
     const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): T | undefined =>
       typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined
     return {

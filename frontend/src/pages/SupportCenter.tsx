@@ -14,13 +14,13 @@ import {
   type PositiveFeedbackItem, type PositiveFeedbackStats,
 } from '../api/feedback'
 import type {
-  SupportTicket, SupportTicketSummary, SupportAttachment,
+  SupportTicket, SupportTicketSummary, SupportAttachment, SupportSearch,
+  SupportStatusFilter as StatusFilter,
+  SupportPriorityFilter as PriorityFilter,
+  SupportClassificationFilter as ClassificationFilter,
 } from '../types/support'
 
 type View = 'list' | 'new' | 'chat' | 'whats_working'
-type StatusFilter = 'all' | 'open' | 'in_progress' | 'closed'
-type PriorityFilter = 'all' | 'low' | 'normal' | 'high'
-type ClassificationFilter = 'all' | 'bug' | 'enhancement' | 'feature_request'
 
 const MAX_BYTES = 10 * 1024 * 1024
 
@@ -63,19 +63,10 @@ const statCardStyle = (color: string): React.CSSProperties => ({
   border: '1px solid #e5e7eb', borderLeft: `4px solid ${color}`,
 })
 
-type SupportSearch = {
-  ticket?: string
-  status?: StatusFilter
-  priority?: PriorityFilter
-  classification?: ClassificationFilter
-  tag?: string
-  q?: string
-}
-
 export default function SupportCenter() {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const urlSearch = useSearch({ from: '/support' }) as SupportSearch
+  const urlSearch = useSearch({ from: '/support' })
   const { toast } = useToast()
 
   const [view, setView] = useState<View>('list')
