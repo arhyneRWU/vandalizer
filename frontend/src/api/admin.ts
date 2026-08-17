@@ -361,7 +361,7 @@ export interface SystemConfigData {
   quality_config: Record<string, unknown>
   auth_methods: string[]
   oauth_providers: Record<string, unknown>[]
-  available_models: { id: string; name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null }[]
+  available_models: { id: string; name: string; tag: string; external: boolean; thinking: boolean; endpoint?: string; api_protocol?: string; api_key?: string; speed?: string; tier?: string; privacy?: string; supports_structured?: boolean; multimodal?: boolean; supports_pdf?: boolean; context_window?: number; request_timeout_seconds?: number | null; response_reserve_tokens?: number | null; temperature?: number | null }[]
   default_model: string
   long_document_model?: string
   ocr_endpoint: string
@@ -472,6 +472,7 @@ export type ModelFormData = {
   context_window?: number
   request_timeout_seconds?: number | null
   response_reserve_tokens?: number | null
+  temperature?: number | null
 }
 
 export function addModel(data: ModelFormData) {

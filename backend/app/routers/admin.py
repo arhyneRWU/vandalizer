@@ -340,6 +340,10 @@ class ModelAddRequest(BaseModel):
     # response_reserve_tokens sets the output cap (tokens reserved for the answer).
     request_timeout_seconds: Optional[int] = None
     response_reserve_tokens: Optional[int] = None
+    # Sampling temperature. None = send nothing and let the provider default
+    # apply (previous behaviour). 0 is a meaningful value, not "unset": it is
+    # what makes extraction and page citations reproducible.
+    temperature: Optional[float] = None
     # Cost rates in USD per 1M tokens. Populated for external paid providers
     # so KB Autovalidate can show dollar cost estimates in its budget modal.
     # None = not declared; UI falls back to tokens-only display.
@@ -1658,6 +1662,7 @@ async def add_model(
             "context_window": body.context_window,
             "request_timeout_seconds": body.request_timeout_seconds,
             "response_reserve_tokens": body.response_reserve_tokens,
+            "temperature": body.temperature,
             "cost_per_1m_input": body.cost_per_1m_input,
             "cost_per_1m_output": body.cost_per_1m_output,
         }
@@ -1801,6 +1806,7 @@ async def update_model(
         "context_window": body.context_window,
         "request_timeout_seconds": body.request_timeout_seconds,
         "response_reserve_tokens": body.response_reserve_tokens,
+        "temperature": body.temperature,
         "cost_per_1m_input": body.cost_per_1m_input,
         "cost_per_1m_output": body.cost_per_1m_output,
     }

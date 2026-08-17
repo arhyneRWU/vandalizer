@@ -151,6 +151,43 @@ class TestOutputCapAndTimeout:
         s = build_thinking_model_settings("m", system_config_doc=cfg)
         assert s["timeout"] == 600.0
 
+    def test_temperature_is_absent_when_the_model_does_not_set_one(self):
+        """Unconfigured models keep provider defaults — no silent behaviour change."""
+        s = build_thinking_model_settings("m", system_config_doc=_cfg(name="m"))
+        assert "temperature" not in s
+
+    def test_temperature_override_is_sent(self):
+        cfg = _cfg(name="m", temperature=0.2)
+        s = build_thinking_model_settings("m", system_config_doc=cfg)
+        assert s["temperature"] == 0.2
+
+    def test_temperature_zero_is_sent_not_treated_as_unset(self):
+        """0.0 is the whole point of the setting — the deterministic case.
+
+        A truthiness check (``value or default``) silently drops it, which is
+        indistinguishable from never having configured it.
+        """
+        cfg = _cfg(name="m", temperature=0)
+        s = build_thinking_model_settings("m", system_config_doc=cfg)
+        assert s["temperature"] == 0.0
+
+    def test_integer_temperature_is_accepted_as_a_float(self):
+        cfg = _cfg(name="m", temperature=1)
+        s = build_thinking_model_settings("m", system_config_doc=cfg)
+        assert s["temperature"] == 1.0
+
+    def test_out_of_range_temperature_is_ignored(self):
+        """Providers reject these outright; dropping the value keeps the request
+        working rather than failing every call until an admin notices."""
+        for bad in (-0.5, 2.5, 100):
+            s = build_thinking_model_settings("m", system_config_doc=_cfg(name="m", temperature=bad))
+            assert "temperature" not in s, bad
+
+    def test_non_numeric_temperature_is_ignored(self):
+        for bad in ("warm", "", None, True, [0.5]):
+            s = build_thinking_model_settings("m", system_config_doc=_cfg(name="m", temperature=bad))
+            assert "temperature" not in s, bad
+
     def test_thinking_model_gets_output_headroom(self):
         # Tiny window → reserve would be 1024; a thinking model needs room for
         # both reasoning and an answer, so the cap floors at 2048.
