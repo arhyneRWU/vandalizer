@@ -644,16 +644,33 @@ class TestBuildResult:
 # run_workflow
 # ---------------------------------------------------------------------------
 
+def _stub_steps(mock_step_cls, names):
+    """Resolve the workflow's step ids to real-looking steps.
+
+    Runs are refused for a workflow with nothing to do, so the run path now
+    reads the step docs to tell a real step from the empty "Document" trigger.
+    """
+    docs = []
+    for step_name in names:
+        step = MagicMock()
+        step.name = step_name  # `name` is reserved in the MagicMock ctor
+        step.tasks = ["task-id"]
+        docs.append(step)
+    mock_step_cls.find.return_value.to_list = AsyncMock(return_value=docs)
+
+
 class TestRunWorkflow:
     @patch("app.services.workflow_service.celery_app")
     @patch("app.services.workflow_service.WorkflowResult")
     @patch("app.services.workflow_service.get_user_model_name", new_callable=AsyncMock, return_value="gpt-4o")
     @patch("app.services.workflow_service.Workflow")
-    async def test_run_workflow_creates_result_and_sends_task(self, mock_wf_cls, mock_model, mock_wr_cls, mock_celery):
+    @patch("app.services.workflow_service.WorkflowStep")
+    async def test_run_workflow_creates_result_and_sends_task(self, mock_step_cls, mock_wf_cls, mock_model, mock_wr_cls, mock_celery):
         from app.services.workflow_service import run_workflow
 
         wf = _make_workflow(steps=[_fake_oid(), _fake_oid()])
         mock_wf_cls.get = AsyncMock(return_value=wf)
+        _stub_steps(mock_step_cls, ["Extract", "Summarize"])
 
         mock_result = MagicMock()
         mock_result.id = _fake_oid()
@@ -691,11 +708,13 @@ class TestRunWorkflowBatch:
     @patch("app.services.workflow_service.WorkflowResult")
     @patch("app.services.workflow_service.get_user_model_name", new_callable=AsyncMock, return_value="gpt-4o")
     @patch("app.services.workflow_service.Workflow")
-    async def test_batch_creates_one_result_per_doc(self, mock_wf_cls, mock_model, mock_wr_cls, mock_celery):
+    @patch("app.services.workflow_service.WorkflowStep")
+    async def test_batch_creates_one_result_per_doc(self, mock_step_cls, mock_wf_cls, mock_model, mock_wr_cls, mock_celery):
         from app.services.workflow_service import run_workflow_batch
 
         wf = _make_workflow(steps=[_fake_oid()])
         mock_wf_cls.get = AsyncMock(return_value=wf)
+        _stub_steps(mock_step_cls, ["Summarize"])
 
         mock_result = MagicMock()
         mock_result.id = _fake_oid()
