@@ -314,6 +314,22 @@ def _positive_int(value) -> Optional[int]:
     return n if n > 0 else None
 
 
+def _temperature(value) -> Optional[float]:
+    """Coerce a config value to a usable temperature, or None if unset/invalid.
+
+    Deliberately *not* written as ``value or default``: ``0.0`` is falsy and is
+    also the whole reason the setting exists (deterministic extraction and
+    citations), so a truthiness check would silently discard the one value an
+    admin most wants. Out-of-range values are dropped rather than clamped —
+    providers reject them, and dropping keeps requests working instead of
+    failing every call until someone notices.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    t = float(value)
+    return t if 0.0 <= t <= 2.0 else None
+
+
 def build_thinking_model_settings(
     agent_model: str,
     thinking_override: Optional[bool] = None,
@@ -412,6 +428,15 @@ def build_thinking_model_settings(
     # pinned to a fixed timeout the admin can't change.
     timeout_override = _positive_int(model_config.get("request_timeout_seconds")) if model_config else None
     settings["timeout"] = float(timeout_override or Settings().workflow_llm_timeout_seconds)
+
+    # --- Sampling temperature -------------------------------------------------
+    # Only sent when an admin configured one, so unconfigured models keep their
+    # provider default and nothing changes for existing deployments. Setting it
+    # here means it reaches every path that builds an agent — chat, extraction,
+    # workflows — rather than one caller remembering to pass it.
+    temperature = _temperature(model_config.get("temperature")) if model_config else None
+    if temperature is not None:
+        settings["temperature"] = temperature
 
     return settings
 
@@ -775,7 +800,20 @@ DOCUMENT_CHAT_SYSTEM_PROMPT = VANDALIZER_IDENTITY_PREAMBLE + (
     "- Prioritize: (1) relevance, (2) recency, (3) non-duplication.\n"
     "- Citations: refer to provided context naturally; no raw links unless asked.\n"
     "- Keep answers under 150 words unless the user explicitly asks for detail.\n"
-    "- If the documents do not contain enough information to answer, say so clearly.\n"
+    "- If the documents do not contain enough information to answer, say so clearly.\n\n"
+    "## Check before answering\n"
+    "Before answering, check whether this document actually states the specific "
+    "thing being asked for.\n"
+    "- A document can be long and detailed and still not contain the particular "
+    "field asked about.\n"
+    "- Never substitute a related-but-different value (a fringe rate is not an "
+    "indirect rate; a direct cost is not a total cost). Quoting a real line does "
+    "not make it the answer to the question that was asked.\n"
+    "- A blank form field is not zero and not a value to infer — report it as blank.\n"
+    "- Do not supply standard boilerplate (cognizant agencies, rate-agreement "
+    "dates) that the document itself does not state.\n"
+    "- If the document states \"None\", report \"None\" — that is an answer, not an "
+    "absence.\n"
 )
 
 KB_CHAT_SYSTEM_PROMPT = VANDALIZER_IDENTITY_PREAMBLE + (
