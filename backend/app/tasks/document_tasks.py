@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from app.celery_app import celery_app
+from app.services.ocr_client import OcrUnavailableError
 from app.tasks import TRANSIENT_EXCEPTIONS, get_sync_db
 
 logger = logging.getLogger(__name__)
@@ -277,12 +278,21 @@ def _notify_document_processing_failed(db, document_uuid: str, message: str) -> 
     notify_document_failed(db, doc=doc, error=message)
 
 
+# An OCR outage is measured in minutes — a GPU loading a model, a service
+# restarting during a deploy, a provider rate-limiting a burst. The previous
+# budget (backoff from 5s, 3 retries) was exhausted inside a minute and the
+# document was written off as unreadable. This spans roughly 1/2/4/8/10
+# minutes, about 25 minutes in total, with jitter so a batch upload doesn't
+# retry in lockstep. Permanent failures never reach here — they degrade to
+# PyMuPDF inside the reader (see ocr_client.PERMANENT_STATUS_CODES).
 @celery_app.task(
     bind=True,
     name="tasks.document.extraction",
     autoretry_for=TRANSIENT_EXCEPTIONS,
-    retry_backoff=True,
-    max_retries=3,
+    retry_backoff=60,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=5,
     default_retry_delay=5,
 )
 def perform_extraction_and_update(self, document_uuid: str, extension: str) -> str:
@@ -431,6 +441,43 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         message = (
             "The uploaded file is no longer available "
             "(it may have been deleted during processing)."
+        )
+        db.smart_document.update_one(
+            {"uuid": document_uuid},
+            {
+                "$set": {
+                    "raw_text": "",
+                    "processing": False,
+                    "extraction_nonletter_ratio": None,
+                    "task_status": "error",
+                    "error_message": message,
+                }
+            },
+        )
+        _notify_document_processing_failed(db, document_uuid, message)
+        return ""
+
+    except OcrUnavailableError as e:
+        # Must be re-raised, not recorded: the catch-all below would swallow it
+        # before `autoretry_for` ever saw it, which is the exact shape of the
+        # original defect — an outage written off as an unreadable document.
+        if self.request.retries < self.max_retries:
+            logger.warning(
+                "OCR unavailable for document %s (attempt %d/%d) — retrying: %s",
+                document_uuid, self.request.retries + 1, self.max_retries, e,
+            )
+            raise
+        # Out of retries. Say *why* it failed — "we couldn't reach OCR" is a
+        # different instruction to the user than "this file has no text in it".
+        logger.warning(
+            "OCR still unavailable for document %s after %d attempts",
+            document_uuid, self.max_retries,
+        )
+        message = (
+            "We couldn't reach the text-recognition service for this document, "
+            "and kept trying for several minutes. The file itself looks fine — "
+            "retry once the service is back, or contact your administrator if "
+            "it keeps happening."
         )
         db.smart_document.update_one(
             {"uuid": document_uuid},

@@ -1090,3 +1090,83 @@ class TestIngestionDoesNotResurrectFailedExtraction:
             written.update(call[0][1].get("$set", {}))
         assert written.get("chromadb_ready") is False
         assert written.get("chunk_count") == 0
+
+
+# ---------------------------------------------------------------------------
+# An OCR outage must retry, not be recorded as an unreadable document (#633)
+# ---------------------------------------------------------------------------
+
+
+class TestOcrOutageReachesTheRetryMachinery:
+    """The extraction task's catch-all used to swallow every exception and
+    record an error. That is what kept Celery's `autoretry_for` from ever
+    engaging for an OCR outage — the exception never escaped the task body."""
+
+    def _doc(self):
+        return {
+            "uuid": "doc-1",
+            "title": "scan.pdf",
+            "path": "uploads/scan.pdf",
+            "extension": "pdf",
+        }
+
+    def _task(self, retries: int):
+        """The bound task with `self.request.retries` set to *retries*."""
+        from app.tasks.document_tasks import perform_extraction_and_update
+
+        task = perform_extraction_and_update
+        task.push_request(retries=retries)
+        return task
+
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_outage_is_reraised_while_retries_remain(self, mock_get_db, tmp_path):
+        from app.services.ocr_client import OcrUnavailableError
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = self._doc()
+
+        task = self._task(retries=0)
+        try:
+            with patch("app.services.document_readers.extract_text_with_markers",
+                       side_effect=OcrUnavailableError("OCR down")), \
+                 patch("app.tasks.document_tasks.Path") as MockPath:
+                MockPath.return_value.exists.return_value = True
+                with pytest.raises(OcrUnavailableError):
+                    task.run("doc-1", "pdf")
+        finally:
+            task.pop_request()
+
+        # Nothing recorded as a terminal error — the retry hasn't happened yet.
+        statuses = _status_sequence(db)
+        assert "error" not in statuses
+
+    @patch("app.tasks.document_tasks.get_sync_db")
+    def test_final_attempt_records_an_ocr_specific_message(self, mock_get_db):
+        """Out of retries, the user needs to know the service was unreachable —
+        not that their file has no text in it, which is a different problem
+        with a different fix."""
+        from app.services.ocr_client import OcrUnavailableError
+        from app.tasks.document_tasks import perform_extraction_and_update
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = self._doc()
+
+        task = self._task(retries=perform_extraction_and_update.max_retries)
+        try:
+            with patch("app.services.document_readers.extract_text_with_markers",
+                       side_effect=OcrUnavailableError("OCR down")), \
+                 patch("app.tasks.document_tasks.Path") as MockPath, \
+                 patch("app.tasks.document_tasks._notify_document_processing_failed") as notify:
+                MockPath.return_value.exists.return_value = True
+                assert task.run("doc-1", "pdf") == ""
+        finally:
+            task.pop_request()
+
+        written = _set_containing(db, "error_message")
+        assert written["task_status"] == "error"
+        assert "text-recognition service" in written["error_message"]
+        # Not the generic extraction-failed wording.
+        assert "Text extraction failed" not in written["error_message"]
+        assert notify.called
