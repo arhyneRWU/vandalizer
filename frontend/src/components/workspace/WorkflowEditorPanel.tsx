@@ -558,9 +558,15 @@ export function WorkflowEditorPanel() {
   // — unless a project is active, in which case the run falls back to all of
   // the project's files.
   const missingInput = isNoInput ? false : isTextInput ? !textInput.trim() : (selectedDocUuids.length === 0 && !activeProjectUuid)
+  // A workflow with nothing to do still "runs": it completes in milliseconds
+  // and hands back the input document's uuid as its output. The empty
+  // "Document" step is the run's own input placeholder — the canvas hides it,
+  // so a workflow carrying only that one reads as empty and is treated as
+  // such here too.
+  const hasSteps = (workflow?.steps ?? []).some(s => !(s.name === 'Document' && s.tasks.length === 0))
 
   const handleRun = async () => {
-    if (!openWorkflowId) return
+    if (!openWorkflowId || !hasSteps) return
 
     try {
       if (isNoInput) {
@@ -646,10 +652,6 @@ export function WorkflowEditorPanel() {
 
   // --- tab badge counts ---
   const inputBadge = 0
-
-  // Validation and export both describe a workflow's steps. With none, they
-  // have nothing to describe — the tabs prompt for a first step instead.
-  const hasSteps = (workflow.steps?.length ?? 0) > 0
 
   // --- render ---
 
@@ -1083,7 +1085,13 @@ export function WorkflowEditorPanel() {
             </label>
           )
         )}
-        {!isTextInput && !isNoInput && selectedDocUuids.length === 0 && (
+        {!hasSteps && (
+          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Info style={{ width: 12, height: 12 }} />
+            Add a step below — there is nothing for this workflow to do yet
+          </div>
+        )}
+        {hasSteps && !isTextInput && !isNoInput && selectedDocUuids.length === 0 && (
           <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
             <FileText style={{ width: 12, height: 12 }} />
             {activeProjectUuid ? 'Will run on all files in this project' : 'Select a document to run this workflow'}
@@ -1126,15 +1134,21 @@ export function WorkflowEditorPanel() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={runner.running || missingInput}
-            title={runner.running && runner.batchId ? 'Stop is not yet available for batch runs' : undefined}
+            disabled={runner.running || missingInput || !hasSteps}
+            title={
+              !hasSteps
+                ? 'Add at least one step before running this workflow'
+                : runner.running && runner.batchId
+                  ? 'Stop is not yet available for batch runs'
+                  : undefined
+            }
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
               backgroundColor: 'var(--highlight-color, #eab308)',
               color: 'var(--highlight-text-color, #000)',
-              cursor: runner.running || missingInput ? 'not-allowed' : 'pointer',
-              opacity: missingInput && !runner.running ? 0.5 : 1,
+              cursor: runner.running || missingInput || !hasSteps ? 'not-allowed' : 'pointer',
+              opacity: (missingInput || !hasSteps) && !runner.running ? 0.5 : 1,
               textTransform: 'uppercase', letterSpacing: '0.05em',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}
