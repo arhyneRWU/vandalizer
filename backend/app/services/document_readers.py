@@ -565,18 +565,30 @@ def _interpolate_page_markers(text: str, num_pages: int) -> list[dict]:
     from a service that didn't preserve page structure (the OCR endpoint).
     Treats the text as uniformly dense — a rough heuristic, but good enough
     for "this answer is from somewhere around page 234" citations.
+
+    Markers carry ``"approximate": True`` so consumers can tell an estimated
+    boundary from a measured one (``_pymupdf_extract_with_pages`` emits the
+    same shape without the flag). Anything that shows a page number to a user
+    or a model should hedge accordingly — a confident citation off an
+    interpolated offset is a fabricated one. Markers persisted before this
+    flag existed have no key, and read as exact.
     """
     if num_pages <= 0 or not text:
         return []
     length = len(text)
     step = max(1, length // num_pages)
     return [
-        {"char_offset": min(length - 1, i * step), "kind": "page", "value": i + 1}
+        {
+            "char_offset": min(length - 1, i * step),
+            "kind": "page",
+            "value": i + 1,
+            "approximate": True,
+        }
         for i in range(num_pages)
     ]
 
 
-def _pdf_page_count(pdf_path: str) -> int:
+def pdf_page_count(pdf_path: str) -> int:
     """Cheap page-count read via PyMuPDF. Returns 0 if it can't open the file."""
     try:
         import pymupdf
@@ -731,7 +743,7 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
             logger.warning("OCR raised, falling back to PyMuPDF: %s", e)
             ocr_text = ""
         if ocr_text and len(ocr_text.strip()) >= MIN_PDF_TEXT_LENGTH:
-            num_pages = _pdf_page_count(file_path)
+            num_pages = pdf_page_count(file_path)
             return ocr_text, _interpolate_page_markers(ocr_text, num_pages)
         # OCR unavailable / too little text — PyMuPDF gives us exact boundaries.
         # The PyMuPDF pass is a page-boundary refinement over the OCR text, not a
@@ -748,7 +760,7 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
                     file_path, e,
                 )
                 return ocr_text, _interpolate_page_markers(
-                    ocr_text, _pdf_page_count(file_path)
+                    ocr_text, pdf_page_count(file_path)
                 )
             raise
 
