@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A document whose text could not be extracted is no longer marked complete.** When OCR failed on a scanned PDF, the document was stored with zero extracted text but `task_status: "complete"` — it looked processed, and chat then answered questions about it with "the document does not mention that", which is indistinguishable from the document genuinely not containing the answer. The failure was silent and the wrong answer was confident. Extraction had always recorded the failure correctly; the error was erased afterwards, first by `perform_semantic_ingestion` setting `readying` unconditionally and then by `complete` on both the success and exception paths. Every post-extraction status write now goes through one helper that refuses to advance a document extraction already marked `error`, with the exclusion in the MongoDB query filter rather than a preceding read, because the ingestion stages run on separate Celery queues and can race. A first version of this fix guarded only the `complete` write and the bug survived it — the intermediate `readying` write is the half that matters.
+
 ## [v4.10.0] - 2026-08-10
 
 ### Added

@@ -450,6 +450,56 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         return ""
 
 
+def advance_task_status(db, document_uuid: str, status: str) -> bool:
+    """Move a document to ``status`` unless extraction already marked it failed.
+
+    Applies to *every* post-extraction status write, not just the terminal
+    "complete" one. An intermediate marker is just as destructive: setting
+    "readying" on a document that already failed erases the error, and then the
+    very next write legitimately advances the now-unmarked document to
+    "complete". That is how a zero-character document ends up carrying an
+    extraction error message and a green checkmark at the same time.
+
+    The exclusion lives in the query filter, not in a preceding read. These
+    tasks run concurrently on separate queues — extraction on `documents`,
+    compliance on `uploads` — so a read-then-write check can be overtaken
+    between the read and the update.
+
+    Note this is deliberately one-way: it never *clears* an error. Re-running
+    extraction is what resets a failed document, via the "extracting" write at
+    the top of `perform_extraction_and_update`, so a retry still works.
+
+    Returns True when the document was advanced.
+    """
+    result = db.smart_document.update_one(
+        {"uuid": document_uuid, "task_status": {"$ne": "error"}},
+        {"$set": {"task_status": status}},
+    )
+    if not result.matched_count:
+        logger.info(
+            "Leaving document %s in its failed state rather than setting %r",
+            document_uuid, status,
+        )
+    return bool(result.matched_count)
+
+
+def mark_complete_unless_errored(db, document_uuid: str) -> bool:
+    """Advance a document to "complete" unless extraction already failed."""
+    return advance_task_status(db, document_uuid, "complete")
+
+
+def _record_ingestion_result(db, document_uuid: str, fields: dict) -> None:
+    """Persist ingestion bookkeeping, then advance the status if it's allowed.
+
+    Two writes on purpose. Chunk counts and readiness flags are true whatever
+    extraction did, so they are always recorded; only the status transition is
+    conditional. Folding them into one guarded write would silently drop the
+    bookkeeping for documents that failed extraction.
+    """
+    db.smart_document.update_one({"uuid": document_uuid}, {"$set": fields})
+    mark_complete_unless_errored(db, document_uuid)
+
+
 @celery_app.task(
     bind=True,
     name="tasks.document.update",
@@ -819,10 +869,10 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
         logger.warning("Document %s not found for semantic ingestion", document_uuid)
         return ""
 
-    db.smart_document.update_one(
-        {"uuid": document_uuid},
-        {"$set": {"task_status": "readying"}},
-    )
+    # Guarded: a document whose extraction just failed must not be dragged back
+    # into an in-progress state, because that erases the error and lets the
+    # terminal write below mark it complete.
+    advance_task_status(db, document_uuid, "readying")
 
     # If the caller passed empty raw_text, fall back to whatever the
     # extraction task already wrote to the DB.
@@ -844,28 +894,24 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
         )
     except Exception as e:
         logger.exception("Semantic ingestion failed for %s", document_uuid)
-        db.smart_document.update_one(
-            {"uuid": document_uuid},
+        _record_ingestion_result(
+            db,
+            document_uuid,
             {
-                "$set": {
-                    "task_status": "complete",
-                    "chromadb_ready": False,
-                    "chunk_count": 0,
-                    "ingest_error": str(e)[:500],
-                }
+                "chromadb_ready": False,
+                "chunk_count": 0,
+                "ingest_error": str(e)[:500],
             },
         )
         raise
 
-    db.smart_document.update_one(
-        {"uuid": document_uuid},
+    _record_ingestion_result(
+        db,
+        document_uuid,
         {
-            "$set": {
-                "task_status": "complete",
-                "chromadb_ready": chunk_count > 0,
-                "chunk_count": chunk_count,
-                "ingest_error": None,
-            }
+            "chromadb_ready": chunk_count > 0,
+            "chunk_count": chunk_count,
+            "ingest_error": None,
         },
     )
 
