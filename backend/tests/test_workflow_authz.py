@@ -480,6 +480,7 @@ class TestWorkflowRunAuthz:
              patch("beanie.PydanticObjectId", side_effect=lambda x: x):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_svc.run_workflow = AsyncMock(return_value="session-123")
+            mock_svc.workflow_has_executable_steps = AsyncMock(return_value=True)
 
             resp = await client.post(
                 f"/api/workflows/{self._FAKE_OID}/run",
@@ -513,6 +514,7 @@ class TestWorkflowRunAuthz:
              patch("beanie.PydanticObjectId", side_effect=lambda x: x):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_svc.run_workflow = AsyncMock(return_value="session-123")
+            mock_svc.workflow_has_executable_steps = AsyncMock(return_value=True)
 
             resp = await client.post(
                 f"/api/workflows/{self._FAKE_OID}/run",

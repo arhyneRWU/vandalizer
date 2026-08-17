@@ -234,6 +234,27 @@ async def get_kb_sources(kb_uuid: str) -> list[KnowledgeBaseSource]:
     ).sort(-KnowledgeBaseSource.created_at).to_list()
 
 
+async def kb_has_sources(kb: KnowledgeBase) -> bool:
+    """True when the KB has at least one source row.
+
+    Counted rather than read off ``kb.total_sources``, a denormalized field
+    that only ``recalculate_stats`` refreshes — a guard that lets an empty KB
+    through because its counter is stale is no guard at all.
+    """
+    return await KnowledgeBaseSource.find(
+        KnowledgeBaseSource.knowledge_base_uuid == kb.uuid,
+    ).count() > 0
+
+
+async def require_kb_sources(kb: KnowledgeBase, action: str) -> None:
+    """Raise ValueError unless the KB has a source. ``action`` reads as a verb
+    phrase in the message: "before exporting it"."""
+    if not await kb_has_sources(kb):
+        raise ValueError(
+            f"This knowledge base has no sources yet — add at least one source before {action} it.",
+        )
+
+
 KB_SOURCE_URL_UNIQUE_INDEX = "kb_uuid_url_unique"
 
 
@@ -824,6 +845,8 @@ async def clone_knowledge_base(
     The clone is NOT verified - the user can extend and re-verify.
     The caller is responsible for passing an already-authorized source KB.
     """
+    await require_kb_sources(source_kb, "cloning")
+
     team_id = str(user.current_team) if user.current_team else None
 
     if new_title:
@@ -1236,6 +1259,8 @@ async def export_knowledge_base(kb: KnowledgeBase) -> dict:
     text) so the importer can reconstruct + re-embed without re-fetching. Does
     NOT include ChromaDB vectors — embeddings are regenerated on import.
     """
+    await require_kb_sources(kb, "exporting")
+
     sources = await get_kb_sources(kb.uuid)
     exported_sources: list[dict] = []
     for s in sources:
