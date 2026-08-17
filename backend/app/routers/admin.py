@@ -1474,6 +1474,7 @@ async def get_config(
         "oauth_providers": _sanitize_providers(cfg.oauth_providers),
         "available_models": _sanitize_models(cfg.available_models),
         "default_model": cfg.default_model or "",
+        "long_document_model": getattr(cfg, "long_document_model", "") or "",
         "ocr_endpoint": cfg.ocr_endpoint,
         "ocr_api_key": "***" if decrypt_value(cfg.ocr_api_key) else "",
         "ocr_provider": cfg.ocr_provider or "raw",
@@ -1688,6 +1689,41 @@ async def add_model(
 
 class DefaultModelRequest(BaseModel):
     name: str = ""
+
+
+@router.put("/config/models/long-document")
+async def set_long_document_model(
+    body: DefaultModelRequest,
+    user: User = Depends(get_current_user),
+):
+    """Nominate the model to use when a request won't fit the chosen one.
+
+    Explicit rather than "pick the biggest window": this is the only place the
+    product chooses a model on the user's behalf, and an unattended choice
+    could route a confidential document to an external provider.
+    """
+    await _require_superadmin(user)
+
+    cfg = await SystemConfig.get_config()
+    name = (body.name or "").strip()
+
+    if name:
+        match = next(
+            (m for m in cfg.available_models if isinstance(m, dict) and m.get("name") == name),
+            None,
+        )
+        if not match:
+            raise HTTPException(status_code=404, detail=f"Model '{name}' is not configured")
+
+    cfg.long_document_model = name
+    cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    cfg.updated_by = user.user_id
+    await cfg.save()
+    clear_agent_caches()
+    await _audit(user, "set_long_document_model",
+                 f"Long-document model: {name or '(cleared)'}")
+
+    return {"status": "ok", "long_document_model": cfg.long_document_model or ""}
 
 
 @router.put("/config/models/default")

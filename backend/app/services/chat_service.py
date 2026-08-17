@@ -27,7 +27,13 @@ from app.services import document_service
 from app.services.config_service import get_llm_model_by_name, get_user_model_name
 from app.services.context_budget import (
     DocumentSegment,
+    estimate_input_tokens,
     plan_and_compact_context,
+)
+from app.services.model_routing import (
+    RoutingDecision,
+    choose_document_model,
+    suggest_document_model,
 )
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
@@ -335,6 +341,43 @@ def select_chat_system_prompt(
     return NO_DOCUMENT_SYSTEM_PROMPT
 
 
+def _suggest_model_for_overflow(
+    compacted,
+    model_name: str,
+    model_config: Optional[dict],
+    sys_config_doc: dict,
+    input_tokens: int,
+) -> Optional[dict]:
+    """A larger model to offer, or None when nothing needs offering.
+
+    Only when the request actually overflowed — a suggestion on a request that
+    fit would be noise, and the dialog it feeds only opens on overflow.
+
+    ``input_tokens`` must be the size of the request *before* compaction. The
+    question being asked is "could another model have held what the user
+    actually sent?", and the compacted total cannot answer it: compaction is
+    defined as making the request fit, so ``compacted.plan.total_input_tokens``
+    is always within the current model's budget. Passing it made
+    :func:`suggest_document_model` return None every time and the dialog's
+    fourth option could never appear.
+    """
+    if not compacted.actions:
+        return None
+    suggestion = suggest_document_model(
+        current_name=model_name,
+        current_config=model_config,
+        models=(sys_config_doc or {}).get("available_models") or [],
+        input_tokens=input_tokens,
+    )
+    if not suggestion:
+        return None
+    return {
+        "name": suggestion.get("name", ""),
+        "tag": suggestion.get("tag", ""),
+        "context_window": suggestion.get("context_window", 0),
+    }
+
+
 async def chat_stream(
     message: str,
     document_uuids: list[str],
@@ -532,6 +575,40 @@ async def chat_stream(
 
     # Resolve the model's context window and compact oversize components.
     model_config = await get_llm_model_by_name(model_name)
+
+    # A whole document is the unit people actually work in — a grant proposal
+    # arrives as one file and gets read as one. When it doesn't fit, trimming
+    # answers from part of it. If the deployment nominated a bigger model, use
+    # it rather than silently dropping the middle. See services/model_routing.
+    # Measured before any trimming: both routing and the dialog's suggestion
+    # ask "could another model have held what the user actually sent?", and the
+    # post-compaction total cannot answer that — it always fits by definition.
+    requested_input_tokens = estimate_input_tokens(
+        model_name=model_name,
+        system_prompt=system_prompt or "",
+        user_message=message,
+        history=previous_messages,
+        documents=doc_segments,
+        attachments=attachment_segments,
+    )
+
+    routing = RoutingDecision(model_name, False, "")
+    candidate_name = (sys_config_doc or {}).get("long_document_model") or ""
+    if candidate_name and (doc_segments or attachment_segments):
+        candidate_config = await get_llm_model_by_name(candidate_name)
+        routing = choose_document_model(
+            current_name=model_name,
+            current_config=model_config,
+            candidate_name=candidate_name,
+            candidate_config=candidate_config,
+            input_tokens=requested_input_tokens,
+        )
+        if routing.switched:
+            logger.info(
+                "Routing to %s: request does not fit %s", candidate_name, model_name
+            )
+            model_name, model_config = routing.model_name, candidate_config
+
     compacted = plan_and_compact_context(
         model_name=model_name,
         model_config=model_config,
@@ -547,7 +624,25 @@ async def chat_stream(
         "kind": "context_budget",
         "content": "",
         "plan": compacted.plan.to_dict(),
+        # Offered to the user when their request didn't fit, so the context
+        # dialog can propose keeping the whole document instead of dropping
+        # part of it. Computed server-side under the same privacy rule as
+        # automatic routing — picking a model from the list in the browser
+        # would walk around that gate.
+        "suggested_model": _suggest_model_for_overflow(
+            compacted, model_name, model_config, sys_config_doc,
+            requested_input_tokens,
+        ),
     }) + "\n"
+    # Switching the model without saying so is the same failure as trimming a
+    # document without saying so — the answer looks identical either way.
+    if routing.reason:
+        yield json.dumps({
+            "kind": "context_notice",
+            "content": routing.reason,
+            "action": "model_routed" if routing.switched else "model_not_routed",
+            "tokens_dropped": 0,
+        }) + "\n"
     for action in compacted.actions:
         yield json.dumps({
             "kind": "context_notice",
