@@ -220,6 +220,27 @@ def _default_response_reserve(context_window: int) -> int:
     return max(1024, min(8192, context_window // 4))
 
 
+def resolve_response_reserve(
+    context_window: int, model_config: Optional[dict] = None
+) -> int:
+    """Tokens reserved for the model's answer, honoring the per-model override.
+
+    This is the single definition of the reserve. It doubles as the generation
+    cap (llm_service sends it as ``max_tokens``) and as the slice the input
+    budget gives up, so every caller must agree on it — a pre-flight that
+    assumed the scaled default while the request used an admin's override would
+    accept prompts the model then rejects.
+    """
+    if model_config:
+        try:
+            override = int(model_config.get("response_reserve_tokens") or 0)
+        except (TypeError, ValueError):
+            override = 0
+        if override > 0:
+            return override
+    return _default_response_reserve(context_window)
+
+
 def _truncate_text_to_tokens(
     text: str,
     max_tokens: int,
@@ -537,18 +558,81 @@ def find_oversize_documents(
     ``token_count``. Accepting dicts (not the Beanie model) keeps this usable
     from sync Celery code.
     """
-    context_window = resolve_context_window(model_name, model_config)
-    reserve = _default_response_reserve(context_window)
-    budget = max(1, context_window - reserve - overhead_tokens)
-
-    oversize: list[OversizeDocument] = []
-    for d in documents:
-        tc = int(d.get("token_count") or 0)
-        if tc > budget:
-            oversize.append(OversizeDocument(
-                uuid=str(d.get("uuid") or ""),
-                title=str(d.get("title") or d.get("uuid") or "Untitled"),
-                token_count=tc,
-            ))
+    budget = input_budget(model_name, model_config, overhead_tokens=overhead_tokens)
+    oversize = [d for d in _as_documents(documents) if d.token_count > budget]
     oversize.sort(key=lambda o: o.token_count, reverse=True)
     return oversize
+
+
+def _as_documents(documents: list[dict]) -> list[OversizeDocument]:
+    return [
+        OversizeDocument(
+            uuid=str(d.get("uuid") or ""),
+            title=str(d.get("title") or d.get("uuid") or "Untitled"),
+            token_count=int(d.get("token_count") or 0),
+        )
+        for d in documents
+    ]
+
+
+def input_budget(
+    model_name: str,
+    model_config: Optional[dict] = None,
+    *,
+    overhead_tokens: int = 1024,
+) -> int:
+    """Tokens available for prompt content: window minus answer reserve minus overhead."""
+    context_window = resolve_context_window(model_name, model_config)
+    reserve = resolve_response_reserve(context_window, model_config)
+    return max(1, context_window - reserve - overhead_tokens)
+
+
+@dataclass
+class ContextOverflow:
+    """A set of documents that cannot fit one request's input budget."""
+
+    kind: str  # "single" — one doc is too big | "combined" — only the total is
+    documents: list[OversizeDocument]  # largest first
+    total_tokens: int
+    budget: int
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "documents": [d.to_dict() for d in self.documents],
+            "total_tokens": self.total_tokens,
+            "budget": self.budget,
+        }
+
+
+def find_context_overflow(
+    *,
+    documents: list[dict],
+    model_name: str,
+    model_config: Optional[dict] = None,
+    overhead_tokens: int = 1024,
+) -> Optional[ContextOverflow]:
+    """Check whether ``documents`` fit one request, individually *and* together.
+
+    ``find_oversize_documents`` only ever asked "is any single doc too big",
+    which a package of individually-modest documents passes — and then the
+    gateway rejects the concatenated prompt mid-run. Callers that send several
+    documents in one prompt should use this instead.
+
+    Returns None when everything fits. A "single" overflow names only the docs
+    that are individually too large; a "combined" overflow names the whole set.
+    """
+    budget = input_budget(model_name, model_config, overhead_tokens=overhead_tokens)
+    docs = sorted(_as_documents(documents), key=lambda d: d.token_count, reverse=True)
+    total = sum(d.token_count for d in docs)
+
+    oversize = [d for d in docs if d.token_count > budget]
+    if oversize:
+        return ContextOverflow(
+            kind="single", documents=oversize, total_tokens=total, budget=budget,
+        )
+    if total > budget:
+        return ContextOverflow(
+            kind="combined", documents=docs, total_tokens=total, budget=budget,
+        )
+    return None

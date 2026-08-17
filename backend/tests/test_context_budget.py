@@ -285,3 +285,106 @@ def test_find_oversize_documents_handles_missing_token_count():
     docs = [{"uuid": "a", "title": "no-count"}, {"uuid": "b", "title": "zero", "token_count": 0}]
     oversize = find_oversize_documents(documents=docs, model_name="gpt-3.5")
     assert oversize == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_response_reserve
+# ---------------------------------------------------------------------------
+
+
+def test_response_reserve_defaults_to_quarter_window_capped_at_8k():
+    from app.services.context_budget import resolve_response_reserve
+
+    assert resolve_response_reserve(16_000) == 4_000
+    assert resolve_response_reserve(1_000_000) == 8_192  # capped
+    assert resolve_response_reserve(1_000) == 1_024      # floored
+
+
+def test_response_reserve_honors_per_model_override():
+    from app.services.context_budget import resolve_response_reserve
+
+    assert resolve_response_reserve(128_000, {"response_reserve_tokens": 32_768}) == 32_768
+    # Unset/blank/invalid falls back to the scaled default.
+    assert resolve_response_reserve(128_000, {"response_reserve_tokens": 0}) == 8_192
+    assert resolve_response_reserve(128_000, {"response_reserve_tokens": "nope"}) == 8_192
+
+
+def test_find_oversize_documents_honors_reserve_override():
+    from app.services.context_budget import find_oversize_documents
+
+    # 128k window: default reserve 8k leaves ~119k, so a 100k doc fits. Raise
+    # the reserve to 64k and the same doc no longer does — the pre-flight must
+    # use the same reserve the request will actually send.
+    docs = [{"uuid": "a", "title": "big.pdf", "token_count": 100_000}]
+    cfg = {"context_window": 128_000}
+    assert find_oversize_documents(documents=docs, model_name="m", model_config=cfg) == []
+
+    cfg_wide_reserve = {"context_window": 128_000, "response_reserve_tokens": 64_000}
+    flagged = find_oversize_documents(
+        documents=docs, model_name="m", model_config=cfg_wide_reserve,
+    )
+    assert [o.uuid for o in flagged] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# find_context_overflow
+# ---------------------------------------------------------------------------
+
+
+def _nasa_package():
+    """Four docs that each fit a 65k-window model but total 92k — the shape of
+    the support ticket that motivated the combined check."""
+    return [
+        {"uuid": "a", "title": "ECIPES_Amend23.pdf", "token_count": 12_000},
+        {"uuid": "b", "title": "Earth Science Overview.pdf", "token_count": 15_000},
+        {"uuid": "c", "title": "SummaryOfSolicitation.pdf", "token_count": 25_000},
+        {"uuid": "d", "title": "proposers_guide.pdf", "token_count": 40_119},
+    ]
+
+
+def test_find_context_overflow_flags_combined_package():
+    from app.services.context_budget import find_context_overflow
+
+    overflow = find_context_overflow(
+        documents=_nasa_package(),
+        model_name="m",
+        model_config={"context_window": 65_536},
+    )
+    assert overflow is not None
+    assert overflow.kind == "combined"
+    assert overflow.total_tokens == 92_119
+    # Every doc is named, largest first — they are all part of the problem.
+    assert [d.uuid for d in overflow.documents] == ["d", "c", "b", "a"]
+
+
+def test_find_context_overflow_returns_none_when_package_fits():
+    from app.services.context_budget import find_context_overflow
+
+    assert find_context_overflow(
+        documents=_nasa_package(),
+        model_name="m",
+        model_config={"context_window": 262_144},
+    ) is None
+
+
+def test_find_context_overflow_single_doc_takes_precedence():
+    from app.services.context_budget import find_context_overflow
+
+    docs = [
+        {"uuid": "a", "title": "small", "token_count": 500},
+        {"uuid": "b", "title": "giant", "token_count": 90_000},
+    ]
+    overflow = find_context_overflow(
+        documents=docs, model_name="m", model_config={"context_window": 65_536},
+    )
+    assert overflow is not None
+    # Only the doc that is individually too big gets named — converting the
+    # small one to a KB would not help.
+    assert overflow.kind == "single"
+    assert [d.uuid for d in overflow.documents] == ["b"]
+
+
+def test_find_context_overflow_empty_input():
+    from app.services.context_budget import find_context_overflow
+
+    assert find_context_overflow(documents=[], model_name="m") is None

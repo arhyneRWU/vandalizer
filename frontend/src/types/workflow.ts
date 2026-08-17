@@ -89,6 +89,11 @@ export interface WorkflowErrorPayload {
   code: string;
   suggested_action?: 'convert_to_kb';
   oversize_documents?: Array<{ uuid: string; title: string; token_count: number }>;
+  // 'single' — one document is too large on its own; 'combined' — the package
+  // only overflows once concatenated into a single prompt.
+  overflow_kind?: 'single' | 'combined';
+  total_tokens?: number;
+  input_budget?: number;
 }
 
 export interface WorkflowCitation {
