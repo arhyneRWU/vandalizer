@@ -313,6 +313,22 @@ def _positive_int(value) -> Optional[int]:
     return n if n > 0 else None
 
 
+def _temperature(value) -> Optional[float]:
+    """Coerce a config value to a usable temperature, or None if unset/invalid.
+
+    Deliberately *not* written as ``value or default``: ``0.0`` is falsy and is
+    also the whole reason the setting exists (deterministic extraction and
+    citations), so a truthiness check would silently discard the one value an
+    admin most wants. Out-of-range values are dropped rather than clamped —
+    providers reject them, and dropping keeps requests working instead of
+    failing every call until someone notices.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    t = float(value)
+    return t if 0.0 <= t <= 2.0 else None
+
+
 def build_thinking_model_settings(
     agent_model: str,
     thinking_override: Optional[bool] = None,
@@ -414,6 +430,15 @@ def build_thinking_model_settings(
     # pinned to a fixed timeout the admin can't change.
     timeout_override = _positive_int(model_config.get("request_timeout_seconds")) if model_config else None
     settings["timeout"] = float(timeout_override or Settings().workflow_llm_timeout_seconds)
+
+    # --- Sampling temperature -------------------------------------------------
+    # Only sent when an admin configured one, so unconfigured models keep their
+    # provider default and nothing changes for existing deployments. Setting it
+    # here means it reaches every path that builds an agent — chat, extraction,
+    # workflows — rather than one caller remembering to pass it.
+    temperature = _temperature(model_config.get("temperature")) if model_config else None
+    if temperature is not None:
+        settings["temperature"] = temperature
 
     return settings
 
