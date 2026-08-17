@@ -428,11 +428,22 @@ def test_find_oversize_documents_honors_reserve_override():
     # 128k window: default reserve 8k leaves ~119k, so a 100k doc fits. Raise
     # the reserve to 64k and the same doc no longer does — the pre-flight must
     # use the same reserve the request will actually send.
+    #
+    # The margin is pinned to 1.0 so this measures the reserve and nothing else.
+    # Stored counts are raw tiktoken figures and are inflated by the model's
+    # safety margin at read time, which for an unknown model would push this
+    # 100k document over the budget on its own — correctly, but for a different
+    # reason than this test is about. That path is covered in
+    # test_token_safety_margin.py.
     docs = [{"uuid": "a", "title": "big.pdf", "token_count": 100_000}]
-    cfg = {"context_window": 128_000}
+    cfg = {"context_window": 128_000, "token_safety_margin": 1.0}
     assert find_oversize_documents(documents=docs, model_name="m", model_config=cfg) == []
 
-    cfg_wide_reserve = {"context_window": 128_000, "response_reserve_tokens": 64_000}
+    cfg_wide_reserve = {
+        "context_window": 128_000,
+        "response_reserve_tokens": 64_000,
+        "token_safety_margin": 1.0,
+    }
     flagged = find_oversize_documents(
         documents=docs, model_name="m", model_config=cfg_wide_reserve,
     )
