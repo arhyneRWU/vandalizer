@@ -489,7 +489,11 @@ async def export_knowledge_base(uuid: str, user: User = Depends(get_current_user
     Embeddings are not included — they are regenerated when the file is imported.
     """
     kb = await _get_kb_or_404(uuid, user)
-    payload = await svc.export_knowledge_base(kb)
+    try:
+        payload = await svc.export_knowledge_base(kb)
+    except ValueError as e:
+        # Empty KB: a file with "sources": [] is nothing anyone can share.
+        raise HTTPException(status_code=400, detail=str(e))
     safe_title = re.sub(r"[^A-Za-z0-9_.-]+", "_", kb.title or "knowledge_base").strip("_")
     filename = f"{safe_title or 'knowledge_base'}.kb.json"
     return JSONResponse(

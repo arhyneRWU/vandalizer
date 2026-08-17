@@ -549,6 +549,11 @@ async def export_workflow(workflow_id: str, user: User = Depends(get_current_use
     wf = await get_authorized_workflow(workflow_id, user)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if not await svc.workflow_has_executable_steps(wf):
+        raise HTTPException(
+            status_code=400,
+            detail="This workflow has no steps yet — add at least one step before exporting it.",
+        )
 
     from app.services import export_import_service as eis
 
@@ -867,6 +872,13 @@ async def run_workflow(request: Request, workflow_id: str, req: RunWorkflowReque
     wf = await get_authorized_workflow(workflow_id, user, share_token=req.share_token)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    # Checked here rather than only in the service so a blocked click doesn't
+    # leave a failed activity behind in History for every attempt.
+    if not await svc.workflow_has_executable_steps(wf):
+        raise HTTPException(
+            status_code=400,
+            detail="This workflow has no steps yet — add at least one step before running it.",
+        )
     document_uuids = await _authorize_documents(req.document_uuids, user)
     if req.folder_uuids:
         from app.services import folder_service
