@@ -289,3 +289,60 @@ class TestPerLoopHttpClient:
         del loop, client
         gc.collect()
         assert len(llm_service._loop_http_clients) == 0
+
+
+class TestTruncationCapture:
+    """A response that stops at max_tokens is detectable by the caller."""
+
+    def test_events_land_in_the_open_sink(self):
+        from app.services.llm_service import capture_truncation, record_truncation
+
+        with capture_truncation() as events:
+            record_truncation("qwen3", 8192)
+        assert events == [{"model": "qwen3", "max_tokens": 8192}]
+
+    def test_no_sink_open_is_a_no_op(self):
+        from app.services.llm_service import record_truncation
+
+        record_truncation("qwen3", 8192)  # logs only; must not raise
+
+    def test_sinks_do_not_leak_to_the_next_block(self):
+        from app.services.llm_service import capture_truncation, record_truncation
+
+        with capture_truncation() as first:
+            record_truncation("qwen3", 8192)
+        with capture_truncation() as second:
+            pass
+        assert len(first) == 1
+        assert second == []
+
+    def test_note_finish_only_fires_on_length(self):
+        from unittest.mock import MagicMock
+
+        from app.services.llm_service import MeteredModel, capture_truncation
+
+        # Bypass WrapperModel.__init__ (it resolves a real provider) and hand
+        # the wrapper a stub; model_name delegates to it.
+        model = MeteredModel.__new__(MeteredModel)
+        model.wrapped = MagicMock(model_name="qwen3")
+        stopped = MagicMock(finish_reason="stop")
+        truncated = MagicMock(finish_reason="length")
+
+        with capture_truncation() as events:
+            model._note_finish(stopped, {"max_tokens": 8192})
+            model._note_finish(None, {"max_tokens": 8192})
+            model._note_finish(truncated, {"max_tokens": 8192})
+        assert [e["max_tokens"] for e in events] == [8192]
+
+    def test_describe_truncation_names_the_cap(self):
+        from app.services.llm_service import describe_truncation
+
+        text = describe_truncation([{"model": "qwen3", "max_tokens": 8192}])
+        assert "8,192-token output limit" in text
+        assert "Response reserve" in text
+
+    def test_describe_truncation_without_a_known_cap(self):
+        from app.services.llm_service import describe_truncation
+
+        text = describe_truncation([{"model": "qwen3", "max_tokens": None}])
+        assert "output limit" in text
