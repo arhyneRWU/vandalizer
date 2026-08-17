@@ -38,10 +38,13 @@ class ShareError(Exception):
     actionable HTTP responses instead of a single conflated 404.
     """
 
-    def __init__(self, code: str, status: int):
+    def __init__(self, code: str, status: int, message: str | None = None):
         self.code = code
         self.status = status
-        super().__init__(code)
+        # Set when the underlying failure already carries a user-facing reason
+        # worth showing verbatim, instead of a canned per-code message.
+        self.message = message
+        super().__init__(message or code)
 
 
 class CloneSourceMissingError(Exception):
@@ -595,6 +598,13 @@ async def share_to_team(
     except CloneSourceMissingError as exc:
         logger.warning("Share-to-team source missing for item %s: %s", item.id, exc)
         raise ShareError("original_missing", 404)
+    except ValueError as exc:
+        # The clone refused for a reason the user can act on — e.g. a knowledge
+        # base with no sources. Its own message is more useful than the generic
+        # clone_failed text, and this is a 400, not the 500 the catch-all below
+        # would produce.
+        logger.info("Share-to-team refused for item %s: %s", item.id, exc)
+        raise ShareError("source_not_shareable", 400, str(exc))
     except Exception:
         logger.exception(
             "Unexpected error cloning library item %s (kind=%s) for team %s",
