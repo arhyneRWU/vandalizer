@@ -34,6 +34,11 @@ from app.utils.url_validation import normalize_crawl_url as _normalize_crawl_url
 
 logger = logging.getLogger(__name__)
 
+# Document task_status values that mean extraction is still running, so a KB
+# source waiting on that document's text should park as "pending" rather than
+# error. Mirrors the stage list in tasks.document_tasks.
+IN_FLIGHT_TASK_STATUSES = ("layout", "extracting", "ocr", "security", "readying")
+
 _dm: DocumentManager | None = None
 
 
@@ -684,6 +689,52 @@ async def add_documents(
     if added:
         await recalculate_stats(kb)
     return added
+
+
+async def register_documents(
+    kb: KnowledgeBase,
+    document_uuids: list[str],
+    user: User,
+) -> list[str]:
+    """Attach SmartDocuments to a KB as "pending" sources without ingesting them.
+
+    Chunking and embedding a large document runs for minutes, so the add-document
+    endpoints register sources here and hand the embed to a worker (see
+    ``tasks.documents.kb_ingest_document``). The sources land in the KB
+    immediately, which is what lets the UI show per-source progress instead of
+    blocking on the request. Returns the new source uuids in dispatch order;
+    duplicates are skipped, so an empty list means everything was already there.
+    """
+    team_access = await access_control.get_team_access_context(user)
+    source_uuids: list[str] = []
+    for doc_uuid in document_uuids:
+        doc = await access_control.get_authorized_document(
+            doc_uuid,
+            user,
+            team_access=team_access,
+            allow_admin=True,
+        )
+        if not doc:
+            raise ValueError(f"Document not found: {doc_uuid}")
+        existing = await KnowledgeBaseSource.find_one(
+            KnowledgeBaseSource.knowledge_base_uuid == kb.uuid,
+            KnowledgeBaseSource.document_uuid == doc_uuid,
+        )
+        if existing:
+            continue
+
+        source = KnowledgeBaseSource(
+            knowledge_base_uuid=kb.uuid,
+            source_type="document",
+            document_uuid=doc.uuid,
+        )
+        await source.insert()
+        source_uuids.append(source.uuid)
+
+    # Recalculate either way: it flips the KB to "building" while the new
+    # sources are pending, and corrects a stale status when all were duplicates.
+    await recalculate_stats(kb)
+    return source_uuids
 
 
 def _normalize_url(url: str) -> str:
@@ -1411,9 +1462,7 @@ async def _ingest_document_source(source: KnowledgeBaseSource, kb: KnowledgeBase
             # extraction-completion hook in update_document_fields re-ingest it
             # once raw_text exists. Only error when extraction has actually
             # finished (or failed) with no usable text.
-            in_flight = bool(doc.processing) or doc.task_status in (
-                "extracting", "readying", "layout",
-            )
+            in_flight = bool(doc.processing) or doc.task_status in IN_FLIGHT_TASK_STATUSES
             if in_flight and doc.task_status != "error":
                 source.status = "pending"
                 source.error_message = None
