@@ -656,6 +656,9 @@ export function KnowledgePanel() {
     // A ready KB with zero indexed chunks has nothing to retrieve — chatting
     // with it only produces a misleading "still indexing" reply.
     const canChatKB = selectedKB.status === 'ready' && selectedKB.total_chunks > 0
+    // Export serializes the KB's sources. With none it downloads a file nobody
+    // can use — the backend refuses it now, so say why before the click.
+    const hasSources = selectedKB.total_sources > 0
     return (
       <>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#1e1e1e', position: 'relative' }}>
@@ -1044,15 +1047,17 @@ export function KnowledgePanel() {
               </button>
               <button
                 onClick={handleExport}
-                disabled={exporting}
-                title="Download this knowledge base as a JSON file"
+                disabled={exporting || !hasSources}
+                title={hasSources
+                  ? 'Download this knowledge base as a JSON file'
+                  : 'Add at least one source to this knowledge base first'}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
                   padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
                   color: '#e5e5e5', backgroundColor: '#2a2a2a',
                   border: '1px solid #3a3a3a', borderRadius: 6,
-                  cursor: exporting ? 'default' : 'pointer',
-                  opacity: exporting ? 0.5 : 1,
+                  cursor: exporting || !hasSources ? 'default' : 'pointer',
+                  opacity: exporting || !hasSources ? 0.5 : 1,
                 }}
               >
                 {exporting ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Download size={13} />}
@@ -1377,6 +1382,7 @@ export function KnowledgePanel() {
               kbUuid={selectedKB.uuid}
               kbReady={selectedKB.status === 'ready'}
               canManage={canManageKB}
+              kbHasSources={hasSources}
               onCloned={(newUuid) => { refresh(); loadDetail(newUuid) }}
               collapsed={validationCollapsed}
               onToggleCollapsed={() => setValidationCollapsed(c => !c)}

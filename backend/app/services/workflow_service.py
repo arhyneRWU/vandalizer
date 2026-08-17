@@ -513,6 +513,11 @@ async def run_workflow(
         if not wf:
             raise ValueError("Workflow not found")
 
+    if not await workflow_has_executable_steps(wf):
+        raise ValueError(
+            "This workflow has no steps yet — add at least one step before running it.",
+        )
+
     if not model:
         model = await get_user_model_name(user_id)
 
@@ -702,6 +707,11 @@ async def run_workflow_batch(
         if not wf:
             raise ValueError("Workflow not found")
 
+    if not await workflow_has_executable_steps(wf):
+        raise ValueError(
+            "This workflow has no steps yet — add at least one step before running it.",
+        )
+
     if not model:
         model = await get_user_model_name(user_id)
 
@@ -884,9 +894,36 @@ async def reorder_steps(workflow_id: str, step_ids: list[str], user: User) -> bo
 # Validation Plan
 # ---------------------------------------------------------------------------
 
+def _is_trigger_step(step: dict) -> bool:
+    """True for the empty "Document" step that stands in for the run's input.
+
+    The engine prepends one of these at execution time, and some stored
+    workflows carry their own copy — which the design canvas hides. A workflow
+    whose only step is that trigger is empty as far as the user is concerned.
+    """
+    return step.get("name") == "Document" and not step.get("tasks")
+
+
 def workflow_has_steps(wf_data: dict | None) -> bool:
-    """True when the dereferenced workflow definition has at least one step."""
-    return bool((wf_data or {}).get("steps"))
+    """True when the dereferenced definition has a step that does something."""
+    return any(
+        not _is_trigger_step(step)
+        for step in ((wf_data or {}).get("steps") or [])
+    )
+
+
+async def workflow_has_executable_steps(wf: Workflow) -> bool:
+    """``workflow_has_steps`` for a raw Workflow doc, whose steps are ids.
+
+    One query, and none at all for the empty case — this sits on the run path.
+    """
+    if not wf.steps:
+        return False
+    steps = await WorkflowStep.find({"_id": {"$in": wf.steps}}).to_list()
+    return any(
+        not _is_trigger_step({"name": step.name, "tasks": step.tasks})
+        for step in steps
+    )
 
 
 def require_workflow_steps(wf_data: dict | None, action: str) -> None:
