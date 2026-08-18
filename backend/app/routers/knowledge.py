@@ -1489,6 +1489,45 @@ async def delete_test_query(uuid: str, query_uuid: str, user: User = Depends(get
     return {"ok": True}
 
 
+# A KB's test set is a curation surface, not a data store — a few hundred
+# questions is a large one. Cap the batch well above that so a malformed
+# client can't ask for an unbounded delete.
+_TEST_QUERY_BULK_DELETE_MAX = 2000
+
+
+@router.post("/{uuid}/test-queries/bulk-delete")
+async def bulk_delete_test_queries(
+    uuid: str, request: Request, user: User = Depends(get_current_user),
+):
+    """Delete several test queries in one call.
+
+    Body: ``{"query_uuids": [str, ...]}``. Only queries belonging to this KB
+    are touched; ids that don't match (already deleted, or another KB's) are
+    ignored rather than failing the batch, so a stale client list still
+    removes everything it legitimately can. Returns ``{"deleted": int}``.
+    """
+    user_org_ancestry = await organization_service.get_user_org_ancestry(user)
+    kb = await _require_manageable_kb(uuid, user, user_org_ancestry)
+    body = await request.json()
+    raw = body.get("query_uuids")
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="query_uuids must be a list")
+    query_uuids = list(dict.fromkeys(q for q in raw if isinstance(q, str) and q.strip()))
+    if not query_uuids:
+        raise HTTPException(status_code=400, detail="No test queries selected")
+    if len(query_uuids) > _TEST_QUERY_BULK_DELETE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete more than {_TEST_QUERY_BULK_DELETE_MAX} test queries at once",
+        )
+    from app.models.kb_test_query import KBTestQuery
+    result = await KBTestQuery.find(
+        {"knowledge_base_uuid": kb.uuid, "uuid": {"$in": query_uuids}},
+    ).delete()
+    deleted = getattr(result, "deleted_count", 0) or 0
+    return {"deleted": deleted}
+
+
 # ---------------------------------------------------------------------------
 # Autovalidate (optimizer)
 # ---------------------------------------------------------------------------
