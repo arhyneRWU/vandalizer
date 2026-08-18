@@ -43,6 +43,57 @@ class TestQueryImportError(ValueError):
     """File-level problem the user can act on (bad format, missing columns)."""
 
 
+
+def _split_source_labels(raw: str) -> list[str]:
+    """Split a source-label cell into individual labels.
+
+    Commas are the obvious separator, but real source names contain them —
+    "Subpart D-iii — Monitoring, Reporting, Remedies & Closeout" is one
+    source, not three. Splitting it blindly invents labels that match no
+    source in the KB, and every invented label also inflates the denominator
+    of the retrieval-precision score, so the KB gets marked down for a
+    spreadsheet formatting artifact rather than a retrieval failure.
+
+    Two escape hatches let an author be unambiguous:
+
+      * Quotes protect their contents — ``"Monitoring, Reporting"`` is one
+        label. Straight and curly quotes both work, since spreadsheets like
+        to autocorrect them.
+      * Semicolons, when the cell contains any, become the *only* separator,
+        leaving commas inside each label intact.
+
+    A cell with neither still splits on commas, which keeps every previously
+    valid file importing exactly as before.
+    """
+    if not raw or not raw.strip():
+        return []
+
+    # Semicolons are the explicit separator: once present, commas are content.
+    separators = {";"} if ";" in raw else {";", ","}
+    closing = {'"': '"', "\u201c": "\u201d", "\u201d": "\u201d"}
+
+    labels: list[str] = []
+    buf: list[str] = []
+    expected_close: str | None = None
+
+    for ch in raw:
+        if expected_close is not None:
+            if ch == expected_close:
+                expected_close = None
+            else:
+                buf.append(ch)
+        elif ch in closing:
+            expected_close = closing[ch]
+        elif ch in separators:
+            labels.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    labels.append("".join(buf))
+
+    return [label.strip() for label in labels if label.strip()]
+
+
 def _normalize_header(value: str) -> str:
     return " ".join(value.replace("_", " ").strip().lower().split())
 
@@ -161,11 +212,7 @@ def parse_test_query_import(filename: str, data: bytes) -> tuple[list[dict], lis
         if not values["query"]:
             errors.append({"row": sheet_row, "error": "Missing question"})
             continue
-        labels = [
-            s.strip()
-            for s in values["expected_source_labels"].replace(";", ",").split(",")
-            if s.strip()
-        ]
+        labels = _split_source_labels(values["expected_source_labels"])
         rows.append({
             "row": sheet_row,
             "query": values["query"],

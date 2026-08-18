@@ -388,6 +388,12 @@ export type KBTestQueryImportResult = {
   skipped: number
   total_rows: number
   errors: { row: number; error: string }[]
+  /**
+   * Expected-source labels that match no source in this KB. They import fine,
+   * but a validation run can never credit them, so each one silently scores 0
+   * retrieval precision on every question that carries it.
+   */
+  unmatched_source_labels?: { label: string; questions: number }[]
 }
 
 /**

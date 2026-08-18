@@ -8,6 +8,7 @@ from app.services.kb_test_query_import import (
     MAX_IMPORT_ROWS,
     TestQueryImportError,
     parse_test_query_import,
+    _split_source_labels,
 )
 
 
@@ -144,3 +145,61 @@ class TestFileTypeDispatch:
     def test_unknown_extension_rejected(self):
         with pytest.raises(TestQueryImportError, match="Unsupported"):
             parse_test_query_import("set.txt", b"Question\nQ1\n")
+
+
+# ---------------------------------------------------------------------------
+# Source-label separators
+# ---------------------------------------------------------------------------
+
+
+def test_semicolons_separate_labels():
+    assert _split_source_labels("Subpart A; Subpart B") == [
+        "Subpart A", "Subpart B",
+    ]
+
+
+def test_semicolon_cell_keeps_commas_inside_labels():
+    # The real failure: "Subpart D-iii — Monitoring, Reporting, Remedies &
+    # Closeout | §§200.328-200.346" is ONE source. Splitting it on commas
+    # invented two labels that match nothing, and tripled the denominator of
+    # the retrieval-precision score.
+    cell = (
+        "Subpart D-iii — Monitoring, Reporting, Remedies & Closeout "
+        "| §§200.328-200.346; Subpart E-i — Cost Principles"
+    )
+    assert _split_source_labels(cell) == [
+        "Subpart D-iii — Monitoring, Reporting, Remedies & Closeout "
+        "| §§200.328-200.346",
+        "Subpart E-i — Cost Principles",
+    ]
+
+
+def test_quoted_label_keeps_its_commas():
+    cell = '"Appendices I–IV | NOFO, Contract Provisions, Indirect Cost"'
+    assert _split_source_labels(cell) == [
+        "Appendices I–IV | NOFO, Contract Provisions, Indirect Cost",
+    ]
+
+
+def test_quoted_and_bare_labels_mix():
+    assert _split_source_labels('"Monitoring, Reporting"; Subpart E') == [
+        "Monitoring, Reporting", "Subpart E",
+    ]
+
+
+def test_quoting_one_label_stops_comma_splitting():
+    # A cell that quotes anything is explicit about its boundaries.
+    assert _split_source_labels('"A, B", C') == ["A, B", "C"]
+
+
+def test_plain_comma_list_still_splits():
+    assert _split_source_labels("Subpart A, Subpart B") == [
+        "Subpart A", "Subpart B",
+    ]
+
+
+def test_blank_and_empty_segments_dropped():
+    assert _split_source_labels("") == []
+    assert _split_source_labels("   ") == []
+    assert _split_source_labels("A;;B") == ["A", "B"]
+    assert _split_source_labels(" A , B ") == ["A", "B"]

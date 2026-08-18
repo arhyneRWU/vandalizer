@@ -1238,10 +1238,26 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
             by_external_id[row["external_id"]] = tq
         created += 1
 
+    # An expected-source label that matches no source in this KB can never be
+    # credited, so every question carrying one scores 0 retrieval precision and
+    # drags the KB's score down for a labelling mismatch rather than a
+    # retrieval failure. Silently importing those is how a run ends up with an
+    # unexplainable precision number, so report them as warnings.
+    try:
+        unmatched = await _unmatched_source_labels(kb, rows)
+    except Exception:
+        # The questions are already saved. A warning we failed to compute must
+        # not turn a successful import into a 500 the user reads as data loss.
+        logger.exception(
+            "Could not check expected-source labels for KB %s", kb.uuid,
+        )
+        unmatched = []
+
     logger.info(
         "Test-query import for KB %s by user %s: %d created, %d updated, "
-        "%d skipped, %d row errors (%s)",
-        kb.uuid, user.user_id, created, updated, skipped, len(row_errors), filename,
+        "%d skipped, %d row errors, %d unmatched source labels (%s)",
+        kb.uuid, user.user_id, created, updated, skipped, len(row_errors),
+        len(unmatched), filename,
     )
     return {
         "created": created,
@@ -1249,7 +1265,38 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
         "skipped": skipped,
         "total_rows": len(rows) + len(row_errors),
         "errors": row_errors,
+        "unmatched_source_labels": unmatched,
     }
+
+
+async def _unmatched_source_labels(kb, rows: list[dict]) -> list[dict]:
+    """Expected-source labels in ``rows`` that match no source name in ``kb``.
+
+    Uses the same substring rule the validation run scores with
+    (``kb_validation_service``), so a label reported clean here is one that run
+    can actually credit.
+    """
+    sources = await svc.get_kb_sources(kb.uuid)
+    names = [
+        (s.custom_name or s.url_title or s.url or "").lower()
+        for s in sources
+    ]
+    names = [n for n in names if n]
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        for label in row["expected_source_labels"]:
+            key = label.strip()
+            if not key:
+                continue
+            if any(key.lower() in name for name in names):
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+    return [
+        {"label": label, "questions": n}
+        for label, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 async def _require_manageable_kb(uuid: str, user: User, user_org_ancestry: list[str]):

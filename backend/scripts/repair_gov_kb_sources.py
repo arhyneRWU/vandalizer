@@ -34,7 +34,8 @@ Usage (run inside the backend container / venv on the target server)::
     python -m scripts.repair_gov_kb_sources --no-refetch  # skip step 3
 
 A source counts as broken when its cached content looks like a bot-challenge
-page, its status is ``error``, or it has no cached content at all.
+page or site chrome with no body text (a JavaScript-rendered page that served
+only its shell), its status is ``error``, or it has no cached content at all.
 """
 
 import argparse
@@ -48,7 +49,10 @@ import httpx
 from app.config import Settings
 from app.database import init_db
 from app.models.knowledge import KnowledgeBase, KnowledgeBaseSource
-from app.utils.bot_challenge import looks_like_bot_challenge
+from app.utils.bot_challenge import (
+    looks_like_boilerplate_only,
+    looks_like_bot_challenge,
+)
 from scripts.fetch_ecfr_text import (
     DEFAULT_OUT_DIR,
     MANIFEST_NAME,
@@ -116,6 +120,8 @@ def _is_broken(source: KnowledgeBaseSource) -> str | None:
     """Return a short reason when the source needs repair, else None."""
     if looks_like_bot_challenge(source.content):
         return "cached bot-challenge page"
+    if looks_like_boilerplate_only(source.content):
+        return "cached boilerplate-only page (JS-rendered site)"
     if source.status == "error":
         return f"error status ({(source.error_message or '')[:80]})"
     if not (source.content or "").strip():

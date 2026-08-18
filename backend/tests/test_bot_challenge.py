@@ -1,6 +1,9 @@
 """Unit tests for bot-verification challenge detection."""
 
-from app.utils.bot_challenge import looks_like_bot_challenge
+from app.utils.bot_challenge import (
+    looks_like_boilerplate_only,
+    looks_like_bot_challenge,
+)
 
 WALMART_CHALLENGE = (
     "Robot or human? Activate and hold the button to confirm that you're "
@@ -69,3 +72,68 @@ def test_empty_and_none_pass():
     assert looks_like_bot_challenge("") is False
     assert looks_like_bot_challenge(None) is False
     assert looks_like_bot_challenge("   ") is False
+
+
+# ---------------------------------------------------------------------------
+# Boilerplate-only pages (JS-rendered sites that serve just their shell)
+# ---------------------------------------------------------------------------
+
+# What grants.gov actually returned for the 2 CFR 200 KB's policy source:
+# HTTP 200, no bot challenge, but the body is only site chrome. It was
+# embedded as content and the KB answered questions about padlock icons and
+# session timeouts.
+GRANTS_GOV_SHELL = (
+    "An official website of the United States government Here's how you know "
+    "Official websites use .gov A .gov website belongs to an official "
+    "government organization in the United States. Secure .gov websites use "
+    "HTTPS A lock ( Lock Locked padlock icon ) or https:// means you've "
+    "safely connected to the .gov website. Share sensitive information only "
+    "on official, secure websites. Menu Search Site Content Help Register "
+    "Login Return to top Connect with Us Blog Alerts RSS Accessibility "
+    "Privacy Site Map USA.gov Report Fraud "
+    'Your session will expire in 3 minutes. To continue working, click on '
+    'the "OK" button below. No'
+)
+
+
+def test_detects_grants_gov_chrome_only_shell():
+    assert looks_like_boilerplate_only(GRANTS_GOV_SHELL) is True
+
+
+def test_chrome_only_shell_is_not_a_bot_challenge():
+    # It must be caught by the new gate specifically — the bot-challenge gate
+    # has no reason to fire, which is why this page slipped through before.
+    assert looks_like_bot_challenge(GRANTS_GOV_SHELL) is False
+
+
+def test_real_gov_page_with_banner_passes():
+    # Real .gov pages carry the same banner; length is what separates them.
+    page = (
+        "An official website of the United States government Here's how you "
+        "know. Secure .gov websites use HTTPS. "
+    ) + (
+        "Equipment means tangible personal property having a useful life of "
+        "more than one year and a per-unit acquisition cost that equals or "
+        "exceeds the lesser of the capitalization level established by the "
+        "recipient or $10,000. " * 40
+    )
+    assert looks_like_boilerplate_only(page) is False
+
+
+def test_single_chrome_marker_is_not_enough():
+    # One marker on a short page is not a confident signal.
+    assert looks_like_boilerplate_only(
+        "An official website of the United States government. "
+        "The cost of alcoholic beverages is unallowable."
+    ) is False
+
+
+def test_short_real_content_passes():
+    assert looks_like_boilerplate_only(
+        "The cost of alcoholic beverages is unallowable."
+    ) is False
+
+
+def test_empty_boilerplate_input():
+    assert looks_like_boilerplate_only("") is False
+    assert looks_like_boilerplate_only(None) is False
