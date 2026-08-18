@@ -2784,6 +2784,28 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
     }
   }
 
+  // Download the in-memory Test Step output. Test runs have no WorkflowResult /
+  // session, so there's no server download endpoint — build the file client-side
+  // from the result already in state. Strings download as .txt (raw prompt
+  // output reads cleanly); structured results download as pretty JSON.
+  const handleDownloadTestResult = () => {
+    if (testResult === null) return
+    const isStr = typeof testResult === 'string'
+    const content = isStr ? testResult : JSON.stringify(testResult, null, 2)
+    const ext = isStr ? 'txt' : 'json'
+    const mime = isStr ? 'text/plain' : 'application/json'
+    const safeName = (task.name || 'step').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'step'
+    const blob = new Blob([content], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeName}-test.${ext}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   const getTextValue = (key: string): string => {
     const val = taskData[key]
     if (typeof val === 'string') return val
@@ -4279,6 +4301,20 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 }}>
                   <CheckCircle style={{ width: 14, height: 14 }} />
                   Test Completed
+                  <button
+                    type="button"
+                    onClick={handleDownloadTestResult}
+                    title={`Download this output (${typeof testResult === 'string' ? '.txt' : '.json'})`}
+                    style={{
+                      marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
+                      padding: '4px 10px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                      border: '1px solid #d1d5db', borderRadius: 6,
+                      backgroundColor: '#fff', cursor: 'pointer', color: '#374151',
+                    }}
+                  >
+                    <Download style={{ width: 13, height: 13 }} />
+                    Download
+                  </button>
                 </div>
                 <div style={{
                   backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
