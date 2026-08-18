@@ -74,6 +74,7 @@ const ROUTE_TITLES: Array<[string, string]> = [
   ['/teams', 'Teams'],
   ['/organizations', 'Organizations'],
   ['/verification', 'Verification'],
+  ['/reviews', 'Reviews'],
   ['/tuning', 'Tuning suggestions'],
   ['/support', 'Support'],
   ['/automation', 'Automations'],

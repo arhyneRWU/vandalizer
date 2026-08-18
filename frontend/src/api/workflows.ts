@@ -580,6 +580,8 @@ export interface RunHistoryEntry {
   steps_total?: number
   session_id?: string
   result_snapshot: Record<string, unknown>
+  /** Set while the run is parked on an approval gate — links to the review. */
+  pending_review_uuid?: string | null
 }
 
 export function getWorkflowHistory(workflowId: string, limit = 50) {

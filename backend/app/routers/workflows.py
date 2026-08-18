@@ -1004,6 +1004,10 @@ async def get_workflow_history(
                 "steps_total": ev.steps_total,
                 "session_id": ev.workflow_session_id,
                 "result_snapshot": ev.result_snapshot or {},
+                # Set while the run is parked on an approval gate. Lets the
+                # history row say "awaiting approval" and link to the review
+                # instead of showing a run that has been "running" for days.
+                "pending_review_uuid": (ev.meta_summary or {}).get("pending_review_uuid"),
             }
             for ev in events
         ],

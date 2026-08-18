@@ -60,6 +60,7 @@ import { useQualitySparkline } from '../../hooks/useQualitySparkline'
 import { relativeTime } from '../../utils/time'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
 import { getReview, approveReview, rejectReview } from '../../api/reviews'
+import { useMyReviewCount } from '../../hooks/useMyReviewCount'
 import type { ReviewDetail } from '../../api/reviews'
 import { ColdStartHero } from '../shared/ColdStartHero'
 import { TermDef } from '../shared/TermDef'
@@ -4849,6 +4850,8 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
   const [approvalError, setApprovalError] = useState<string | null>(null)
   const [showSaveToFolder, setShowSaveToFolder] = useState(false)
   const { toast } = useToast()
+  // Deciding here clears the same queue the nav badge counts.
+  const { refresh: refreshReviewCount } = useMyReviewCount()
 
   useEffect(() => {
     if (!isPendingApproval || !status?.approval_request_id) return
@@ -4862,6 +4865,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
     try {
       await approveReview(approval.uuid, { comments: approvalComments })
       setApproval({ ...approval, status: 'approved' })
+      void refreshReviewCount()
     } catch (e) {
       setApprovalError(e instanceof Error ? e.message : 'Failed to approve')
     } finally {
@@ -4876,6 +4880,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
     try {
       await rejectReview(approval.uuid, approvalComments)
       setApproval({ ...approval, status: 'rejected' })
+      void refreshReviewCount()
     } catch (e) {
       setApprovalError(e instanceof Error ? e.message : 'Failed to reject')
     } finally {

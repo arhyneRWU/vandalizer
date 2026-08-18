@@ -53,3 +53,32 @@ class TestGenerateActivityDescription:
         # The activity is still marked done so the UI stops shimmering.
         set_ops = [c[0][1]["$set"] for c in db.activity_event.update_one.call_args_list]
         assert any(s.get("meta_summary.description_generated") for s in set_ops)
+
+
+class TestReapStaleRunning:
+    """A run parked on an approval gate is waiting on a person, not stalled.
+
+    It stops reporting progress by design, so the elapsed-time sweep used to
+    mark every review left overnight as a timeout and fail the run's activity.
+    """
+
+    def _reap(self):
+        import app.tasks.activity_tasks as at
+
+        db = MagicMock()
+        db.activity_event.update_many.return_value = MagicMock(modified_count=0)
+        with patch.object(at, "_get_db", return_value=db), \
+             patch.object(at, "_resolve_stale_threshold_minutes", return_value=30):
+            at.reap_stale_running_task()
+        return db.activity_event.update_many.call_args[0][0]
+
+    def test_skips_runs_awaiting_approval(self):
+        query = self._reap()
+        # `None` matches both a null field and a missing one, so ordinary
+        # activities (which never carry the key) stay in scope.
+        assert query["meta_summary.pending_review_uuid"] is None
+
+    def test_still_targets_stuck_running_events(self):
+        query = self._reap()
+        assert query["status"] == {"$in": ["running", "queued"]}
+        assert "$lt" in query["last_updated_at"]

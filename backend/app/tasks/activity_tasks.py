@@ -309,6 +309,12 @@ def reap_stale_running_task(self) -> None:
     time limits that killed a task before its exception handler could update the
     activity record. Without this, the activity rail spins forever and the user
     has to delete the item manually.
+
+    Runs parked on a human approval gate are exempt: they carry
+    ``meta_summary.pending_review_uuid`` and stop reporting progress by design,
+    so reaping on elapsed time marked every review left overnight as a timeout.
+    The approval paths (resume, reject, expire) clear the marker, which puts the
+    row back under this sweep.
     """
     db = _get_db()
     threshold_minutes = _resolve_stale_threshold_minutes(db)
@@ -321,6 +327,8 @@ def reap_stale_running_task(self) -> None:
         {
             "status": {"$in": ["running", "queued"]},
             "last_updated_at": {"$lt": cutoff},
+            # Matches rows where the field is null *or* absent.
+            "meta_summary.pending_review_uuid": None,
         },
         {
             "$set": {
