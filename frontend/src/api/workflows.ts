@@ -260,6 +260,15 @@ export function downloadResults(sessionId: string, format: string = 'json', opts
   return `/api/workflows/download?${params.toString()}`
 }
 
+// URL for a ZIP bundling every completed run in a batch, one file per document
+// in the given format. Individual batch runs download via downloadResults with
+// their own session_id.
+export function downloadBatchResults(batchId: string, format: string = 'json', opts?: { parseStructured?: boolean }) {
+  const params = new URLSearchParams({ batch_id: batchId, format })
+  if (opts?.parseStructured) params.set('parse_structured', 'true')
+  return `/api/workflows/batch-download?${params.toString()}`
+}
+
 export type SaveOutputFormat = 'pdf' | 'docx' | 'markdown' | 'csv' | 'json' | 'text'
 
 export function saveResultToFolder(

@@ -306,48 +306,39 @@ def _zip_member_for_step(step_name: str, value):
     return f"{safe_name}.txt", str(value).encode()
 
 
-@router.get("/download")
-async def download_results(
-    session_id: str,
-    format: str = "json",
-    parse_structured: bool = False,
-    user: User = Depends(get_current_user),
-):
-    """Download workflow results in specified format.
+def _session_base_filename(status: dict, session_id: str) -> str:
+    """Build a filesystem-safe base name (no extension) unique per session.
 
-    If the workflow has multiple steps marked as deliverables (is_output), the
-    response is a ZIP bundle containing one file per marked step. With 0 or 1
-    marked steps the single-output formatting paths below apply.
+    Browsers cap auto-suffixing of duplicate downloads at ~5; past that, the same
+    Content-Disposition name causes older files to be overwritten. Embedding the
+    session id guarantees uniqueness across manual runs.
     """
-    if format not in VALID_EXPORT_FORMATS:
-        raise HTTPException(status_code=400, detail=f"Invalid format. Use one of: {sorted(VALID_EXPORT_FORMATS)}")
-
-    status = await svc.get_workflow_status(session_id, user=user)
-    if not status:
-        raise HTTPException(status_code=404, detail="Workflow result not found")
-
-    # Build a base filename unique per session. Browsers cap auto-suffixing of
-    # duplicate downloads at ~5; past that, the same Content-Disposition name
-    # causes older files to be overwritten. Embedding the session id in the
-    # name guarantees uniqueness across manual runs.
     workflow_name = status.get("workflow_name")
     document_title = status.get("document_title")
-    name_parts: list[str] = []
-    if workflow_name:
-        name_parts.append(workflow_name)
-    else:
-        name_parts.append("results")
+    name_parts: list[str] = [workflow_name or "results"]
     if document_title:
         doc_stem = document_title.rsplit(".", 1)[0] if "." in document_title else document_title
         name_parts.append(doc_stem)
     name_parts.append(session_id[:8])
     raw_base = "-".join(name_parts)
-    base_filename = "".join(c if c.isalnum() or c in " _-." else "_" for c in raw_base).strip() or f"results-{session_id[:8]}"
+    return "".join(c if c.isalnum() or c in " _-." else "_" for c in raw_base).strip() or f"results-{session_id[:8]}"
 
+
+def _render_workflow_output(status: dict, format: str, parse_structured: bool) -> tuple[bytes, str, str, str | None]:
+    """Render a workflow result to bytes for download.
+
+    Returns ``(content, media_type, ext, explicit_filename)``. When
+    ``explicit_filename`` is set (a file-producing step already named its own
+    file), the caller should use it verbatim; otherwise it should name the file
+    ``<base>.<ext>``. Shared by the single-session download endpoint and the
+    batch bundle so both format outputs identically.
+    """
+    workflow_name = status.get("workflow_name")
     final_output = status.get("final_output", {})
     steps_output = status.get("steps_output", {}) or {}
     output_step_names = [n for n in (status.get("output_step_names") or []) if n in steps_output]
 
+    # Multiple deliverable steps → bundle one file per step into a ZIP.
     if len(output_step_names) >= 2:
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -363,28 +354,21 @@ async def download_results(
                 else:
                     seen[filename] = 0
                 zf.writestr(filename, payload)
-        zip_buf.seek(0)
-        return StreamingResponse(
-            zip_buf,
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.zip"'},
-        )
+        return zip_buf.getvalue(), "application/zip", "zip", None
 
     if len(output_step_names) == 1:
         output_data = _step_output_value(steps_output.get(output_step_names[0]))
     else:
         output_data = final_output.get("output", "") if isinstance(final_output, dict) else final_output
 
-    # Check for file_download type (e.g., from DataExport or DocumentRenderer)
+    # A step already produced a file (e.g. DataExport or DocumentRenderer) — hand
+    # its bytes back untouched under its own filename, ignoring the requested format.
     if isinstance(output_data, dict) and output_data.get("type") == "file_download":
         file_bytes = base64.b64decode(output_data["data_b64"])
         media_type_map = {"pdf": "application/pdf", "csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "zip": "application/zip"}
-        media_type = media_type_map.get(output_data.get("file_type", ""), "application/octet-stream")
-        return StreamingResponse(
-            io.BytesIO(file_bytes),
-            media_type=media_type,
-            headers={"Content-Disposition": f'attachment; filename="{output_data.get("filename", "output")}"'},
-        )
+        file_type = output_data.get("file_type", "")
+        media_type = media_type_map.get(file_type, "application/octet-stream")
+        return file_bytes, media_type, file_type or "bin", output_data.get("filename", "output")
 
     if format == "csv":
         buf = io.StringIO()
@@ -421,11 +405,7 @@ async def download_results(
             for line in text.split("\n"):
                 if line.strip():
                     writer.writerow([line])
-        return StreamingResponse(
-            io.BytesIO(buf.getvalue().encode()),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.csv"'},
-        )
+        return buf.getvalue().encode(), "text/csv", "csv", None
 
     if format == "text":
         if isinstance(output_data, str):
@@ -439,46 +419,114 @@ async def download_results(
             text = "\n".join(str(item) for item in output_data)
         else:
             text = str(output_data)
-        return StreamingResponse(
-            io.BytesIO(text.encode()),
-            media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.txt"'},
-        )
+        return text.encode(), "text/plain", "txt", None
 
     if format == "markdown":
         from app.services.output_handlers import render_workflow_markdown
 
         md_text = render_workflow_markdown(output_data, title=workflow_name or "Workflow Results")
-        return StreamingResponse(
-            io.BytesIO(md_text.encode()),
-            media_type="text/markdown",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.md"'},
-        )
+        return md_text.encode(), "text/markdown", "md", None
 
     if format == "pdf":
         from app.services.pdf_service import render_workflow_pdf
 
         pdf_bytes = render_workflow_pdf(output_data, title="Workflow Results")
-        return StreamingResponse(
-            io.BytesIO(pdf_bytes),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.pdf"'},
-        )
+        return pdf_bytes, "application/pdf", "pdf", None
 
     if format == "docx":
         docx_bytes = data_to_docx_bytes(output_data)
-        return StreamingResponse(
-            io.BytesIO(docx_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{base_filename}.docx"'},
+        return (
+            docx_bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "docx",
+            None,
         )
 
     # Default: JSON
     json_bytes = json.dumps(output_data, indent=2, default=str).encode()
+    return json_bytes, "application/json", "json", None
+
+
+@router.get("/download")
+async def download_results(
+    session_id: str,
+    format: str = "json",
+    parse_structured: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Download workflow results in specified format.
+
+    If the workflow has multiple steps marked as deliverables (is_output), the
+    response is a ZIP bundle containing one file per marked step. With 0 or 1
+    marked steps the single-output formatting paths apply.
+    """
+    if format not in VALID_EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Invalid format. Use one of: {sorted(VALID_EXPORT_FORMATS)}")
+
+    status = await svc.get_workflow_status(session_id, user=user)
+    if not status:
+        raise HTTPException(status_code=404, detail="Workflow result not found")
+
+    base_filename = _session_base_filename(status, session_id)
+    content, media_type, ext, explicit_name = _render_workflow_output(status, format, parse_structured)
+    filename = explicit_name or f"{base_filename}.{ext}"
     return StreamingResponse(
-        io.BytesIO(json_bytes),
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{base_filename}.json"'},
+        io.BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/batch-download")
+async def download_batch_results(
+    batch_id: str,
+    format: str = "json",
+    parse_structured: bool = False,
+    share_token: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+):
+    """Bundle every completed run in a batch into a single ZIP.
+
+    One member per completed run, each formatted like the single-session
+    download. Not-yet-finished and failed runs are skipped. 404 if the batch is
+    unknown/unauthorized; 409 if it has no completed runs to bundle.
+    """
+    if format not in VALID_EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Invalid format. Use one of: {sorted(VALID_EXPORT_FORMATS)}")
+
+    batch = await svc.get_batch_status(batch_id, user=user, share_token=share_token)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    completed = [it for it in batch["items"] if it["status"] == "completed"]
+    if not completed:
+        raise HTTPException(status_code=409, detail="No completed runs to download yet")
+
+    zip_buf = io.BytesIO()
+    seen: dict[str, int] = {}
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in completed:
+            sid = item["session_id"]
+            status = await svc.get_workflow_status(sid, user=user, share_token=share_token)
+            if not status:
+                continue
+            content, _media_type, ext, explicit_name = _render_workflow_output(status, format, parse_structured)
+            member = explicit_name or f"{_session_base_filename(status, sid)}.{ext}"
+            # Disambiguate collisions so no member silently overwrites another.
+            if member in seen:
+                seen[member] += 1
+                stem, _, m_ext = member.rpartition(".")
+                member = f"{stem}_{seen[member]}.{m_ext}" if m_ext else f"{member}_{seen[member]}"
+            else:
+                seen[member] = 0
+            zf.writestr(member, content)
+    zip_buf.seek(0)
+
+    zip_name = "".join(c if c.isalnum() or c in " _-." else "_" for c in f"batch-{batch_id}").strip()
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}.zip"'},
     )
 
 

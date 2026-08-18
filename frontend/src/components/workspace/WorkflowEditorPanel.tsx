@@ -18,7 +18,7 @@ import { useConfirm } from '../shared/useConfirm'
 import { getProjectDocuments } from '../../api/projects'
 import {
   getWorkflow, addStep, deleteStep, addTask, deleteTask, updateTask,
-  updateWorkflow, updateStep, downloadResults, testStep, getTestStepStatus,
+  updateWorkflow, updateStep, downloadResults, downloadBatchResults, testStep, getTestStepStatus,
   reorderSteps, validateWorkflow, runWorkflow, streamWorkflowStatus, createTempDocuments,
   getWorkflowQualityHistory, getWorkflowImprovementSuggestions, getWorkflowQualityStatus,
   getValidationPlan, updateValidationPlan, generateValidationPlan, validationReportUrl,
@@ -889,6 +889,7 @@ export function WorkflowEditorPanel() {
               runnerStatus={runner.status}
               runnerRunning={runner.running}
               runnerSessionId={runner.sessionId}
+              runnerBatchId={runner.batchId}
               batchStatus={runner.batchStatus}
               runElapsed={runElapsed}
               showDownloadPopup={showDownloadPopup}
@@ -1332,6 +1333,7 @@ function DesignCanvas({
   runnerStatus,
   runnerRunning,
   runnerSessionId,
+  runnerBatchId,
   batchStatus,
   runElapsed,
   showDownloadPopup,
@@ -1347,6 +1349,7 @@ function DesignCanvas({
   runnerStatus: WorkflowStatus | null
   runnerRunning: boolean
   runnerSessionId: string | null
+  runnerBatchId: string | null
   batchStatus: BatchStatus | null
   runElapsed: number
   showDownloadPopup: boolean
@@ -1520,6 +1523,7 @@ function DesignCanvas({
         <>
           <ConnectionLine />
           <BatchOutputCard
+            batchId={runnerBatchId}
             batchStatus={batchStatus}
             running={runnerRunning}
             runElapsed={runElapsed}
@@ -5343,7 +5347,8 @@ function ConvertWorkflowDocsButton({
 // Batch output card
 // ---------------------------------------------------------------------------
 
-function BatchOutputCard({ batchStatus, running, runElapsed }: {
+function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
+  batchId: string | null
   batchStatus: BatchStatus
   running: boolean
   runElapsed: number
@@ -5352,6 +5357,7 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
   const isError = batchStatus.status === 'failed'
   const isCanceled = batchStatus.status === 'canceled'
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const completedCount = batchStatus.items.filter(it => it.status === 'completed').length
 
   const renderOutput = (data: unknown): string => {
     if (data === null || data === undefined) return ''
@@ -5433,6 +5439,22 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
                   <span style={{ fontSize: 11, color: '#6b7280', flexShrink: 0 }}>{item.current_step_name}</span>
                 )}
                 {itemDone && (
+                  <a
+                    href={downloadResults(item.session_id, 'json')}
+                    onClick={e => e.stopPropagation()}
+                    title="Download this output (JSON)"
+                    aria-label={`Download output for ${item.document_title || item.session_id}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', flexShrink: 0,
+                      color: '#6b7280', textDecoration: 'none',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.color = '#111827' }}
+                    onMouseLeave={e => { e.currentTarget.style.color = '#6b7280' }}
+                  >
+                    <Download style={{ width: 14, height: 14 }} />
+                  </a>
+                )}
+                {itemDone && (
                   <ChevronDown style={{
                     width: 14, height: 14, color: '#6b7280', flexShrink: 0,
                     transition: 'transform 0.15s',
@@ -5459,6 +5481,26 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
           )
         })}
       </div>
+
+      {/* Download all completed outputs as a ZIP of JSON files. Shown as soon as
+          any run finishes, so completed outputs are grabbable mid-batch. */}
+      {batchId && completedCount > 0 && (
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <a
+            href={downloadBatchResults(batchId, 'json')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
+              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+              border: '1px solid #d1d5db', borderRadius: 6,
+              backgroundColor: '#fff', cursor: 'pointer', color: '#374151', textDecoration: 'none',
+            }}
+          >
+            <Package style={{ width: 14, height: 14 }} />
+            Download all (.zip)
+            {completedCount < batchStatus.total && <span style={{ fontWeight: 400, color: '#6b7280' }}>({completedCount})</span>}
+          </a>
+        </div>
+      )}
     </div>
   )
 }

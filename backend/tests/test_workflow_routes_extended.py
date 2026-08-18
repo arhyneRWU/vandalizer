@@ -564,6 +564,128 @@ class TestDownloadResults:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/workflows/batch-download — ZIP bundle of a batch's outputs
+# ---------------------------------------------------------------------------
+
+class TestDownloadBatchResults:
+    def _batch(self, item_statuses):
+        """Batch-status dict with one item per (session_id, status) pair."""
+        return {
+            "status": "running",
+            "total": len(item_statuses),
+            "completed": sum(1 for _, s in item_statuses if s == "completed"),
+            "failed": 0,
+            "items": [
+                {
+                    "session_id": sid,
+                    "document_title": f"{sid}.pdf",
+                    "status": s,
+                    "num_steps_completed": 1,
+                    "num_steps_total": 1,
+                    "current_step_name": None,
+                    "final_output": {"output": {"who": sid}},
+                }
+                for sid, s in item_statuses
+            ],
+        }
+
+    def _session_status(self, sid):
+        return {
+            "status": "completed",
+            "num_steps_completed": 1,
+            "num_steps_total": 1,
+            "current_step_name": None,
+            "current_step_detail": None,
+            "current_step_preview": None,
+            "final_output": {"output": {"who": sid}},
+            "steps_output": {},
+            "workflow_name": "My WF",
+            "document_title": f"{sid}.pdf",
+        }
+
+    async def test_bundles_only_completed_runs(self, client):
+        import io
+        import zipfile
+
+        user = _make_user()
+        cookies, headers = _auth()
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_status = AsyncMock(
+                return_value=self._batch([("s1", "completed"), ("s2", "running"), ("s3", "completed")])
+            )
+            mock_svc.get_workflow_status = AsyncMock(
+                side_effect=lambda sid, **kw: self._session_status(sid)
+            )
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert "application/zip" in resp.headers["content-type"]
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        # Only the two completed runs are bundled, not the running one.
+        assert len(zf.namelist()) == 2
+
+    async def test_no_completed_runs_returns_409(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_status = AsyncMock(
+                return_value=self._batch([("s1", "running"), ("s2", "queued")])
+            )
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 409
+
+    async def test_unknown_batch_returns_404(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_status = AsyncMock(return_value=None)
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=missing&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 404
+
+    async def test_invalid_format_returns_400(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=xlsx",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # POST /api/workflows/steps/test
 # ---------------------------------------------------------------------------
 
