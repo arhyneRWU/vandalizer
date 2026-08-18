@@ -14,6 +14,7 @@ from celery.result import AsyncResult
 
 from app.celery_app import celery_app
 from app.models.document import SmartDocument
+from app.models.library import LibraryItemKind
 from app.models.search_set import SearchSetItem
 from app.models.workflow import (
     Workflow,
@@ -68,13 +69,16 @@ async def create_workflow(name: str, user_id: str, description: str | None = Non
     return wf
 
 
-async def list_workflows(
+def _visible_workflows_query(
     user: User,
-    skip: int = 0,
-    limit: int = 100,
     scope: str | None = None,
     search: str | None = None,
-) -> list[Workflow]:
+) -> dict | None:
+    """Mongo filter for the workflows *user* may list, or None for "nothing".
+
+    Shared by :func:`list_workflows` and :func:`count_workflows` so a paged
+    listing and its total can never disagree about what is visible.
+    """
     # Scope queries to the user's current team (matches Library behavior)
     current_team = str(user.current_team) if user.current_team else None
 
@@ -85,7 +89,7 @@ async def list_workflows(
             query["team_id"] = {"$in": [current_team, None]}
     elif scope == "team":
         if not current_team:
-            return []
+            return None
         query = {"team_id": current_team, "user_id": {"$ne": user.user_id}}
     else:
         # Default: user's own (in current team) + all current team items
@@ -100,9 +104,43 @@ async def list_workflows(
 
     # Add text search filter
     if search:
-        query["name"] = {"$regex": search, "$options": "i"}
+        query["name"] = {"$regex": re.escape(search), "$options": "i"}
 
-    return await Workflow.find(query).skip(skip).limit(limit).to_list()
+    return query
+
+
+async def list_workflows(
+    user: User,
+    skip: int = 0,
+    limit: int = 100,
+    scope: str | None = None,
+    search: str | None = None,
+) -> list[Workflow]:
+    query = _visible_workflows_query(user, scope=scope, search=search)
+    if query is None:
+        return []
+    # Newest first. Unsorted, Mongo returns natural (insertion) order, so a
+    # capped page showed the user's oldest workflows and hid everything made
+    # since — the opposite of what a listing is for.
+    return (
+        await Workflow.find(query)
+        .sort("-created_at", "-_id")
+        .skip(skip)
+        .limit(limit)
+        .to_list()
+    )
+
+
+async def count_workflows(
+    user: User,
+    scope: str | None = None,
+    search: str | None = None,
+) -> int:
+    """Total workflows matching the same filter :func:`list_workflows` pages."""
+    query = _visible_workflows_query(user, scope=scope, search=search)
+    if query is None:
+        return 0
+    return await Workflow.find(query).count()
 
 
 async def get_workflow(
@@ -320,6 +358,14 @@ async def duplicate_workflow(
         validation_inputs=validation_inputs,
     )
     await new_wf.insert()
+    # Bookmark the copy here rather than leaving it to the caller: "Make a copy"
+    # in the workflow editor never made that follow-up call, so every copy it
+    # produced was invisible in the library while still holding its name.
+    from app.services import library_service
+
+    await library_service.ensure_bookmark(
+        new_wf.id, LibraryItemKind.WORKFLOW, user_id,
+    )
 
     return await get_workflow(str(new_wf.id))
 

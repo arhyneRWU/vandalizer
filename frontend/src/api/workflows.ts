@@ -7,12 +7,35 @@ export function createWorkflow(data: { name: string; description?: string }) {
   return apiFetch<Workflow>('/api/workflows', { method: 'POST', body: JSON.stringify(data) })
 }
 
-export function listWorkflows(params?: { scope?: string; search?: string }) {
+/** One page of workflows plus the size of the full match, per the list API. */
+export interface WorkflowPage {
+  items: Workflow[]
+  total: number
+  skip: number
+  limit: number
+}
+
+/**
+ * Fetch one page of workflows, newest first.
+ *
+ * `search` is applied server-side across every workflow the caller can see —
+ * filtering a fetched page in the client hid anything past the page cap, which
+ * is how workflows became unfindable. `total` reports the full match count so
+ * a caller can tell a complete list from a truncated one.
+ */
+export function listWorkflows(params?: {
+  scope?: string
+  search?: string
+  skip?: number
+  limit?: number
+}) {
   const sp = new URLSearchParams()
   if (params?.scope) sp.set('scope', params.scope)
   if (params?.search) sp.set('search', params.search)
+  if (params?.skip != null) sp.set('skip', String(params.skip))
+  if (params?.limit != null) sp.set('limit', String(params.limit))
   const qs = sp.toString()
-  return apiFetch<Workflow[]>(`/api/workflows${qs ? `?${qs}` : ''}`)
+  return apiFetch<WorkflowPage>(`/api/workflows${qs ? `?${qs}` : ''}`)
 }
 
 export function getWorkflow(id: string, shareToken?: string) {
