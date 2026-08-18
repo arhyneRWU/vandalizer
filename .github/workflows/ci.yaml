@@ -231,3 +231,16 @@ jobs:
 
       - name: Build release containers
         run: make docker-build
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v0.74.0
+
+      # Scans the artifact a deploying campus actually pulls, base layers and
+      # our dependencies together. Notably the only thing that sees the
+      # Chromium apt tree that `playwright install --with-deps` bakes in.
+      # Advisory until a baseline exists -- see the Makefile comment.
+      - name: Scan published images (advisory)
+        continue-on-error: true
+        run: make security-built-images

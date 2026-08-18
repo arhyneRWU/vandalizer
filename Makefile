@@ -3,7 +3,7 @@
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
 
-.PHONY: help backend-install backend-lint backend-typecheck backend-test backend-security backend-audit backend-static backend-backlog backend-ci backend-test-integration-t1 backend-test-integration-t2 backend-test-integration-t3 backend-test-integration-t4 backend-judge-calibration frontend-install frontend-typecheck frontend-lint frontend-test frontend-build frontend-audit frontend-ci ci docker-build release-check security security-gate
+.PHONY: help backend-install backend-lint backend-typecheck backend-test backend-security backend-audit backend-static backend-backlog backend-ci backend-test-integration-t1 backend-test-integration-t2 backend-test-integration-t3 backend-test-integration-t4 backend-judge-calibration frontend-install frontend-typecheck frontend-lint frontend-test frontend-build frontend-audit frontend-ci ci docker-build release-check security security-gate security-built-images
 
 help:
 	@printf "Common targets:\n"
@@ -17,6 +17,7 @@ help:
 	@printf "  make release-check     Run CI checks and both Docker builds\n"
 	@printf "  make security          Full vulnerability report (deps, images, secrets, config)\n"
 	@printf "  make security-gate     Release-gating scan: fails on CRITICAL or a leaked secret\n"
+	@printf "  make security-built-images  Scan the published images (run after docker-build)\n"
 
 backend-install:
 	cd $(BACKEND_DIR) && uv sync --frozen --extra dev
@@ -172,3 +173,27 @@ security-gate:
 		$(TRIVY) image --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$$img" || exit 1; \
 	done
 	@printf "\nNo fixable CRITICAL vulnerabilities and no leaked secrets.\n"
+
+# Scans the images we *publish*, which is what a deploying campus actually
+# pulls from ghcr.io. This is strictly broader than scanning the base images
+# above, and the difference is not academic:
+#
+#   backend/Dockerfile runs `playwright install --with-deps chromium`, which
+#   installs Chromium and its entire apt dependency tree into the shipped
+#   runtime image. Those packages appear in neither uv.lock nor the
+#   python:3.12-slim base scan, so until now nothing looked at them at all —
+#   and the browser path they serve became more heavily used when the
+#   blocked-URL fallback was fixed.
+#
+# Requires `make docker-build` first (the images must exist locally).
+# Advisory rather than gating for now: the Chromium dependency set has never
+# been scanned, so the finding count is unknown and a gate switched on blind
+# would either be vacuous or block the release pipeline on day one. Promote it
+# to security-gate once a few runs have established the real baseline.
+BUILT_IMAGES := vandalizer-backend vandalizer-frontend
+
+security-built-images:
+	@for img in $(BUILT_IMAGES); do \
+		printf "\n--- %s (published artifact) ---\n" "$$img"; \
+		$(TRIVY) image --scanners vuln --severity HIGH,CRITICAL "$$img" || true; \
+	done
