@@ -471,8 +471,10 @@ def test_find_context_overflow_flags_combined_package():
 
     overflow = find_context_overflow(
         documents=_nasa_package(),
+        # Margin pinned to 1.0 so this measures combination and nothing else;
+        # the margin's own effect is covered below.
+        model_config={"context_window": 65_536, "token_safety_margin": 1.0},
         model_name="m",
-        model_config={"context_window": 65_536},
     )
     assert overflow is not None
     assert overflow.kind == "combined"
@@ -507,6 +509,51 @@ def test_find_context_overflow_single_doc_takes_precedence():
     assert overflow.kind == "single"
     assert [d.uuid for d in overflow.documents] == ["b"]
 
+
+def test_find_context_overflow_corrects_stored_tiktoken_counts():
+    """A package that fits raw but not once the divergence is allowed for.
+
+    Stored `token_count` values are tiktoken figures, and tiktoken reads low
+    for every non-OpenAI model. Without the allowance this check passes a
+    workflow that the gateway then rejects mid-run -- the exact failure the
+    combined check was added to prevent, and worst for budget workbooks, which
+    are both the likeliest thing to push a package over and the content
+    tiktoken under-counts most.
+    """
+    from app.services.context_budget import find_context_overflow
+
+    # The input budget for a 65,536-token window is 56,320 once the response
+    # reserve and overhead are taken out. 50,000 raw fits it; at the 1.20
+    # default the same package is 60,000, which does not.
+    docs = [
+        {"uuid": "a", "title": "Narrative.pdf", "token_count": 25_000},
+        {"uuid": "b", "title": "Budget_Justification.xlsx", "token_count": 25_000},
+    ]
+
+    assert find_context_overflow(
+        documents=docs,
+        model_name="qwen-local",
+        model_config={"context_window": 65_536, "token_safety_margin": 1.0},
+    ) is None
+
+    overflow = find_context_overflow(
+        documents=docs,
+        model_name="qwen-local",
+        model_config={"context_window": 65_536},
+    )
+    assert overflow is not None
+    assert overflow.kind == "combined"
+    assert overflow.total_tokens == 60_000
+
+
+def test_find_context_overflow_does_not_inflate_for_openai_models():
+    """tiktoken *is* their tokenizer, so the stored figure is already exact."""
+    from app.services.context_budget import find_context_overflow
+
+    docs = [{"uuid": "a", "title": "doc", "token_count": 30_000}]
+    assert find_context_overflow(
+        documents=docs, model_name="gpt-4o", model_config={"context_window": 65_536},
+    ) is None
 
 def test_find_context_overflow_empty_input():
     from app.services.context_budget import find_context_overflow

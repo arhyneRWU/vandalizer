@@ -1065,9 +1065,29 @@ def find_context_overflow(
 
     Returns None when everything fits. A "single" overflow names only the docs
     that are individually too large; a "combined" overflow names the whole set.
+
+    Stored ``token_count`` values are raw tiktoken figures, so the same
+    divergence allowance :func:`find_oversize_documents` applies is applied
+    here — for the same reason and from the same source
+    (:func:`stored_count_margin`). Without it this check under-warns by the
+    divergence it exists to catch, and the combined case is where that bites
+    hardest: a budget workbook is both the document most likely to push a
+    package over the line and the content tiktoken under-counts worst.
     """
     budget = input_budget(model_name, model_config, overhead_tokens=overhead_tokens)
-    docs = sorted(_as_documents(documents), key=lambda d: d.token_count, reverse=True)
+    margin = stored_count_margin(model_name, model_config)
+    docs = sorted(
+        (
+            OversizeDocument(
+                uuid=d.uuid,
+                title=d.title,
+                token_count=_apply_margin(d.token_count, margin),
+            )
+            for d in _as_documents(documents)
+        ),
+        key=lambda d: d.token_count,
+        reverse=True,
+    )
     total = sum(d.token_count for d in docs)
 
     oversize = [d for d in docs if d.token_count > budget]
