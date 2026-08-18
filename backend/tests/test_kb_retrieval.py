@@ -674,3 +674,83 @@ async def test_build_kb_segment_fans_out_per_question():
     assert titles == {"entity.txt", "section.txt"}, (
         "both questions must contribute chunks"
     )
+
+
+# ---------------------------------------------------------------------------
+# Citations must carry an openable document, so a reader can check the page
+# ---------------------------------------------------------------------------
+
+
+def _find_returning(items):
+    """Stand in for ``Model.find(query).to_list()``."""
+    cursor = MagicMock()
+    cursor.to_list = AsyncMock(return_value=items)
+    return MagicMock(return_value=cursor)
+
+
+@pytest.mark.asyncio
+async def test_resolve_openable_documents_maps_live_document_sources():
+    from types import SimpleNamespace
+
+    from app.services import knowledge_service
+
+    sources = [
+        SimpleNamespace(uuid="s1", source_type="document", document_uuid="d1"),
+        SimpleNamespace(uuid="s2", source_type="url", document_uuid=None),
+        SimpleNamespace(uuid="s3", source_type="document", document_uuid="gone"),
+    ]
+    docs = [SimpleNamespace(uuid="d1")]
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs, \
+         patch.object(knowledge_service, "SmartDocument") as sd:
+        kbs.find = _find_returning(sources)
+        sd.find = _find_returning(docs)
+        mapping = await knowledge_service.resolve_openable_documents(
+            ["s1", "s2", "s3"],
+        )
+        doc_query = sd.find.call_args.args[0]
+
+    # URL sources and sources whose document is gone stay preview-only.
+    assert mapping == {"s1": "d1"}
+    # A deleted document must never be offered as openable.
+    assert doc_query["soft_deleted"] == {"$ne": True}
+
+
+@pytest.mark.asyncio
+async def test_resolve_openable_documents_is_never_fatal():
+    from app.services import knowledge_service
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs:
+        kbs.find = MagicMock(side_effect=RuntimeError("no mongo here"))
+        assert await knowledge_service.resolve_openable_documents(["s1"]) == {}
+
+    # No ids -> no round trip at all.
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs:
+        kbs.find = MagicMock()
+        assert await knowledge_service.resolve_openable_documents([]) == {}
+        kbs.find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_build_kb_segment_attaches_openable_document_uuid():
+    """Citations carry the document behind them so the UI can offer "open at
+    the cited page" — page numbers are a heuristic, and verifying one means
+    reading the document, not the chunk we already showed."""
+    chunks = [_chunk(0, source="proposal.pdf", page=12),
+              _chunk(1, source="policy.html")]
+    cfg = RAGConfig(k=2)
+
+    with patch.object(kb_validation_service, "_ensure_system_config_loaded",
+                      new=AsyncMock()), \
+         patch.object(kb_validation_service, "retrieve_kb_chunks",
+                      new=AsyncMock(return_value=(chunks, cfg, 0))), \
+         patch("app.services.knowledge_service.resolve_openable_documents",
+               new=AsyncMock(return_value={"src-proposal.pdf": "doc-1"})):
+        _, sources = await chat_service._build_kb_segment(
+            "kb-1", "q?", "test-model",
+        )
+
+    assert sources[0]["document_uuid"] == "doc-1"
+    # Nothing openable behind the second source — the key is simply absent, so
+    # old stored citations and URL sources look the same to the UI.
+    assert "document_uuid" not in sources[1]

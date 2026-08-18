@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeWithMap } from './textMatch'
+import { citationAnchor, normalizeWithMap } from './textMatch'
 
 describe('normalizeWithMap', () => {
   it('lowercases and collapses whitespace, mapping back to source offsets', () => {
@@ -41,5 +41,39 @@ describe('normalizeWithMap', () => {
     expect(at).toBeGreaterThan(-1)
     // Projected start lands on the real "the terms" in the original string
     expect(pdfText.slice(doc.map[at], doc.map[at] + 9)).toBe('the terms')
+  })
+})
+
+describe('citationAnchor', () => {
+  it('drops the partial word a truncated chunk preview ends on', () => {
+    const preview = 'The recipient shall retain records for three yea'
+    expect(citationAnchor(preview)).toBe('The recipient shall retain records for three')
+  })
+
+  it('keeps a short preview that ends on punctuation intact', () => {
+    const preview = 'Records are retained for three years.'
+    expect(citationAnchor(preview)).toBe(preview)
+  })
+
+  it('caps a long preview at a word boundary', () => {
+    const preview = 'alpha '.repeat(60)
+    const anchor = citationAnchor(preview)
+    expect(anchor.length).toBeLessThanOrEqual(120)
+    expect(anchor.endsWith('alpha')).toBe(true)
+    expect(preview.trim().startsWith(anchor)).toBe(true)
+  })
+
+  it('collapses whitespace so the needle matches reflowed document text', () => {
+    expect(citationAnchor('  two   lines\nof text.  ')).toBe('two lines of text.')
+  })
+
+  it('returns nothing usable for an empty or missing preview', () => {
+    expect(citationAnchor('   ')).toBe('')
+    expect(citationAnchor(undefined)).toBe('')
+  })
+
+  it('keeps an unbroken run rather than emptying the anchor', () => {
+    const url = 'https://example.gov/' + 'a'.repeat(200)
+    expect(citationAnchor(url)).toBe(url.slice(0, 120))
   })
 })

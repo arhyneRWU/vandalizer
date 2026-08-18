@@ -1299,6 +1299,22 @@ async def _build_kb_segment(
             "similarity": r.get("similarity"),
             "content_preview": (r.get("content") or "")[:240],
         })
+
+    # Attach the openable SmartDocument behind each cited source, so the UI can
+    # offer "open the document at the cited page" and not just a text preview —
+    # the page numbers are a retrieval heuristic, so verifying them in the
+    # document itself is exactly what a reader needs to do. URL sources and
+    # deleted documents resolve to nothing and stay preview-only.
+    from app.services.knowledge_service import resolve_openable_documents
+
+    openable = await resolve_openable_documents(
+        [s["document_id"] for s in kb_sources if s.get("document_id")]
+    )
+    for src_dict in kb_sources:
+        doc_uuid = openable.get(src_dict.get("document_id") or "")
+        if doc_uuid:
+            src_dict["document_uuid"] = doc_uuid
+
     return DocumentSegment(label="kb", text=kb_text), kb_sources
 
 

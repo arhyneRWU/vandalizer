@@ -387,6 +387,40 @@ async def resolve_document_titles(sources) -> dict[str, str]:
     return {d.uuid: d.title for d in docs if d.title}
 
 
+async def resolve_openable_documents(source_uuids: list[str]) -> dict[str, str]:
+    """Map KB source uuid -> SmartDocument uuid for sources a user can open.
+
+    Only document-backed sources whose SmartDocument still exists (and isn't
+    soft-deleted) are returned, so callers can offer an "open the document"
+    affordance without ever pointing at a document that 404s. URL sources and
+    orphaned rows are simply absent from the mapping.
+
+    Like title resolution, this is a display nicety — a lookup failure must
+    never break the caller.
+    """
+    ids = [u for u in dict.fromkeys(source_uuids) if u]
+    if not ids:
+        return {}
+    try:
+        sources = await KnowledgeBaseSource.find({"uuid": {"$in": ids}}).to_list()
+        by_doc: dict[str, list[str]] = {}
+        for s in sources:
+            if s.source_type == "document" and s.document_uuid:
+                by_doc.setdefault(s.document_uuid, []).append(s.uuid)
+        if not by_doc:
+            return {}
+        docs = await SmartDocument.find(
+            {"uuid": {"$in": list(by_doc)}, "soft_deleted": {"$ne": True}}
+        ).to_list()
+    except Exception:
+        return {}
+    return {
+        source_uuid: d.uuid
+        for d in docs
+        for source_uuid in by_doc.get(d.uuid, [])
+    }
+
+
 async def get_kb_manifest(kb_uuid: str, limit: int = 60) -> list[dict]:
     """Compact listing of a KB's sources for chat prompt injection and
     named-document retrieval targeting.
