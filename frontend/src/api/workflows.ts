@@ -139,6 +139,16 @@ export function cancelWorkflow(sessionId: string, shareToken?: string) {
   )
 }
 
+// Stop every in-flight run in a batch. The backend flips each unfinished run to
+// "canceled" and revokes its Celery task; already-finished runs are left as-is.
+export function cancelBatch(batchId: string, shareToken?: string) {
+  const qs = shareToken ? `?share_token=${encodeURIComponent(shareToken)}` : ''
+  return apiFetch<{ batch_id: string; status: string; canceled: number }>(
+    `/api/workflows/batches/${encodeURIComponent(batchId)}/cancel${qs}`,
+    { method: 'POST' },
+  )
+}
+
 export interface BatchStatusItem {
   session_id: string
   document_title: string | null

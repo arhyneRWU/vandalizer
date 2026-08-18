@@ -945,6 +945,19 @@ async def cancel_workflow_run(
     return result
 
 
+@router.post("/batches/{batch_id}/cancel")
+async def cancel_batch_run(
+    batch_id: str,
+    share_token: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+):
+    """Stop every in-flight run in a batch (per-document runs)."""
+    result = await svc.cancel_batch(batch_id, user, share_token=share_token)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return result
+
+
 @router.post("/steps/test")
 @limiter.limit("20/minute")
 async def test_step(request: Request, req: TestStepRequest, user: User = Depends(get_current_user)):

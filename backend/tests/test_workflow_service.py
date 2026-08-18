@@ -220,6 +220,82 @@ class TestGetBatchStatus:
         result = await get_batch_status("batch3")
         assert result["status"] == "failed"
 
+    @patch("app.services.workflow_service.Workflow")
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_canceled_batch(self, mock_wr_cls, mock_wf_cls):
+        # A stopped batch: one run finished before the stop landed, the other was
+        # canceled. Overall status must be terminal ("canceled") so the poller
+        # stops — not "running", which would spin forever.
+        from app.services.workflow_service import get_batch_status
+
+        wf_id = _fake_oid()
+        results = [
+            _make_result("s1", "completed", workflow_id=wf_id),
+            _make_result("s2", "canceled", workflow_id=wf_id),
+        ]
+        mock_find = MagicMock()
+        mock_find.to_list = AsyncMock(return_value=results)
+        mock_wr_cls.find.return_value = mock_find
+
+        result = await get_batch_status("batch4")
+        assert result["status"] == "canceled"
+
+
+# ---------------------------------------------------------------------------
+# Batch cancellation
+# ---------------------------------------------------------------------------
+
+class TestCancelBatch:
+    @patch("app.services.workflow_service.get_authorized_workflow", new_callable=AsyncMock)
+    @patch("app.services.workflow_service._cancel_result", new_callable=AsyncMock)
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_cancels_only_unfinished_runs(self, mock_wr_cls, mock_cancel, mock_auth):
+        from app.services.workflow_service import cancel_batch
+
+        wf_id = _fake_oid()
+        running = _make_result("s1", "running", workflow_id=wf_id)
+        queued = _make_result("s2", "queued", workflow_id=wf_id)
+        done = _make_result("s3", "completed", workflow_id=wf_id)
+        mock_find = MagicMock()
+        mock_find.to_list = AsyncMock(return_value=[running, queued, done])
+        mock_wr_cls.find.return_value = mock_find
+        mock_auth.return_value = _make_workflow()
+
+        result = await cancel_batch("batch1", user=MagicMock())
+
+        assert result == {"batch_id": "batch1", "status": "canceled", "canceled": 2}
+        # The already-completed run is left untouched.
+        assert mock_cancel.await_count == 2
+        canceled_sessions = {c.args[0].session_id for c in mock_cancel.await_args_list}
+        assert canceled_sessions == {"s1", "s2"}
+
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_unknown_batch_returns_none(self, mock_wr_cls):
+        from app.services.workflow_service import cancel_batch
+
+        mock_find = MagicMock()
+        mock_find.to_list = AsyncMock(return_value=[])
+        mock_wr_cls.find.return_value = mock_find
+
+        result = await cancel_batch("nope", user=MagicMock())
+        assert result is None
+
+    @patch("app.services.workflow_service.get_authorized_workflow", new_callable=AsyncMock)
+    @patch("app.services.workflow_service._cancel_result", new_callable=AsyncMock)
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_unauthorized_returns_none(self, mock_wr_cls, mock_cancel, mock_auth):
+        from app.services.workflow_service import cancel_batch
+
+        results = [_make_result("s1", "running", workflow_id=_fake_oid())]
+        mock_find = MagicMock()
+        mock_find.to_list = AsyncMock(return_value=results)
+        mock_wr_cls.find.return_value = mock_find
+        mock_auth.return_value = None  # user not authorized for the workflow
+
+        result = await cancel_batch("batch1", user=MagicMock())
+        assert result is None
+        mock_cancel.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # Step reordering

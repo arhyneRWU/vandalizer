@@ -626,10 +626,23 @@ async def cancel_workflow(
     if not result:
         return None
 
-    terminal = {"completed", "error", "failed", "canceled"}
-    if result.status in terminal:
+    if result.status in _TERMINAL_STATUSES:
         return {"session_id": session_id, "status": result.status}
 
+    await _cancel_result(result)
+    return {"session_id": session_id, "status": result.status}
+
+
+_TERMINAL_STATUSES = {"completed", "error", "failed", "canceled"}
+
+
+async def _cancel_result(result) -> None:
+    """Flip one WorkflowResult to ``canceled`` and interrupt its worker.
+
+    Shared by single-run (:func:`cancel_workflow`) and batch (:func:`cancel_batch`)
+    cancellation. The caller is responsible for authorization and for skipping
+    results that are already terminal.
+    """
     # Set the terminal state first so the UI reflects the stop immediately and
     # the engine's cooperative check (if it happens to be between steps) bails.
     result.status = "canceled"
@@ -647,7 +660,7 @@ async def cancel_workflow(
         except Exception:
             logger.warning(
                 "Failed to revoke Celery task %s for session %s",
-                result.celery_task_id, session_id, exc_info=True,
+                result.celery_task_id, result.session_id, exc_info=True,
             )
 
     # Best-effort: mark the matching activity-rail entry canceled too, so the
@@ -656,7 +669,7 @@ async def cancel_workflow(
         from app.models.activity import ActivityEvent, ActivityStatus
 
         act = await ActivityEvent.find_one(
-            ActivityEvent.workflow_session_id == session_id,
+            ActivityEvent.workflow_session_id == result.session_id,
         )
         if act and act.is_running:
             act.status = ActivityStatus.CANCELED.value
@@ -666,10 +679,8 @@ async def cancel_workflow(
     except Exception:
         logger.warning(
             "Failed to mark activity canceled for session %s",
-            session_id, exc_info=True,
+            result.session_id, exc_info=True,
         )
-
-    return {"session_id": session_id, "status": result.status}
 
 
 async def run_workflow_batch(
@@ -779,10 +790,15 @@ async def get_batch_status(
     total = len(results)
     completed = sum(1 for r in results if r.status == "completed")
     failed = sum(1 for r in results if r.status in ("error", "failed"))
+    canceled = sum(1 for r in results if r.status == "canceled")
     running = sum(1 for r in results if r.status in ("running", "queued"))
 
     if running > 0:
         overall_status = "running"
+    elif canceled > 0:
+        # The user stopped the batch; some runs may have finished first, but the
+        # batch as a whole is stopped, not complete.
+        overall_status = "canceled"
     elif failed == total:
         overall_status = "failed"
     elif completed + failed == total:
@@ -809,6 +825,44 @@ async def get_batch_status(
         "failed": failed,
         "items": items,
     }
+
+
+async def cancel_batch(
+    batch_id: str, user: User, share_token: str | None = None
+) -> dict | None:
+    """Cancel every in-flight run in a batch.
+
+    Flips each non-terminal run in the batch to ``canceled`` and revokes its
+    Celery task, mirroring :func:`cancel_workflow` for the single-run case. Runs
+    that already finished (completed/error/failed/canceled) are left untouched,
+    so this is safe to call on a partially-complete batch. Returns ``None`` when
+    the batch is unknown or the user is not authorized for it.
+    """
+    results = await WorkflowResult.find(
+        WorkflowResult.batch_id == batch_id,
+    ).to_list()
+
+    if not results:
+        return None
+
+    # Authorize against the batch's workflow — same rule as get_batch_status.
+    first = results[0]
+    if not first.workflow:
+        return None
+    workflow = await get_authorized_workflow(
+        str(first.workflow), user, share_token=share_token
+    )
+    if not workflow:
+        return None
+
+    canceled = 0
+    for r in results:
+        if r.status in _TERMINAL_STATUSES:
+            continue
+        await _cancel_result(r)
+        canceled += 1
+
+    return {"batch_id": batch_id, "status": "canceled", "canceled": canceled}
 
 
 async def test_step(task_name: str, task_data: dict, document_uuids: list[str], user_id: str, model: str | None = None) -> str:
