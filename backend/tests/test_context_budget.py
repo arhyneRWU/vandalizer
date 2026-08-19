@@ -559,3 +559,190 @@ def test_find_context_overflow_empty_input():
     from app.services.context_budget import find_context_overflow
 
     assert find_context_overflow(documents=[], model_name="m") is None
+
+
+# ---------------------------------------------------------------------------
+# Truncation must slice with the vocabulary that did the counting
+# ---------------------------------------------------------------------------
+
+
+class _DenseTokenizer:
+    """A self-consistent vocabulary denser than cl100k: one token per two
+    characters, where tiktoken averages roughly one per three on prose.
+
+    Self-consistency is the point — ``encode(decode(ids))`` returns ``ids`` —
+    because the bug under test is a disagreement between the ruler that counts
+    and the ruler that slices, and a fake whose halves disagree with each other
+    cannot distinguish the two.
+    """
+
+    def encode(self, text, add_special_tokens=False):
+        class _Encoded:
+            ids = list(range(len(text) // 2))
+
+        return _Encoded()
+
+    def decode(self, ids):
+        return "ab" * len(ids)
+
+
+def _dense_model(monkeypatch):
+    from app.services import context_budget as cb
+
+    monkeypatch.setattr(cb, "resolve_exact_tokenizer", lambda *a, **k: _DenseTokenizer())
+    return cb
+
+
+def test_truncation_slices_with_the_tokenizer_that_counted(monkeypatch):
+    """The budget is denominated in the counting vocabulary's tokens.
+
+    Slicing a tiktoken list by that number is a unit error. The two rulers
+    differ by up to ~1.5x on the numeric content this product handles, so the
+    head and tail slices overlapped and the "truncated" text came back *longer*
+    than the original — with a negative reported loss, which the last-ditch
+    loop reads as an untrimmable segment and answers by dropping the whole
+    document.
+    """
+    cb = _dense_model(monkeypatch)
+    text = "Budget line 12,345.67 for FY2026 indirect 58% MTDC exclusion. " * 400
+
+    total = cb.count_tokens(text, "qwen-local", {})
+    assert cb.token_safety_margin("qwen-local", {}) == 1.0
+
+    for keep in (0.95, 0.90, 0.75, 0.50, 0.30):
+        allowed = int(total * keep)
+        out, loss = cb._truncate_text_to_tokens(
+            text, allowed, "qwen-local", model_config={}
+        )
+        assert cb.count_tokens(out, "qwen-local", {}) <= allowed, (
+            f"keeping {keep:.0%} overshot its budget — the slice was taken in "
+            f"another vocabulary's units"
+        )
+        assert loss >= 0, f"keeping {keep:.0%} reported a negative loss"
+        assert len(out) <= len(text), f"keeping {keep:.0%} grew the text"
+
+
+def test_truncation_leaves_text_alone_when_the_budget_already_covers_it(
+    monkeypatch,
+):
+    """A budget wider than the token list is not a trim.
+
+    Head and tail would overlap and reproduce the whole text, and adding the
+    marker would make it longer still. Returning the text untouched with a zero
+    loss is the honest answer; a negative loss is never one.
+    """
+    cb = _dense_model(monkeypatch)
+    text = "short enough already"
+
+    out, loss = cb._truncate_text_to_tokens(
+        text, 10_000, "qwen-local", model_config={}
+    )
+    assert out == text
+    assert loss == 0
+
+
+def test_truncation_never_reports_a_negative_loss(monkeypatch):
+    """``dropped += loss`` and the ``loss <= 0`` drop rule both depend on it."""
+    cb = _dense_model(monkeypatch)
+    text = "Budget line 12,345.67 for FY2026. " * 200
+    total = cb.count_tokens(text, "qwen-local", {})
+
+    for allowed in (1, 2, total // 3, total - 1, total, total + 1, total * 3):
+        _, loss = cb._truncate_text_to_tokens(
+            text, allowed, "qwen-local", model_config={}
+        )
+        assert loss >= 0, f"allowed={allowed} produced loss={loss}"
+
+
+def _write_tokenizer(tmp_path, model_slug, body):
+    import json
+
+    snap = tmp_path / "hub" / f"models--{model_slug}" / "snapshots" / "r1"
+    snap.mkdir(parents=True)
+    (snap / "tokenizer.json").write_text(json.dumps(body))
+    return snap
+
+
+_MINIMAL_VOCAB = {
+    "version": "1.0",
+    "added_tokens": [],
+    "normalizer": None,
+    "pre_tokenizer": {"type": "Whitespace"},
+    "post_processor": None,
+    "decoder": None,
+    "model": {"type": "WordLevel", "vocab": {"[UNK]": 0}, "unk_token": "[UNK]"},
+}
+
+
+def test_a_tokenizer_carrying_truncation_does_not_cap_every_count(tmp_path):
+    """`Tokenizer.from_file` restores a truncation stanza and `encode` then
+    silently caps.
+
+    A vocabulary specifying ``max_length`` would make every document count as
+    at most that many tokens — a worse under-count than the estimate this
+    replaces, and undetectable downstream, because a resolved tokenizer sets
+    the safety margin to 1.0.
+    """
+    from app.services import context_budget as cb
+
+    body = dict(_MINIMAL_VOCAB)
+    body["truncation"] = {
+        "direction": "Right", "max_length": 8, "strategy": "LongestFirst",
+        "stride": 0,
+    }
+    body["padding"] = None
+    _write_tokenizer(tmp_path, "Fake--Capped", body)
+
+    cb._find_vocabulary.cache_clear()
+    cb._load_tokenizer.cache_clear()
+
+    text = " ".join(f"word{i}" for i in range(200))
+    count = cb.count_tokens(
+        text, "Fake/Capped", {"tokenizer_cache_root": str(tmp_path)}
+    )
+    assert count > 8, (
+        f"a truncation stanza capped the count at {count}; every document "
+        f"would look like it fits"
+    )
+
+
+def test_a_tokenizer_that_cannot_encode_is_treated_as_absent(tmp_path, monkeypatch):
+    """Presence of a tokenizer is read downstream as proof the count is exact.
+
+    One that loads but cannot encode satisfied ``resolve_exact_tokenizer`` —
+    setting the margin to 1.0 — while counting quietly fell back to tiktoken,
+    yielding a raw estimate with the safety margin switched off. That is the
+    hard-failing under-count this module exists to prevent.
+    """
+    from app.services import context_budget as cb
+
+    _write_tokenizer(tmp_path, "Fake--Broken", dict(_MINIMAL_VOCAB, padding=None,
+                                                    truncation=None))
+    cb._find_vocabulary.cache_clear()
+    cb._load_tokenizer.cache_clear()
+
+    class _Broken:
+        def encode(self, *a, **k):
+            raise RuntimeError("corrupt vocabulary")
+
+        def no_truncation(self):
+            pass
+
+        def no_padding(self):
+            pass
+
+    import tokenizers
+
+    monkeypatch.setattr(
+        tokenizers.Tokenizer, "from_file", staticmethod(lambda *a, **k: _Broken())
+    )
+    cb._load_tokenizer.cache_clear()
+
+    cfg = {"tokenizer_cache_root": str(tmp_path)}
+    assert cb.resolve_exact_tokenizer("Fake/Broken", cfg) is None, (
+        "an unusable tokenizer was reported as available, which suppresses "
+        "the safety margin while counting falls back to an estimate"
+    )
+    assert cb.token_safety_margin("Fake/Broken", cfg) > 1.0, (
+        "the margin stayed at 1.0 for a model whose count is not exact"
+    )

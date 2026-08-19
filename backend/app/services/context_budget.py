@@ -134,11 +134,40 @@ def _load_tokenizer(path: str):
     Cached: a real vocabulary is several megabytes and takes milliseconds to
     parse, so loading it per request would make this the performance problem it
     exists to avoid.
+
+    Two things are settled here rather than at the call site, because callers
+    read the *presence* of a tokenizer as proof the count will be exact:
+
+    ``tokenizer.json`` can carry truncation and padding stanzas, and
+    ``Tokenizer.from_file`` restores them. A file specifying ``max_length: 512``
+    would silently cap every count at 512 — a far worse under-count than the
+    estimate this replaces, and one nothing downstream could detect, since a
+    resolved tokenizer suppresses the safety margin. Both are cleared.
+
+    The tokenizer is then exercised on a probe string. A vocabulary that loads
+    but cannot encode would otherwise satisfy ``resolve_exact_tokenizer`` —
+    which sets the margin to 1.0 — while ``_count_raw_tokens`` quietly fell
+    back to tiktoken, producing a raw estimate with the safety margin switched
+    off. That is exactly the hard-failing under-count this module exists to
+    prevent, so an unusable tokenizer must be no tokenizer at all.
     """
     try:
         from tokenizers import Tokenizer
 
-        return Tokenizer.from_file(path)
+        tok = Tokenizer.from_file(path)
+        # Order matters: no_truncation/no_padding must run before the probe, or
+        # the probe would validate a configuration we are about to change.
+        try:
+            tok.no_truncation()
+            tok.no_padding()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "could not clear truncation/padding on tokenizer at %s (%s); "
+                "falling back to estimation", path, exc,
+            )
+            return None
+        tok.encode("probe", add_special_tokens=False).ids
+        return tok
     except Exception as exc:
         logger.warning(
             "could not load tokenizer at %s (%s); falling back to estimation",
@@ -578,6 +607,26 @@ def resolve_response_reserve(
     return _default_response_reserve(context_window)
 
 
+def _split_head_tail(ids, budget: int, decode) -> Optional[tuple[str, str]]:
+    """Take ``budget`` tokens from ``ids`` as a 75/25 head and tail.
+
+    Returns None when ``budget`` already covers the whole list. That is not a
+    trim: the two slices would overlap and together reproduce — or, once the
+    marker is added, exceed — the original text, which is the opposite of
+    truncating. It means only that this vocabulary disagrees with the one that
+    decided a trim was needed, and the caller should leave the text alone
+    rather than report a negative loss.
+    """
+    if budget >= len(ids):
+        return None
+    budget = max(0, budget)
+    head_n = int(budget * 0.75)
+    tail_n = max(0, budget - head_n)
+    head_text = decode(ids[:head_n]) if head_n else ""
+    tail_text = decode(ids[-tail_n:]) if tail_n else ""
+    return head_text, tail_text
+
+
 def _truncate_text_to_tokens(
     text: str,
     max_tokens: int,
@@ -587,11 +636,21 @@ def _truncate_text_to_tokens(
 ) -> tuple[str, int]:
     """Truncate ``text`` to ≤ ``max_tokens``, preserving head and tail.
 
-    ``max_tokens`` is a margin-inflated budget, but the encoder slices by real
-    token offsets, so the budget is converted back to raw token space before
-    slicing. Slicing ``toks`` by an inflated count would take *more* text than
-    the budget allows and leave the caller still over, which the last-ditch
-    loop would then have to iterate its way out of.
+    ``max_tokens`` is a margin-inflated budget, but slicing happens by real
+    token offsets, so the budget is converted back to raw token space first.
+    Slicing by an inflated count would take *more* text than the budget allows
+    and leave the caller still over, which the last-ditch loop would then have
+    to iterate its way out of.
+
+    The budget must be converted into the units of whichever vocabulary does
+    the slicing, and that has to be the same one that did the counting. When a
+    model's own tokenizer is available the margin is 1.0, so ``raw_usable`` is
+    denominated in *its* tokens — slicing a tiktoken list by that number is a
+    unit error, and a silent one: the two rulers differ by up to 1.45x on the
+    numeric content this product handles, so head and tail overlap and the
+    "truncated" text comes back longer than the original. ``dropped`` then goes
+    negative and the caller's ``loss <= 0`` check reads it as an untrimmable
+    segment and discards the whole document.
 
     Returns ``(truncated_text, dropped_tokens)``, both in inflated space.
     """
@@ -606,17 +665,36 @@ def _truncate_text_to_tokens(
     usable = max(1, max_tokens - marker_tokens)
     raw_usable = max(1, int(usable / margin))
 
+    # Prefer the model's own vocabulary, which is what counted above.
+    exact = resolve_exact_tokenizer(model_name, model_config)
+    if exact is not None:
+        try:
+            ids = exact.encode(text, add_special_tokens=False).ids
+            halves = _split_head_tail(ids, raw_usable, exact.decode)
+            if halves is None:
+                return text, 0
+            new_text = halves[0] + marker + halves[1]
+            return new_text, max(
+                0,
+                original_tokens - count_tokens(new_text, model_name, model_config),
+            )
+        except Exception:
+            logger.warning(
+                "exact tokenizer failed while truncating for %s; "
+                "falling back to estimation", model_name, exc_info=True,
+            )
+
     encoder = _get_encoder(_encoding_for(model_name))
     if encoder is not None:
         try:
             toks = encoder.encode(text, disallowed_special=())
-            head_n = int(raw_usable * 0.75)
-            tail_n = max(0, raw_usable - head_n)
-            head_text = encoder.decode(toks[:head_n]) if head_n else ""
-            tail_text = encoder.decode(toks[-tail_n:]) if tail_n else ""
-            new_text = head_text + marker + tail_text
-            return new_text, original_tokens - count_tokens(
-                new_text, model_name, model_config
+            halves = _split_head_tail(toks, raw_usable, encoder.decode)
+            if halves is None:
+                return text, 0
+            new_text = halves[0] + marker + halves[1]
+            return new_text, max(
+                0,
+                original_tokens - count_tokens(new_text, model_name, model_config),
             )
         except Exception:
             pass
@@ -624,8 +702,12 @@ def _truncate_text_to_tokens(
     approx_chars = raw_usable * _CHAR_TO_TOKEN_RATIO
     head_chars = int(approx_chars * 0.75)
     tail_chars = max(0, approx_chars - head_chars)
+    if head_chars + tail_chars >= len(text):
+        return text, 0
     new_text = text[:head_chars] + marker + (text[-tail_chars:] if tail_chars else "")
-    return new_text, original_tokens - count_tokens(new_text, model_name, model_config)
+    return new_text, max(
+        0, original_tokens - count_tokens(new_text, model_name, model_config)
+    )
 
 
 def input_budget_for(
