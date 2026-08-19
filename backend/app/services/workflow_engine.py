@@ -1349,6 +1349,13 @@ KB_PASSAGES_HEADER = (
     "critically, not as a complete document."
 )
 
+KB_APPROXIMATE_PAGE_RULE = (
+    "- A page written as `p. ~N` is an *estimate*: that source was scanned, so "
+    "page positions were interpolated rather than read. Keep the tilde when you "
+    "cite it and describe the location as approximate. Never restate such a page "
+    "as exact and never say a passage is \"explicitly\" or \"clearly\" on it.\n"
+)
+
 KB_ANSWER_INSTRUCTION = (
     "Answer the QUESTION below using ONLY the retrieved knowledge-base "
     "passages in the CONTEXT block.\n"
@@ -1357,8 +1364,9 @@ KB_ANSWER_INSTRUCTION = (
     "each one before relying on it, and ignore passages that are clearly "
     "irrelevant.\n"
     "- Cite the source line shown above each passage (filename plus "
-    "page/sheet, e.g. [PAPPG.pdf · p. 234]) for every factual claim. Never "
-    "attribute a claim to a passage that does not support it.\n"
+    "page/sheet, e.g. [PAPPG.pdf · p. 234]) for every factual claim, copying "
+    "the locator exactly as shown. Never attribute a claim to a passage that "
+    "does not support it.\n"
     "- If the passages do not contain a clear answer, say so explicitly "
     "instead of guessing.\n\n"
 )
@@ -1478,6 +1486,11 @@ class KnowledgeBaseQueryNode(Node):
             })
 
         passages = "\n\n---\n\n".join(parts)
+        # The hedged label alone does not survive the model: an unexplained
+        # tilde gets normalised away and the estimate is restated as fact.
+        instruction = KB_ANSWER_INSTRUCTION
+        if any(src.get("page_approximate") for src in sources):
+            instruction += KB_APPROXIMATE_PAGE_RULE
 
         if mode != "answer":
             return self._result(f"{KB_PASSAGES_HEADER}\n\n{passages}", inputs, sources=sources)
@@ -1485,7 +1498,7 @@ class KnowledgeBaseQueryNode(Node):
         self.report_progress("Synthesizing answer from retrieved passages…")
         answer = llm_chat_model(
             model=self.data.get("model"),
-            prompt=KB_ANSWER_INSTRUCTION + f"QUESTION:\n{query}",
+            prompt=instruction + f"QUESTION:\n{query}",
             data=passages,
             include_next_step=False,
             system_config_doc=self._sys_cfg,

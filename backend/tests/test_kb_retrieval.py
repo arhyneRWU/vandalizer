@@ -674,3 +674,56 @@ async def test_build_kb_segment_fans_out_per_question():
     assert titles == {"entity.txt", "section.txt"}, (
         "both questions must contribute chunks"
     )
+
+
+@pytest.mark.asyncio
+async def test_kb_segment_explains_the_tilde_when_a_page_is_estimated():
+    """The hedged label does not survive the model on its own.
+
+    An unexplained tilde gets normalised away and the estimate is restated as
+    fact — measured five times out of five at temperature 0 on a fully
+    interpolated document, which is why ``page_note_for`` rules out exactness
+    by name for document chat. KB chat puts the same ``p. ~N`` labels in front
+    of the model, so it needs the same instruction.
+    """
+    chunks = [_chunk(0, source="scanned.pdf", page=234, page_approximate=True)]
+    cfg = RAGConfig(k=1)
+
+    with patch.object(kb_validation_service, "_ensure_system_config_loaded",
+                      new=AsyncMock()), \
+         patch.object(kb_validation_service, "retrieve_kb_chunks",
+                      new=AsyncMock(return_value=(chunks, cfg, 0))):
+        segment, sources = await chat_service._build_kb_segment(
+            "kb-1", "q?", "test-model",
+        )
+
+    assert segment is not None
+    assert "scanned.pdf (p. ~234)" in segment.text
+    assert "estimate" in segment.text, (
+        "the model was shown a tilde with nothing explaining it"
+    )
+    assert "explicitly" in segment.text, (
+        "asserting exactness was not ruled out by name, which is the failure "
+        "that was actually measured"
+    )
+    assert sources[0]["page_approximate"] is True
+
+
+@pytest.mark.asyncio
+async def test_kb_segment_stays_quiet_when_every_page_is_measured():
+    """A rule about estimated pages has no business in front of a model that
+    is not being shown any."""
+    chunks = [_chunk(0, source="digital.pdf", page=12)]
+    cfg = RAGConfig(k=1)
+
+    with patch.object(kb_validation_service, "_ensure_system_config_loaded",
+                      new=AsyncMock()), \
+         patch.object(kb_validation_service, "retrieve_kb_chunks",
+                      new=AsyncMock(return_value=(chunks, cfg, 0))):
+        segment, _ = await chat_service._build_kb_segment(
+            "kb-1", "q?", "test-model",
+        )
+
+    assert segment is not None
+    assert "digital.pdf (p. 12)" in segment.text
+    assert "estimate" not in segment.text

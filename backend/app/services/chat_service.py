@@ -1299,13 +1299,8 @@ async def _build_kb_segment(
         return None, []
 
     kb_sources: list[dict] = []
-    kb_text = (
-        "\n\n## Retrieved Knowledge Base Snippets\n"
-        "_The following are partial excerpts from a larger corpus, ranked "
-        "by similarity to the user's question. They may be incomplete, "
-        "off-topic, or miss the best answer. Cite by filename only when a "
-        "snippet actually supports your claim._\n"
-    )
+    snippet_blocks: list[str] = []
+    any_approximate = False
     for r in kb_results:
         meta = r.get("metadata") or {}
         src = meta.get("source_name", "Unknown")
@@ -1314,7 +1309,8 @@ async def _build_kb_segment(
         approximate = bool(meta.get("page_approximate"))
         locator = locator_for_meta(meta)
         label = f"{src} ({locator})" if locator else src
-        kb_text += f"\n**Source: {label}**\n{r['content']}\n"
+        any_approximate = any_approximate or approximate
+        snippet_blocks.append(f"\n**Source: {label}**\n{r['content']}\n")
         kb_sources.append({
             "document_id": meta.get("source_id"),
             "document_title": src,
@@ -1326,6 +1322,28 @@ async def _build_kb_segment(
             "similarity": r.get("similarity"),
             "content_preview": (r.get("content") or "")[:240],
         })
+    kb_text = (
+        "\n\n## Retrieved Knowledge Base Snippets\n"
+        "_The following are partial excerpts from a larger corpus, ranked "
+        "by similarity to the user's question. They may be incomplete, "
+        "off-topic, or miss the best answer. Cite by filename only when a "
+        "snippet actually supports your claim._\n"
+    )
+    if any_approximate:
+        # A tilde the model has not had explained to it does not survive: it
+        # gets normalised away and the estimate is restated as fact. Measured
+        # five times out of five at temperature 0 on a fully interpolated
+        # document, which is why page_note_for rules out exactness by name for
+        # document chat. The same labels reach the model here.
+        kb_text += (
+            "_A page written as `p. ~N` is an *estimate* — that source was "
+            "scanned, so page positions were interpolated rather than read. "
+            "Give such pages as approximate, e.g. \"around p. 4\". Never state "
+            "one as exact and never say a passage is \"explicitly\" or "
+            "\"clearly\" on it._\n"
+        )
+    kb_text += "".join(snippet_blocks)
+
     return DocumentSegment(label="kb", text=kb_text), kb_sources
 
 
