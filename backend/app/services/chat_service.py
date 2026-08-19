@@ -540,7 +540,7 @@ async def chat_stream(
         try:
             kb_segment, kb_sources = await _build_kb_segment(
                 kb_uuid, message, model_name, manifest=kb_manifest,
-                history=previous_messages,
+                history=previous_messages, user_id=user_id,
             )
             if kb_segment:
                 doc_segments.insert(0, kb_segment)
@@ -1181,6 +1181,7 @@ async def _build_kb_segment(
     model_name: str,
     manifest: Optional[list[dict]] = None,
     history: Optional[list[ModelMessage]] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[Optional[DocumentSegment], list[dict]]:
     """Retrieve KB context for one chat turn.
 
@@ -1299,6 +1300,24 @@ async def _build_kb_segment(
             "similarity": r.get("similarity"),
             "content_preview": (r.get("content") or "")[:240],
         })
+
+    # Attach the openable SmartDocument behind each cited source, so the UI can
+    # offer "open the document at the cited page" and not just a text preview —
+    # the page numbers are a retrieval heuristic, so verifying them in the
+    # document itself is exactly what a reader needs to do. URL sources,
+    # deleted documents, and documents this reader cannot view resolve to
+    # nothing and stay preview-only.
+    from app.services.knowledge_service import resolve_openable_documents
+
+    openable = await resolve_openable_documents(
+        [s["document_id"] for s in kb_sources if s.get("document_id")],
+        user_id=user_id,
+    )
+    for src_dict in kb_sources:
+        doc_uuid = openable.get(src_dict.get("document_id") or "")
+        if doc_uuid:
+            src_dict["document_uuid"] = doc_uuid
+
     return DocumentSegment(label="kb", text=kb_text), kb_sources
 
 

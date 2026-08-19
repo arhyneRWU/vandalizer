@@ -14,7 +14,7 @@ import { addDocumentsToKB } from '../../api/knowledge'
 import type { Folder } from '../../types/document'
 
 export function LeftPanel() {
-  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId } = useWorkspace()
+  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId, workspaceMode, setOpenDocumentUuid } = useWorkspace()
   const { toast } = useToast()
   // Folder targeted by the workflow / KB picker modals (null = closed).
   const [workflowPickerFolder, setWorkflowPickerFolder] = useState<Folder | null>(null)
@@ -122,6 +122,17 @@ export function LeftPanel() {
       clearViewDocumentRequest()
     }
   }, [viewDocumentRequest, clearViewDocumentRequest, setSelectedDocUuids, setSelectedDocNames, setHighlightTerms])
+
+  // Publish the document the viewer is showing, so panels that link into it
+  // (chat source citations) can tell "open this" from "already open". Only
+  // while this panel is on screen: WorkspaceLayout collapses it to zero width
+  // outside files mode, and a document nobody can see is not open.
+  useEffect(() => {
+    const visible = workspaceMode === 'files'
+    setOpenDocumentUuid(visible ? (viewingDoc?.uuid ?? null) : null)
+  }, [workspaceMode, viewingDoc?.uuid, setOpenDocumentUuid])
+
+  useEffect(() => () => setOpenDocumentUuid(null), [setOpenDocumentUuid])
 
   // Sync processing state to workspace context so ChatPanel can show it
   useEffect(() => {
