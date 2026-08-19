@@ -45,14 +45,27 @@ describe('normalizeWithMap', () => {
 })
 
 describe('citationAnchor', () => {
-  it('drops the partial word a truncated chunk preview ends on', () => {
-    const preview = 'The recipient shall retain records for three yea'
-    expect(citationAnchor(preview)).toBe('The recipient shall retain records for three')
+  it('keeps a short preview whole, including its last word', () => {
+    // The server cuts content_preview at 240 chars, so anything this short is
+    // a complete chunk and its final word is not a fragment. Trimming it would
+    // cost precision on the anchors least able to spare it.
+    const preview = 'The recipient shall retain records for three years'
+    expect(citationAnchor(preview)).toBe(preview)
   })
 
   it('keeps a short preview that ends on punctuation intact', () => {
     const preview = 'Records are retained for three years.'
     expect(citationAnchor(preview)).toBe(preview)
+  })
+
+  it('drops the partial word a genuinely truncated preview ends on', () => {
+    // A real server-side cut lands at 240 chars, past the cap, so the anchor
+    // comes from the >120 branch and ends on a whole word.
+    const preview = 'The recipient shall retain records for three years '.repeat(5).slice(0, 240)
+    const anchor = citationAnchor(preview)
+    expect(anchor.length).toBeLessThanOrEqual(120)
+    expect(anchor.endsWith('yea')).toBe(false)
+    expect(preview.startsWith(anchor)).toBe(true)
   })
 
   it('caps a long preview at a word boundary', () => {

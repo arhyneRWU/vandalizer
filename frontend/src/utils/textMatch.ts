@@ -62,9 +62,13 @@ export function citationAnchor(preview: string | null | undefined): string {
   const text = (preview ?? '').replace(/\s+/g, ' ').trim()
   if (!text) return ''
   if (text.length <= ANCHOR_MAX_CHARS) {
-    // Short enough to use whole — but it may still be a server-side cut, so
-    // drop a trailing partial word unless the text ends on punctuation.
-    return /[.!?;:,)\]"']$/.test(text) ? text : trimPartialWord(text)
+    // Short enough to use whole, and short enough to prove it was never cut:
+    // the server truncates content_preview at 240 chars (_build_kb_segment),
+    // well above this branch, so the last word is already complete. Trimming
+    // it anyway costs precision on the anchors with the least to spare —
+    // "Section 3 Reporting" would become "Section 3", which matches half the
+    // document.
+    return text
   }
   return trimPartialWord(text.slice(0, ANCHOR_MAX_CHARS))
 }

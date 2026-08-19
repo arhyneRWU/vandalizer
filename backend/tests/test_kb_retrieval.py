@@ -717,6 +717,140 @@ async def test_resolve_openable_documents_maps_live_document_sources():
 
 
 @pytest.mark.asyncio
+async def test_resolve_openable_documents_drops_documents_the_reader_cannot_view():
+    """Membership is checked against whoever *added* a document to the KB.
+
+    A KB shared with a team can therefore hold sources pointing at another
+    member's personal-space documents, which only their owner may view. Offering
+    "open" on one produces a 404 from the download endpoint, so it must not be
+    offered at all.
+    """
+    from types import SimpleNamespace
+
+    from app.services import knowledge_service
+
+    sources = [
+        SimpleNamespace(uuid="s1", source_type="document", document_uuid="mine"),
+        SimpleNamespace(uuid="s2", source_type="document", document_uuid="theirs"),
+    ]
+    docs = [SimpleNamespace(uuid="mine"), SimpleNamespace(uuid="theirs")]
+    reader = SimpleNamespace(user_id="bob")
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs, \
+         patch.object(knowledge_service, "SmartDocument") as sd, \
+         patch.object(knowledge_service, "User") as user_model, \
+         patch.object(knowledge_service, "access_control") as ac:
+        kbs.find = _find_returning(sources)
+        sd.find = _find_returning(docs)
+        user_model.find_one = AsyncMock(return_value=reader)
+        user_model.user_id = MagicMock()
+        ac.get_team_access_context = AsyncMock(return_value=SimpleNamespace())
+        ac.can_view_document = MagicMock(side_effect=lambda d, u, t: d.uuid == "mine")
+
+        mapping = await knowledge_service.resolve_openable_documents(
+            ["s1", "s2"], user_id="bob"
+        )
+
+    assert mapping == {"s1": "mine"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_openable_documents_without_a_reader_skips_the_access_check():
+    """Callers with no reader in scope get the unfiltered mapping — and must
+    not pay for a User lookup they cannot use."""
+    from types import SimpleNamespace
+
+    from app.services import knowledge_service
+
+    sources = [SimpleNamespace(uuid="s1", source_type="document", document_uuid="d1")]
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs, \
+         patch.object(knowledge_service, "SmartDocument") as sd, \
+         patch.object(knowledge_service, "User") as user_model:
+        kbs.find = _find_returning(sources)
+        sd.find = _find_returning([SimpleNamespace(uuid="d1")])
+        user_model.find_one = AsyncMock()
+
+        assert await knowledge_service.resolve_openable_documents(["s1"]) == {"s1": "d1"}
+        user_model.find_one.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_openable_documents_denies_everything_for_an_unknown_reader():
+    from types import SimpleNamespace
+
+    from app.services import knowledge_service
+
+    sources = [SimpleNamespace(uuid="s1", source_type="document", document_uuid="d1")]
+
+    with patch.object(knowledge_service, "KnowledgeBaseSource") as kbs, \
+         patch.object(knowledge_service, "SmartDocument") as sd, \
+         patch.object(knowledge_service, "User") as user_model:
+        kbs.find = _find_returning(sources)
+        sd.find = _find_returning([SimpleNamespace(uuid="d1")])
+        user_model.find_one = AsyncMock(return_value=None)
+        user_model.user_id = MagicMock()
+
+        assert await knowledge_service.resolve_openable_documents(
+            ["s1"], user_id="ghost"
+        ) == {}
+
+
+@pytest.mark.asyncio
+async def test_refresh_openable_citations_drops_a_uuid_that_no_longer_resolves():
+    """document_uuid is stamped at answer time, so a conversation reopened after
+    the document was deleted (or shared away) would still offer a dead "open"."""
+    from app.routers import chat as chat_router
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "there", "citations": [
+            {"document_id": "s1", "document_uuid": "stale", "page": 3},
+            {"document_id": "s2", "page": 4},
+            {"page": 5},
+        ]},
+    ]
+
+    with patch("app.services.knowledge_service.resolve_openable_documents",
+               new=AsyncMock(return_value={"s2": "live"})) as resolver:
+        await chat_router._refresh_openable_citations(messages, "bob")
+
+    resolver.assert_awaited_once()
+    assert resolver.await_args.kwargs["user_id"] == "bob"
+
+    cites = messages[1]["citations"]
+    # Resolved now -> gains the affordance, even though it was stored without one.
+    assert cites[1]["document_uuid"] == "live"
+    # No longer resolvable -> the stale affordance is withdrawn, not left to 404.
+    assert "document_uuid" not in cites[0]
+    # A citation with no source at all is untouched.
+    assert cites[2] == {"page": 5}
+
+
+@pytest.mark.asyncio
+async def test_refresh_openable_citations_is_never_fatal():
+    """Reading a conversation must not fail over a display nicety."""
+    from app.routers import chat as chat_router
+
+    messages = [{"role": "assistant", "content": "x", "citations": [
+        {"document_id": "s1", "document_uuid": "keep"},
+    ]}]
+
+    with patch("app.services.knowledge_service.resolve_openable_documents",
+               new=AsyncMock(side_effect=RuntimeError("mongo down"))):
+        await chat_router._refresh_openable_citations(messages, "bob")
+
+    # Left exactly as stored rather than half-rewritten.
+    assert messages[0]["citations"][0]["document_uuid"] == "keep"
+
+    # Nothing citable -> no round trip.
+    with patch("app.services.knowledge_service.resolve_openable_documents",
+               new=AsyncMock()) as resolver:
+        await chat_router._refresh_openable_citations([{"role": "user"}], "bob")
+        resolver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_resolve_openable_documents_is_never_fatal():
     from app.services import knowledge_service
 

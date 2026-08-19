@@ -187,6 +187,14 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
     setOpenCitation(prev => (prev === index ? null : index))
   }
 
+  // The menu's "Preview" item is a destination, not a switch: picking it must
+  // show the preview whether or not one is already open. Toggling belongs to
+  // the pill itself, where a second click reads as "put it away".
+  const showCitationPreview = (index: number) => {
+    setCitationMenu(null)
+    setOpenCitation(index)
+  }
+
   // Open the cited document in the file viewer, landing on the passage the
   // chunk came from. Page numbers are a retrieval heuristic and can be wrong —
   // which is the whole reason to open the document — so the passage text is
@@ -358,7 +366,7 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                             <CitationMenuItem
                               icon={<Eye size={12} />}
                               label="Preview"
-                              onClick={() => toggleCitationPreview(i)}
+                              onClick={() => showCitationPreview(i)}
                             />
                             <CitationMenuItem
                               icon={<FileText size={12} />}
