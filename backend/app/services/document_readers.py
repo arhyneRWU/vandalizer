@@ -149,6 +149,7 @@ def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
     import time as _time
 
     import httpx
+    last_error: Exception | None = None
     for attempt in range(retries):
         try:
             with httpx.Client(timeout=timeout) as client:
@@ -162,18 +163,40 @@ def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
                     use_async=use_async,
                 )
         except ocr_client.OcrRequestError as e:
+            last_error = e
             logger.warning(
                 "OCR attempt %d failed against %s: %s — body: %s",
                 attempt + 1, ocr_endpoint, e, e.body,
             )
         except Exception as e:
+            last_error = e
             logger.warning("OCR attempt %d raised: %s", attempt + 1, e)
+        if not ocr_client.is_retryable(last_error):
+            # Nothing another attempt can fix — stop burning attempts and let
+            # the caller degrade to PyMuPDF.
+            break
         if attempt < retries - 1:
-            _time.sleep(2 ** attempt)
+            wait = getattr(last_error, "retry_after", None)
+            _time.sleep(wait if wait is not None else 2 ** attempt)
 
-    # OCR failure is a handled degradation — the caller falls back to PyMuPDF —
-    # so log at warning, not error. An OCR outage (or a file removed mid-flight)
-    # must not page Sentry as a fault on every attempt-exhaustion.
+    # These three attempts span about 3 seconds, which is a network blip, not an
+    # outage. When the failure looks transient, raise so the task layer's own
+    # backoff (minutes, not seconds) gets a turn — returning "" here is what
+    # made a brief OCR outage indistinguishable from a document that genuinely
+    # has no text. See #633.
+    if last_error is not None and ocr_client.is_retryable(last_error):
+        logger.warning(
+            "OCR unavailable after %d attempts for %s; deferring to task retry",
+            retries, pdf_path,
+        )
+        raise ocr_client.OcrUnavailableError(
+            f"OCR service did not respond after {retries} attempts: {last_error}",
+            retry_after=getattr(last_error, "retry_after", None),
+        )
+
+    # A permanent failure (or no OCR configured at all) is a handled
+    # degradation — the caller falls back to PyMuPDF — so log at warning, not
+    # error, and don't page Sentry on every attempt-exhaustion.
     logger.warning("OCR failed after %d attempts for %s", retries, pdf_path)
     return ""
 
@@ -737,8 +760,15 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
         # Prefer OCR text for accuracy. When OCR is used we lose true page
         # boundaries, so fall back to interpolating against PyMuPDF's page
         # count — approximate, but enough for "around page N" citations.
+        from app.services import ocr_client
+
         try:
             ocr_text = ocr_extract_text_from_pdf(file_path)
+        except ocr_client.OcrUnavailableError:
+            # Deliberately not swallowed: a transient outage must reach the task
+            # layer so the whole extraction is retried later, rather than being
+            # degraded to whatever PyMuPDF can scrape off a scanned page now.
+            raise
         except Exception as e:
             logger.warning("OCR raised, falling back to PyMuPDF: %s", e)
             ocr_text = ""

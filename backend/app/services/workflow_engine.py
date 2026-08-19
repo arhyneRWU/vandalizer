@@ -426,8 +426,19 @@ class MultiTaskNode(Node):
         self.tasks.extend(tasks)
 
     def process_task(self, task):
-        result = task.process(task.inputs)
-        return task._apply_post_process(result)
+        # Capture per task, not per step: each task runs in its own copied
+        # context (see process below), so the sink only sees this task's LLM
+        # calls — including the post-process pass and any nested sub-calls.
+        from app.services.llm_service import capture_truncation, describe_truncation
+
+        with capture_truncation() as truncations:
+            result = task.process(task.inputs)
+            result = task._apply_post_process(result)
+        if truncations and isinstance(result, dict):
+            warning = describe_truncation(truncations)
+            existing = result.get("warning")
+            result["warning"] = f"{existing} | {warning}" if existing else warning
+        return result
 
     def process(self, inputs):
         import contextvars

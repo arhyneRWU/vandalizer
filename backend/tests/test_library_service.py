@@ -811,6 +811,40 @@ class TestShareToTeamErrors:
             assert exc.value.status == 404
 
     @pytest.mark.asyncio
+    async def test_refused_clone_is_a_400_carrying_its_own_reason(self):
+        """A clone that declines for an actionable reason — an empty knowledge
+        base — must not land in the catch-all and become an opaque 500."""
+        from app.services.library_service import ShareError, share_to_team
+
+        item = _make_library_item()
+        team_oid = PydanticObjectId()
+        reason = (
+            "This knowledge base has no sources yet — add at least one source "
+            "before cloning it."
+        )
+        with patch("app.services.library_service.access_control") as ac, \
+             patch("app.services.library_service._resolve_team_oid", AsyncMock(return_value=team_oid)), \
+             patch(
+                 "app.services.library_service.get_or_create_team_library",
+                 AsyncMock(return_value=_make_library(scope="team")),
+             ), \
+             patch("app.services.library_service._count_team_shares_of", AsyncMock(return_value=0)), \
+             patch(
+                 "app.services.library_service._clone_underlying_object",
+                 AsyncMock(side_effect=ValueError(reason)),
+             ):
+            ac.get_authorized_library_item = AsyncMock(return_value=item)
+            ac.get_team_access_context = AsyncMock(return_value=MagicMock())
+            ac.can_view_team = MagicMock(return_value=True)
+            with pytest.raises(ShareError) as exc:
+                await share_to_team("item-1", _make_user(), str(team_oid))
+
+        assert exc.value.status == 400
+        assert exc.value.code == "source_not_shareable"
+        # The guard's own wording reaches the user, not a canned per-code string.
+        assert exc.value.message == reason
+
+    @pytest.mark.asyncio
     async def test_raises_clone_failed_when_clone_raises_unexpected(self, caplog):
         """Unexpected errors during clone must be caught, logged with a traceback,
         and surfaced as clone_failed (500) — not a bare 500 with no detail."""

@@ -34,6 +34,11 @@ from app.utils.url_validation import normalize_crawl_url as _normalize_crawl_url
 
 logger = logging.getLogger(__name__)
 
+# Document task_status values that mean extraction is still running, so a KB
+# source waiting on that document's text should park as "pending" rather than
+# error. Mirrors the stage list in tasks.document_tasks.
+IN_FLIGHT_TASK_STATUSES = ("layout", "extracting", "ocr", "security", "readying")
+
 _dm: DocumentManager | None = None
 
 
@@ -382,6 +387,63 @@ async def resolve_document_titles(sources) -> dict[str, str]:
     return {d.uuid: d.title for d in docs if d.title}
 
 
+async def resolve_openable_documents(
+    source_uuids: list[str], user_id: str | None = None
+) -> dict[str, str]:
+    """Map KB source uuid -> SmartDocument uuid for sources a user can open.
+
+    Only document-backed sources whose SmartDocument still exists (and isn't
+    soft-deleted) are returned, so callers can offer an "open the document"
+    affordance without ever pointing at a document that 404s. URL sources and
+    orphaned rows are simply absent from the mapping.
+
+    ``user_id`` is the person who will click the affordance, and it matters:
+    membership is checked when a document is *added* to a KB, against the
+    adder. A KB shared with a team (or a verified one) can therefore hold
+    sources pointing at another member's personal-space documents, which
+    ``can_view_document`` denies to everyone but their owner. Offering "open"
+    on one of those yields a 404 from the download endpoint — a dead button,
+    since the reader can already see the chunk preview either way. Documents
+    the caller cannot view are dropped here so the affordance is never shown.
+
+    Omitting ``user_id`` skips the check and is only correct where no reader is
+    in scope.
+
+    Like title resolution, this is a display nicety — a lookup failure must
+    never break the caller.
+    """
+    ids = [u for u in dict.fromkeys(source_uuids) if u]
+    if not ids:
+        return {}
+    try:
+        sources = await KnowledgeBaseSource.find({"uuid": {"$in": ids}}).to_list()
+        by_doc: dict[str, list[str]] = {}
+        for s in sources:
+            if s.source_type == "document" and s.document_uuid:
+                by_doc.setdefault(s.document_uuid, []).append(s.uuid)
+        if not by_doc:
+            return {}
+        docs = await SmartDocument.find(
+            {"uuid": {"$in": list(by_doc)}, "soft_deleted": {"$ne": True}}
+        ).to_list()
+        if user_id:
+            user = await User.find_one(User.user_id == user_id)
+            if user is None:
+                return {}
+            team_access = await access_control.get_team_access_context(user)
+            docs = [
+                d for d in docs
+                if access_control.can_view_document(d, user, team_access)
+            ]
+    except Exception:
+        return {}
+    return {
+        source_uuid: d.uuid
+        for d in docs
+        for source_uuid in by_doc.get(d.uuid, [])
+    }
+
+
 async def get_kb_manifest(kb_uuid: str, limit: int = 60) -> list[dict]:
     """Compact listing of a KB's sources for chat prompt injection and
     named-document retrieval targeting.
@@ -684,6 +746,52 @@ async def add_documents(
     if added:
         await recalculate_stats(kb)
     return added
+
+
+async def register_documents(
+    kb: KnowledgeBase,
+    document_uuids: list[str],
+    user: User,
+) -> list[str]:
+    """Attach SmartDocuments to a KB as "pending" sources without ingesting them.
+
+    Chunking and embedding a large document runs for minutes, so the add-document
+    endpoints register sources here and hand the embed to a worker (see
+    ``tasks.documents.kb_ingest_document``). The sources land in the KB
+    immediately, which is what lets the UI show per-source progress instead of
+    blocking on the request. Returns the new source uuids in dispatch order;
+    duplicates are skipped, so an empty list means everything was already there.
+    """
+    team_access = await access_control.get_team_access_context(user)
+    source_uuids: list[str] = []
+    for doc_uuid in document_uuids:
+        doc = await access_control.get_authorized_document(
+            doc_uuid,
+            user,
+            team_access=team_access,
+            allow_admin=True,
+        )
+        if not doc:
+            raise ValueError(f"Document not found: {doc_uuid}")
+        existing = await KnowledgeBaseSource.find_one(
+            KnowledgeBaseSource.knowledge_base_uuid == kb.uuid,
+            KnowledgeBaseSource.document_uuid == doc_uuid,
+        )
+        if existing:
+            continue
+
+        source = KnowledgeBaseSource(
+            knowledge_base_uuid=kb.uuid,
+            source_type="document",
+            document_uuid=doc.uuid,
+        )
+        await source.insert()
+        source_uuids.append(source.uuid)
+
+    # Recalculate either way: it flips the KB to "building" while the new
+    # sources are pending, and corrects a stale status when all were duplicates.
+    await recalculate_stats(kb)
+    return source_uuids
 
 
 def _normalize_url(url: str) -> str:
@@ -1411,9 +1519,7 @@ async def _ingest_document_source(source: KnowledgeBaseSource, kb: KnowledgeBase
             # extraction-completion hook in update_document_fields re-ingest it
             # once raw_text exists. Only error when extraction has actually
             # finished (or failed) with no usable text.
-            in_flight = bool(doc.processing) or doc.task_status in (
-                "extracting", "readying", "layout",
-            )
+            in_flight = bool(doc.processing) or doc.task_status in IN_FLIGHT_TASK_STATUSES
             if in_flight and doc.task_status != "error":
                 source.status = "pending"
                 source.error_message = None

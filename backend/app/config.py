@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     chromadb_host: str = ""
     max_upload_size_mb: int = 500
 
+    # Where this process looks for model vocabularies, in the standard
+    # HuggingFace cache layout (`<root>/hub/models--Org--Name/snapshots/<rev>/`).
+    # Set it to your HF_HOME. Token counting reads `tokenizer.json` from here —
+    # the vocabulary only, never the weights and never the GPU.
+    #
+    # Optional. When nothing is found the budget falls back to estimating with
+    # tiktoken plus a safety margin, and says so in the log once per model. That
+    # is the pre-existing behaviour, so leaving this unset costs accuracy for
+    # self-hosted models but breaks nothing.
+    tokenizer_cache_root: str = "/hf-cache"
+
     # Observability
     sentry_dsn: str = ""
     log_format: str = "json"  # "json" for structured logging, "text" for human-readable

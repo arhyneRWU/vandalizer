@@ -568,7 +568,7 @@ async def chat_stream(
         try:
             kb_segment, kb_sources = await _build_kb_segment(
                 kb_uuid, message, model_name, manifest=kb_manifest,
-                history=previous_messages,
+                history=previous_messages, user_id=user_id,
             )
             if kb_segment:
                 doc_segments.insert(0, kb_segment)
@@ -611,6 +611,10 @@ async def chat_stream(
     # Measured before any trimming: both routing and the dialog's suggestion
     # ask "could another model have held what the user actually sent?", and the
     # post-compaction total cannot answer that — it always fits by definition.
+    # `model_config` carries this model's token safety margin, so the estimate
+    # is an upper bound rather than an optimistic one. Routing decides off this
+    # number: an estimate that reads low makes the router see headroom that is
+    # not there and decline to move a request that does not fit.
     requested_input_tokens = estimate_input_tokens(
         model_name=model_name,
         system_prompt=system_prompt or "",
@@ -618,6 +622,7 @@ async def chat_stream(
         history=previous_messages,
         documents=doc_segments,
         attachments=attachment_segments,
+        model_config=model_config,
     )
 
     routing = RoutingDecision(model_name, False, "")
@@ -1209,6 +1214,7 @@ async def _build_kb_segment(
     model_name: str,
     manifest: Optional[list[dict]] = None,
     history: Optional[list[ModelMessage]] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[Optional[DocumentSegment], list[dict]]:
     """Retrieve KB context for one chat turn.
 
@@ -1343,6 +1349,23 @@ async def _build_kb_segment(
             "\"clearly\" on it._\n"
         )
     kb_text += "".join(snippet_blocks)
+
+    # Attach the openable SmartDocument behind each cited source, so the UI can
+    # offer "open the document at the cited page" and not just a text preview —
+    # the page numbers are a retrieval heuristic, so verifying them in the
+    # document itself is exactly what a reader needs to do. URL sources,
+    # deleted documents, and documents this reader cannot view resolve to
+    # nothing and stay preview-only.
+    from app.services.knowledge_service import resolve_openable_documents
+
+    openable = await resolve_openable_documents(
+        [s["document_id"] for s in kb_sources if s.get("document_id")],
+        user_id=user_id,
+    )
+    for src_dict in kb_sources:
+        doc_uuid = openable.get(src_dict.get("document_id") or "")
+        if doc_uuid:
+            src_dict["document_uuid"] = doc_uuid
 
     return DocumentSegment(label="kb", text=kb_text), kb_sources
 

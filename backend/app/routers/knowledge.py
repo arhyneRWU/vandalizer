@@ -624,6 +624,25 @@ async def transfer_to_team(uuid: str, user: User = Depends(get_current_user)):
     return {"ok": True, "team_owned": kb.team_owned}
 
 
+def _dispatch_kb_ingest(source_uuids: list[str]) -> None:
+    """Queue the chunk+embed pass for freshly registered document sources.
+
+    Embedding a large document takes minutes and would blow past the proxy read
+    timeout if awaited inline, so it runs on a worker — the same shape add_urls
+    uses. Each source carries its own status, so the UI polls per source.
+    """
+    if not source_uuids:
+        return
+    from app.celery_app import celery_app
+
+    for source_uuid in source_uuids:
+        celery_app.send_task(
+            "tasks.documents.kb_ingest_document",
+            args=[source_uuid],
+            queue="documents",
+        )
+
+
 @router.post("/{uuid}/add_documents")
 async def add_documents(uuid: str, req: AddDocumentsRequest, user: User = Depends(get_current_user)):
     user_org_ancestry = await organization_service.get_user_org_ancestry(user)
@@ -645,13 +664,12 @@ async def add_documents(uuid: str, req: AddDocumentsRequest, user: User = Depend
                 seen.add(doc_uuid)
     if not document_uuids:
         raise HTTPException(status_code=400, detail="No documents provided")
-    kb.status = "building"
-    await kb.save()
     try:
-        added = await svc.add_documents(kb, document_uuids, user)
+        source_uuids = await svc.register_documents(kb, document_uuids, user)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True, "added": added}
+    _dispatch_kb_ingest(source_uuids)
+    return {"ok": True, "added": len(source_uuids), "queued": len(source_uuids)}
 
 
 @router.post("/{uuid}/add_folder")
@@ -672,13 +690,12 @@ async def add_folder(uuid: str, req: AddFolderRequest, user: User = Depends(get_
     if not doc_uuids:
         return {"ok": True, "added": 0}
 
-    kb.status = "building"
-    await kb.save()
     try:
-        added = await svc.add_documents(kb, doc_uuids, user)
+        source_uuids = await svc.register_documents(kb, doc_uuids, user)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True, "added": added}
+    _dispatch_kb_ingest(source_uuids)
+    return {"ok": True, "added": len(source_uuids), "queued": len(source_uuids)}
 
 
 @router.post("/{uuid}/add_urls")

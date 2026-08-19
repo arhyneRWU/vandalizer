@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import weakref
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 import httpx
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pydantic_ai.agent import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.wrapper import WrapperModel
@@ -406,12 +407,9 @@ def build_thinking_model_settings(
     # window). A per-model `response_reserve_tokens` raises it for long-output or
     # long-thinking models, at the cost of input room.
     from app.config import Settings
-    from app.services.context_budget import _default_response_reserve, resolve_context_window
+    from app.services.context_budget import resolve_context_window, resolve_response_reserve
     window = resolve_context_window(agent_model, model_config)
-    reserve = (
-        (_positive_int(model_config.get("response_reserve_tokens")) if model_config else None)
-        or _default_response_reserve(window)
-    )
+    reserve = resolve_response_reserve(window, model_config)
     # Thinking models need headroom so reasoning can't consume the whole cap.
     max_out = max(reserve, 2048) if thinking_enabled else reserve
     settings["max_tokens"] = max_out
@@ -443,6 +441,65 @@ def build_thinking_model_settings(
     return settings
 
 
+# ---------------------------------------------------------------------------
+# Output-truncation capture
+# ---------------------------------------------------------------------------
+# A model that stops because it hit `max_tokens` returns finish_reason="length"
+# and a partial answer. Nothing about the response *content* says so, which is
+# how a workflow could hand back a report that stops mid-sentence and still
+# report success. Detection lives at the MeteredModel chokepoint (every LLM call
+# in the app goes through it) and is published through a contextvar sink, the
+# same pattern metering uses: the call sites that care about truncation are far
+# above the layer that can see it.
+#
+# Workflow nodes run on a ThreadPoolExecutor with a *copied* context per node,
+# so a sink opened inside a node collects only that node's calls.
+
+_truncation_sink: ContextVar[Optional[list]] = ContextVar(
+    "llm_truncation_sink", default=None
+)
+
+
+@contextmanager
+def capture_truncation() -> Iterator[list[dict]]:
+    """Collect output-truncation events from LLM calls made inside the block.
+
+    Yields the list the events land in; each entry is
+    ``{"model": str | None, "max_tokens": int | None}``. Nested captures are
+    independent — the innermost open sink receives the event.
+    """
+    sink: list[dict] = []
+    token = _truncation_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _truncation_sink.reset(token)
+
+
+def record_truncation(model_name: Optional[str], max_tokens: Optional[int]) -> None:
+    """Report that a model response stopped at its output cap. Never raises."""
+    logger.warning(
+        "LLM response truncated at output cap (model=%s, max_tokens=%s)",
+        model_name, max_tokens,
+    )
+    sink = _truncation_sink.get()
+    if sink is not None:
+        sink.append({"model": model_name, "max_tokens": max_tokens})
+
+
+def describe_truncation(events: list[dict]) -> str:
+    """Render truncation events as a user-facing warning string."""
+    cap = next((e.get("max_tokens") for e in events if e.get("max_tokens")), None)
+    limit = f"{cap:,}-token output limit" if cap else "output limit"
+    plural = "responses were" if len(events) > 1 else "response was"
+    return (
+        f"Output was cut off: the model {plural} stopped at its {limit} before "
+        "finishing. The result below is incomplete. Raise “Response reserve "
+        "(output tokens)” for this model under Admin → System Config → "
+        "Models, or split this step into smaller steps."
+    )
+
+
 class MeteredModel(WrapperModel):
     """Transparent wrapper that records token usage on every model call.
 
@@ -461,6 +518,7 @@ class MeteredModel(WrapperModel):
     async def request(self, messages, model_settings, model_request_parameters):
         resp = await self.wrapped.request(messages, model_settings, model_request_parameters)
         self._record(messages, getattr(resp, "usage", None), getattr(resp, "parts", None))
+        self._note_finish(resp, model_settings)
         return resp
 
     @asynccontextmanager
@@ -478,15 +536,29 @@ class MeteredModel(WrapperModel):
                 # this finally runs.
                 usage = None
                 parts = None
+                response = None
                 try:
                     usage = stream.usage()
                 except Exception:
                     pass
                 try:
-                    parts = stream.get().parts
+                    response = stream.get()
+                    parts = response.parts
                 except Exception:
                     pass
                 self._record(messages, usage, parts)
+                self._note_finish(response, model_settings)
+
+    def _note_finish(self, response, model_settings) -> None:
+        """Flag a response that stopped because it hit the output cap."""
+        try:
+            if getattr(response, "finish_reason", None) != "length":
+                return
+            cap = (model_settings or {}).get("max_tokens")
+            record_truncation(self.model_name, cap)
+        except Exception:
+            # Truncation reporting must never break an LLM call.
+            pass
 
     def _record(self, messages, usage, parts):
         from app.services.metering import (

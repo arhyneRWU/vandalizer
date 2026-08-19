@@ -914,11 +914,12 @@ class TestKnowledgeDocSources:
             patch("app.dependencies.User") as MockUser,
             patch("app.routers.knowledge.svc") as mock_svc,
             patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.routers.knowledge._dispatch_kb_ingest") as mock_dispatch,
         ):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
-            mock_svc.add_documents = AsyncMock(return_value=2)
+            mock_svc.register_documents = AsyncMock(return_value=["src-1", "src-2"])
 
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/add_documents",
@@ -929,6 +930,10 @@ class TestKnowledgeDocSources:
 
         assert resp.status_code == 200
         assert resp.json()["added"] == 2
+        # Embedding must not run inline — it is queued per source so the request
+        # returns immediately and the UI can poll per-source status.
+        mock_svc.add_documents.assert_not_called()
+        mock_dispatch.assert_called_once_with(["src-1", "src-2"])
 
     @pytest.mark.asyncio
     async def test_add_documents_empty_list_rejected(self, client):

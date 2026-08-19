@@ -541,6 +541,41 @@ async def list_conversations(
     ]
 
 
+async def _refresh_openable_citations(messages: list[dict], user_id: str) -> None:
+    """Re-decide, at read time, which stored citations can open their document.
+
+    ``document_uuid`` is stamped onto a citation when the answer is generated,
+    so a conversation reopened later carries a decision made against the world
+    as it was then. A document soft-deleted since would still offer "open" and
+    404 in the viewer. Re-resolving against the reader also applies the access
+    check to messages stored before that check existed.
+
+    Mutates ``messages`` in place. Best-effort, exactly like the write-time
+    resolution: reading a conversation must not fail over a display nicety.
+    """
+    cited = [
+        c
+        for m in messages
+        for c in (m.get("citations") or [])
+        if c.get("document_id")
+    ]
+    if not cited:
+        return
+    try:
+        from app.services.knowledge_service import resolve_openable_documents
+
+        openable = await resolve_openable_documents(
+            [c["document_id"] for c in cited], user_id=user_id
+        )
+    except Exception:
+        return
+    for c in cited:
+        doc_uuid = openable.get(c["document_id"])
+        if doc_uuid:
+            c["document_uuid"] = doc_uuid
+        else:
+            c.pop("document_uuid", None)
+
 @router.get("/history/{conversation_uuid}")
 async def get_chat_history(
     conversation_uuid: str,
@@ -555,6 +590,7 @@ async def get_chat_history(
         return {"messages": [], "url_attachments": [], "file_attachments": []}
 
     messages = await conversation.get_messages()
+    await _refresh_openable_citations(messages, user.user_id)
     url_attachments = await conversation.get_url_attachments()
     file_attachments = await conversation.get_file_attachments()
 

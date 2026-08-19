@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import DOMPurify from 'dompurify'
-import { ThumbsUp, ThumbsDown, Copy, Check, ChevronRight } from 'lucide-react'
+import { ThumbsUp, ThumbsDown, Copy, Check, ChevronRight, Eye, FileText } from 'lucide-react'
 import { marked } from 'marked'
 import { submitChatFeedback } from '../../api/feedback'
 import { formatPageLocator } from '../../utils/pageLocator'
 import { useCertificationPanel } from '../../contexts/CertificationPanelContext'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
-import type { ChatMessage as ChatMessageType } from '../../types/chat'
+import { citationAnchor } from '../../utils/textMatch'
+import type { ChatMessage as ChatMessageType, Citation } from '../../types/chat'
 
 const ACTION_RE = /\[ACTION:([\w-]+)\](.*?)\[\/ACTION\]/g
 
@@ -42,6 +44,32 @@ function ThinkingLabel() {
   )
 }
 
+function CitationMenuItem({ icon, label, onClick }: {
+  icon: ReactNode
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+        padding: '5px 8px', border: 'none', borderRadius: 5,
+        background: 'transparent', color: '#374151',
+        fontSize: 12, fontFamily: 'inherit', textAlign: 'left',
+        cursor: 'pointer', transition: 'background-color 0.15s',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#f3f4f6' }}
+      onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent' }}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
+
 marked.setOptions({ breaks: true, gfm: true })
 
 interface Props {
@@ -65,9 +93,12 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
   const [commentSent, setCommentSent] = useState(false)
   const [thinkingExpanded, setThinkingExpanded] = useState(false)
   const [openCitation, setOpenCitation] = useState<number | null>(null)
+  // Citation whose Preview/Open chooser is showing (null = none).
+  const [citationMenu, setCitationMenu] = useState<number | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  const citationsRef = useRef<HTMLDivElement>(null)
   const certPanel = useCertificationPanel()
-  const { setWorkspaceMode } = useWorkspace()
+  const { setWorkspaceMode, viewDocument, openDocumentUuid } = useWorkspace()
 
   // Resolve thinking content: streaming thinking > persisted thinking
   const thinkingText = streamingThinking || message.thinking || ''
@@ -132,6 +163,54 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
       setCommentSent(true)
       setShowComment(false)
     } catch { /* ignore */ }
+  }
+
+  // Close the citation chooser on an outside click or Escape, so it never
+  // strands itself over the next message.
+  useEffect(() => {
+    if (citationMenu === null) return
+    const onPointerDown = (e: MouseEvent) => {
+      if (!citationsRef.current?.contains(e.target as Node)) setCitationMenu(null)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCitationMenu(null)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [citationMenu])
+
+  const toggleCitationPreview = (index: number) => {
+    setCitationMenu(null)
+    setOpenCitation(prev => (prev === index ? null : index))
+  }
+
+  // The menu's "Preview" item is a destination, not a switch: picking it must
+  // show the preview whether or not one is already open. Toggling belongs to
+  // the pill itself, where a second click reads as "put it away".
+  const showCitationPreview = (index: number) => {
+    setCitationMenu(null)
+    setOpenCitation(index)
+  }
+
+  // Open the cited document in the file viewer, landing on the passage the
+  // chunk came from. Page numbers are a retrieval heuristic and can be wrong —
+  // which is the whole reason to open the document — so the passage text is
+  // the primary target and the page only breaks ties between matches.
+  const openCitedDocument = (citation: Citation) => {
+    if (!citation.document_uuid) return
+    setCitationMenu(null)
+    // The file panel is collapsed to nothing while chat has the workspace;
+    // switch modes first or the document opens where nobody can see it.
+    setWorkspaceMode('files')
+    const anchor = citationAnchor(citation.content_preview)
+    viewDocument(citation.document_uuid, citation.document_title, {
+      terms: anchor ? [anchor] : [],
+      page: citation.page ?? null,
+    })
   }
 
   const handleCopy = () => {
@@ -233,7 +312,7 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
             const open = openCitation !== null ? message.citations[openCitation] : null
             const openPreview = open?.content_preview?.trim() || ''
             return (
-              <div style={{ marginTop: 8 }}>
+              <div style={{ marginTop: 8 }} ref={citationsRef}>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   <span style={{ fontSize: 11, color: '#6b7280', alignSelf: 'center', marginRight: 2 }}>
                     Sources:
@@ -243,25 +322,61 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                     const label = locator ? `${c.document_title} · ${locator}` : c.document_title
                     const preview = c.content_preview || ''
                     const isOpen = openCitation === i
+                    const menuOpen = citationMenu === i
+                    // Only offer the chooser while there is somewhere to go:
+                    // a source with no readable document behind it, or one
+                    // already sitting in the viewer, goes straight to preview.
+                    const offersOpen = !!c.document_uuid && c.document_uuid !== openDocumentUuid
+                    const active = isOpen || menuOpen
                     return (
-                      <button
+                      <span
                         key={`${c.chunk_id ?? c.document_id ?? i}`}
-                        type="button"
-                        title={preview}
-                        aria-expanded={isOpen}
-                        onClick={() => setOpenCitation(isOpen ? null : i)}
-                        style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 4,
-                          padding: '2px 8px', fontSize: 11, fontWeight: 500,
-                          backgroundColor: isOpen ? '#e0e7ff' : '#f3f4f6',
-                          color: isOpen ? '#3730a3' : '#374151',
-                          border: `1px solid ${isOpen ? '#c7d2fe' : '#e5e7eb'}`,
-                          borderRadius: 999,
-                          cursor: 'pointer', transition: 'all 0.15s',
-                        }}
+                        style={{ position: 'relative', display: 'inline-flex' }}
                       >
-                        {label}
-                      </button>
+                        <button
+                          type="button"
+                          title={preview}
+                          aria-haspopup={offersOpen ? 'menu' : undefined}
+                          aria-expanded={offersOpen ? menuOpen : isOpen}
+                          onClick={() => offersOpen
+                            ? setCitationMenu(menuOpen ? null : i)
+                            : toggleCitationPreview(i)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            padding: '2px 8px', fontSize: 11, fontWeight: 500,
+                            backgroundColor: active ? '#e0e7ff' : '#f3f4f6',
+                            color: active ? '#3730a3' : '#374151',
+                            border: `1px solid ${active ? '#c7d2fe' : '#e5e7eb'}`,
+                            borderRadius: 999,
+                            cursor: 'pointer', transition: 'all 0.15s',
+                          }}
+                        >
+                          {label}
+                        </button>
+                        {menuOpen && (
+                          <div
+                            role="menu"
+                            aria-label={`Source: ${label}`}
+                            style={{
+                              position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+                              zIndex: 30, minWidth: 150, padding: 4,
+                              backgroundColor: '#fff', border: '1px solid #e5e7eb',
+                              borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+                            }}
+                          >
+                            <CitationMenuItem
+                              icon={<Eye size={12} />}
+                              label="Preview"
+                              onClick={() => showCitationPreview(i)}
+                            />
+                            <CitationMenuItem
+                              icon={<FileText size={12} />}
+                              label={typeof c.page === 'number' ? `Open at p. ${c.page}` : 'Open document'}
+                              onClick={() => openCitedDocument(c)}
+                            />
+                          </div>
+                        )}
+                      </span>
                     )
                   })}
                 </div>
