@@ -23,11 +23,14 @@
  * extension (UI integration paused) and a live M365 inbox UI (intake is
  * admin-configured, event-driven — no real-time inbox screen).
  *
- * A note on data residency: documents never leave your infrastructure UNLESS you
- * configure a commercial model, in which case the text of a document is sent to
- * that vendor when it is processed. Keep the exception attached to the claim
- * wherever the claim appears — unqualified "never leaves your infrastructure" is
- * only true of a local-model deployment.
+ * A note on data residency: documents never leave your infrastructure UNLESS an
+ * administrator configures one of two opt-in integrations, both unset by default.
+ * A commercial model receives the *text* of a document when it is processed. A
+ * remote OCR endpoint receives the *whole file* — see services/ocr_client.py,
+ * which POSTs the PDF itself to whatever conversion service is configured. Keep
+ * the exception attached to the claim wherever the claim appears — unqualified
+ * "never leaves your infrastructure" is only true of a deployment that has
+ * configured neither, i.e. a local model paired with local OCR.
  */
 import {
   Landmark,
@@ -249,7 +252,7 @@ const deploy: Track = {
     'Vandalizer is designed to reliably and securely streamline RA workflows. This page offers critical information for your IT department to begin evaluating Vandalizer for security and flexibility. Vandalizer satisfies these critical benchmarks for research administration:',
   valueProps: [
     'Docker Compose stack: FastAPI, Celery, MongoDB, Redis, ChromaDB, nginx',
-    'Works with any AI provider: cloud deployments (no GPU required), or on-premises environments (~16 GB RAM on a single commodity server)',
+    'Works with any AI provider, cloud or on-premises: ~16 GB RAM on a single commodity server, with a GPU needed only if you run a large model locally',
     'Self-hosted with encrypted secrets; on-prem / air-gapped option',
     'Guided setup.sh installer — admin account and starter catalog included',
     'LLM endpoints and keys configured at runtime in the admin UI',
@@ -371,7 +374,7 @@ const deploy: Track = {
     {
       id: 'security',
       heading: 'Security & data residency',
-      body: 'Vandalizer runs on your infrastructure, so documents and their vector embeddings never leave the institution — **unless you configure a commercial model**. In that case the text of a document is sent to that vendor when it is processed, under that vendor’s terms; the corpus itself, the uploads, and the vector store still stay on your servers, and there is no vendor-side copy of them. Run a local model through Ollama or vLLM instead and nothing leaves at all. Secrets — LLM API keys and OAuth tokens — are encrypted at rest with a Fernet key. Sessions use JWTs; sign-in supports OAuth (Azure AD, Google, Okta) and SAML. The Microsoft 365 / Graph integration is optional and inert unless an administrator configures it. A fully air-gapped deployment is possible by pairing a local LLM with a local OCR endpoint.',
+      body: 'Vandalizer runs on your infrastructure, so documents and their vector embeddings never leave the institution — **unless you configure a commercial model**. In that case the text of a document is sent to that vendor when it is processed, under that vendor’s terms; the corpus itself, the uploads, and the vector store still stay on your servers, and there is no vendor-side copy of them. Run a local model through Ollama or vLLM instead and nothing leaves at all. The same applies to OCR: scanned documents are read locally unless an administrator points Vandalizer at an external OCR endpoint, which receives the file itself. Secrets — LLM API keys and OAuth tokens — are encrypted at rest with a Fernet key. Sessions use JWTs; sign-in supports OAuth (Azure AD, Google, Okta) and SAML. The Microsoft 365 / Graph integration is optional and inert unless an administrator configures it. A fully air-gapped deployment is possible by pairing a local LLM with a local OCR endpoint.',
     },
     {
       id: 'ops',

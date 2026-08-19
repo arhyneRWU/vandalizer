@@ -68,8 +68,8 @@ function CopyablePitch({
         </button>
       </div>
       <div className="space-y-3">
-        {text.split(/\n{2,}/).map((para) => (
-          <p key={para.slice(0, 40)} className="text-gray-200 leading-relaxed">
+        {text.split(/\n{2,}/).map((para, i) => (
+          <p key={i} className="text-gray-200 leading-relaxed">
             {para}
           </p>
         ))}
