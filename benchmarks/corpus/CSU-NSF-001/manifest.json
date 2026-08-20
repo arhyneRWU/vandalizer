@@ -1,0 +1,68 @@
+{
+  "case_id": "CSU-NSF-001",
+  "version": "0.4.0",
+  "created": "2026-08-10",
+  "synthetic": true,
+  "changelog": {
+    "0.4.0": "Citation-scoring fairness release: added corroborating_sources to every question \u2014 pages that also state the decisive fact but are outside the minimal canonical sources set \u2014 so automated citation scoring accepts a true citation to a corroborating page instead of punishing it (the failure mode measured in ui-insight/vandalizer#628, where all five of one model's apparent citation failures were correct citations to unlisted pages). Questions, answers, and the existing sources lists are unchanged, so v0.3.3 benchmark results remain valid. Shipped README now states the synthetic-degradation, context-limit, and shared-GPU-latency caveats.",
+    "0.3.3": "Identity-safety release: replaced every synthetic natural-person identity with a stable non-person role identifier; converted fictional biosketch publications to explicit synthetic product records without authors, journals, DOIs, volumes, or pages; removed personal workbook metadata; synchronized Q023 and Q030 across both key files; retained verified real references and genuine figure credits.",
+    "0.3.2": "Citation-validation clarification: changed the Section 5.2 assay-method citation from the inclusive range [13-15] to the explicit list [13,14,15]. This makes the Hatfield et al. reference visible to literal-token validators without changing scientific content, reference numbering, pagination, questions, answers, or ground-truth page mappings. Regenerated the Project Description and References Cited PDFs from their Word sources.",
+    "0.3.1": "Reference audit: corrected inaccurate author lists, titles, and identifiers; expanded all 24 references to full author lists; replaced a generic operational webpage with a specific NOAA quality-control manual; verified that every listed reference is cited in the Project Description; standardized the References Cited document to 11-point Times New Roman. Project Description pagination and benchmark answer mappings remain unchanged.",
+    "0.3.0": "Scientific narrative revision: Project Description rewritten as a 13-page NSF-style research narrative in 11-point Times New Roman with real peer-reviewed literature, open-license taxon images, explicit analytical validation and field-quality controls, leakage-resistant model evaluation, risk ownership, and broader-impacts assessment. References Cited replaced with real sources. Synthetic investigators, sites, preliminary results, and proposed experiments remain fictional. Corrected the cartridge-service arithmetic to seven days at four multiplex cycles per day.",
+    "0.2.0": "Full realism revision: Project Description expanded to full NSF length (13 pp, figures, tables, citations); rate agreement reformatted in federal NICRA style; budget policy made proposal-agnostic; added References Cited, Facilities/Equipment/Other Resources, Postdoctoral Mentoring Plan, Biographical Sketches, and Current & Pending Support; prominent banners replaced with per-page synthetic footers; questions Q021-Q030 added; all v0.1.0 dollar figures, rates, and answers preserved.",
+    "0.1.0": "Initial release."
+  },
+  "system_input_files": [
+    "01_CSU_Synthetic_FA_Rate_Agreement.pdf",
+    "02_CSU_Synthetic_Budget_Policy.pdf",
+    "03_Project_Summary.pdf",
+    "04_Project_Description.pdf",
+    "05_Budget_Justification.pdf",
+    "06_Data_Management_Plan.pdf",
+    "07_References_Cited.pdf",
+    "08_Facilities_Equipment_Resources.pdf",
+    "09_Postdoc_Mentoring_Plan.pdf",
+    "10_Biographical_Sketches.pdf",
+    "11_Current_Pending_Support.pdf",
+    "CSU_NSF_001_Budget.xlsx"
+  ],
+  "withheld_ground_truth_files": [
+    "ground_truth.json",
+    "benchmark_questions.csv",
+    "manifest.json"
+  ],
+  "editable_sources": [
+    "01_CSU_Synthetic_FA_Rate_Agreement.docx",
+    "02_CSU_Synthetic_Budget_Policy.docx",
+    "03_Project_Summary.docx",
+    "04_Project_Description.docx",
+    "05_Budget_Justification.docx",
+    "06_Data_Management_Plan.docx",
+    "07_References_Cited.docx",
+    "08_Facilities_Equipment_Resources.docx",
+    "09_Postdoc_Mentoring_Plan.docx",
+    "10_Biographical_Sketches.docx",
+    "11_Current_Pending_Support.docx"
+  ],
+  "release_assets": {
+    "tag": "corpus-v0.4.0",
+    "assets": [
+      {"name": "CSU-NSF-001-v0.4.0-digital.tar.gz", "contents": ["pdf/", "source/"], "sha256": "<filled in Task 9>"},
+      {"name": "CSU-NSF-001-v0.4.0-scanned.tar.gz", "contents": ["scanned/light/", "scanned/medium/", "scanned/heavy/"], "sha256": "<filled in Task 9>"}
+    ]
+  },
+  "identity_safety": {
+    "synthetic_role_identifiers": [
+      "CSU-PI-001",
+      "CSU-COI-001",
+      "CSU-VPR-001",
+      "FED-NEG-001"
+    ],
+    "synthetic_roles_use_natural_person_names": false,
+    "fictional_products_use_natural_person_authors": false,
+    "permitted_real_person_attribution": [
+      "verified authors in References Cited",
+      "verified creators and credits for open-license figures"
+    ]
+  }
+}
