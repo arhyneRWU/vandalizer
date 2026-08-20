@@ -47,8 +47,8 @@
   "release_assets": {
     "tag": "corpus-v0.4.0",
     "assets": [
-      {"name": "CSU-NSF-001-v0.4.0-digital.tar.gz", "contents": ["pdf/", "source/"], "sha256": "<filled in Task 9>"},
-      {"name": "CSU-NSF-001-v0.4.0-scanned.tar.gz", "contents": ["scanned/light/", "scanned/medium/", "scanned/heavy/"], "sha256": "<filled in Task 9>"}
+      {"name": "CSU-NSF-001-v0.4.0-digital.tar.gz", "contents": ["pdf/", "source/"], "sha256": "9ca1ff316c73bc02f84e431c54a845b962854bd05c9c14be121592e90a67efd1"},
+      {"name": "CSU-NSF-001-v0.4.0-scanned.tar.gz", "contents": ["scanned/light/", "scanned/medium/", "scanned/heavy/"], "sha256": "d79133654c70b3f75849d98f0d94e248651e0deb9adad7e723923eb9041dd767"}
     ]
   },
   "identity_safety": {
