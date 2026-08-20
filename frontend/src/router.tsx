@@ -279,6 +279,12 @@ const automationRoute = createRoute({
 const verificationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/verification',
+  // ?request=<uuid> deep-links a notification to the submission it is about,
+  // the way ?ticket= does on /support. Anything unrecognized falls back to the
+  // plain queue.
+  validateSearch: (search: Record<string, unknown>): { request?: string } => ({
+    request: (typeof search.request === 'string' && search.request) || undefined,
+  }),
   component: () => (
     <ProtectedRoute>
       <Verification />
