@@ -5,8 +5,11 @@ import datetime
 import logging
 import re
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.dependencies import get_current_user
 from app.rate_limit import limiter
@@ -1186,8 +1189,17 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
         TestQueryImportError,
         parse_test_query_import,
     )
+    # The parser needs these to tell "one source whose name has a comma in it"
+    # from "two sources". Resolving them is best-effort: a lookup failure should
+    # degrade to comma-splitting, not fail the upload.
     try:
-        rows, row_errors = parse_test_query_import(filename, data)
+        known_names = await kb_source_names(kb.uuid)
+    except Exception:
+        known_names = []
+    try:
+        rows, row_errors = parse_test_query_import(
+            filename, data, known_source_names=known_names,
+        )
     except TestQueryImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1238,10 +1250,26 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
             by_external_id[row["external_id"]] = tq
         created += 1
 
+    # An expected-source label that matches no source in this KB can never be
+    # credited, so every question carrying one scores 0 retrieval precision and
+    # drags the KB's score down for a labelling mismatch rather than a
+    # retrieval failure. Silently importing those is how a run ends up with an
+    # unexplainable precision number, so report them as warnings.
+    try:
+        unmatched = await _unmatched_source_labels(kb, rows)
+    except Exception:
+        # The questions are already saved. A warning we failed to compute must
+        # not turn a successful import into a 500 the user reads as data loss.
+        logger.exception(
+            "Could not check expected-source labels for KB %s", kb.uuid,
+        )
+        unmatched = []
+
     logger.info(
         "Test-query import for KB %s by user %s: %d created, %d updated, "
-        "%d skipped, %d row errors (%s)",
-        kb.uuid, user.user_id, created, updated, skipped, len(row_errors), filename,
+        "%d skipped, %d row errors, %d unmatched source labels (%s)",
+        kb.uuid, user.user_id, created, updated, skipped, len(row_errors),
+        len(unmatched), filename,
     )
     return {
         "created": created,
@@ -1249,7 +1277,59 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
         "skipped": skipped,
         "total_rows": len(rows) + len(row_errors),
         "errors": row_errors,
+        "unmatched_source_labels": unmatched,
     }
+
+
+async def kb_source_names(kb_uuid: str) -> list[str]:
+    """Every source name in a KB, as ingestion writes it into ChromaDB.
+
+    Mirrors ``get_kb_manifest``'s resolution, and that matters: resolving a
+    name as ``custom_name or url_title or url`` leaves a *document*-backed
+    source with an empty name, because those two fields are only set for URL
+    sources. Ingestion writes the document's title (``knowledge_base_tasks``),
+    and that title is what a validation run matches against — so dropping them
+    made every correct label in a document KB look unmatched.
+    """
+    sources = await svc.get_kb_sources(kb_uuid)
+    titles = await svc.resolve_document_titles(sources)
+
+    names: list[str] = []
+    for s in sources:
+        name = s.custom_name
+        if not name:
+            if s.source_type == "url":
+                name = s.url_title or s.url
+            else:
+                name = titles.get(s.document_uuid or "") or s.document_uuid
+        if name:
+            names.append(name)
+    return names
+
+
+async def _unmatched_source_labels(kb, rows: list[dict]) -> list[dict]:
+    """Expected-source labels in ``rows`` that match no source name in ``kb``.
+
+    Uses the same substring rule the validation run scores with
+    (``kb_validation_service``), so a label reported clean here is one that run
+    can actually credit.
+    """
+    names = [n.lower() for n in await kb_source_names(kb.uuid)]
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        for label in row["expected_source_labels"]:
+            key = label.strip()
+            if not key:
+                continue
+            if any(key.lower() in name for name in names):
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+    return [
+        {"label": label, "questions": n}
+        for label, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 async def _require_manageable_kb(uuid: str, user: User, user_org_ancestry: list[str]):
@@ -1487,6 +1567,61 @@ async def delete_test_query(uuid: str, query_uuid: str, user: User = Depends(get
         raise HTTPException(status_code=404, detail="Test query not found")
     await tq.delete()
     return {"ok": True}
+
+
+# A KB's test set is a curation surface, not a data store — a few hundred
+# questions is a large one. Cap the batch well above that so a malformed
+# client can't ask for an unbounded delete.
+_TEST_QUERY_BULK_DELETE_MAX = 2000
+
+
+class BulkDeleteTestQueriesBody(BaseModel):
+    """Typed so a malformed body is a 422 rather than an unhandled 500.
+
+    Reading the body with ``await request.json()`` — the older convention in
+    this router — raises on an empty or non-JSON body, and ``.get`` raises again
+    on a valid JSON non-object such as ``[]``. Both surfaced as 500s.
+
+    The element type is deliberately loose. Declaring ``list[str]`` would make
+    a single junk entry reject the whole request, but a stale list left open in
+    another tab is the normal case here, and it should still delete what it
+    legitimately can. Non-strings are dropped below, as before.
+    """
+
+    query_uuids: list[Any]
+
+
+@router.post("/{uuid}/test-queries/bulk-delete")
+async def bulk_delete_test_queries(
+    uuid: str,
+    body: BulkDeleteTestQueriesBody,
+    user: User = Depends(get_current_user),
+):
+    """Delete several test queries in one call.
+
+    Body: ``{"query_uuids": [str, ...]}``. Only queries belonging to this KB
+    are touched; ids that don't match (already deleted, or another KB's) are
+    ignored rather than failing the batch, so a stale client list still
+    removes everything it legitimately can. Returns ``{"deleted": int}``.
+    """
+    user_org_ancestry = await organization_service.get_user_org_ancestry(user)
+    kb = await _require_manageable_kb(uuid, user, user_org_ancestry)
+    query_uuids = list(dict.fromkeys(
+        q for q in body.query_uuids if isinstance(q, str) and q.strip()
+    ))
+    if not query_uuids:
+        raise HTTPException(status_code=400, detail="No test queries selected")
+    if len(query_uuids) > _TEST_QUERY_BULK_DELETE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete more than {_TEST_QUERY_BULK_DELETE_MAX} test queries at once",
+        )
+    from app.models.kb_test_query import KBTestQuery
+    result = await KBTestQuery.find(
+        {"knowledge_base_uuid": kb.uuid, "uuid": {"$in": query_uuids}},
+    ).delete()
+    deleted = getattr(result, "deleted_count", 0) or 0
+    return {"deleted": deleted}
 
 
 # ---------------------------------------------------------------------------

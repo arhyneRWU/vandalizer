@@ -1,7 +1,7 @@
 """Choosing a bigger model when a document doesn't fit the current one.
 
 A complete grant proposal is one document, and people want to read it as one.
-Measured on a real 79-page NOAA proposal: 41,213 tokens against a 32,768-token
+Measured on a real 79-page grant proposal: 41,213 tokens against a 32,768-token
 model. It cannot fit — not with better settings, not with the context-budget
 share fixed. The model silently answered from 33 of 79 pages.
 
@@ -49,7 +49,7 @@ class TestWhenToSwitch:
         d = choose_document_model(
             current_name="small", current_config=SMALL,
             candidate_name="large", candidate_config=LARGE,
-            input_tokens=41213,          # the real NOAA proposal
+            input_tokens=41213,          # the real 79-page grant proposal
         )
         assert d.switched is True
         assert d.model_name == "large"
