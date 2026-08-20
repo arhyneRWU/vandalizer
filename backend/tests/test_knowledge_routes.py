@@ -643,6 +643,7 @@ class TestKnowledgeCRUD:
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
             mock_svc.get_kb_sources = AsyncMock(return_value=[src])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
             MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
             MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
 
@@ -696,6 +697,7 @@ class TestKnowledgeCRUD:
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
             mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
             MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
             MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
 
@@ -1238,6 +1240,7 @@ class TestKnowledgeDocSources:
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
             mock_svc.get_kb_sources = AsyncMock(return_value=[src])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
 
             resp = await client.get(
                 "/api/knowledge/kb-uuid-1/status",
@@ -2138,6 +2141,8 @@ class TestTestQueryImport:
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
 
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/test-queries/import",
@@ -2185,6 +2190,8 @@ class TestTestQueryImport:
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
 
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/test-queries/import",
@@ -2213,6 +2220,8 @@ class TestTestQueryImport:
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
 
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/test-queries/import",
@@ -2239,6 +2248,8 @@ class TestTestQueryImport:
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
             mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
 
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/test-queries/import",
@@ -2276,6 +2287,149 @@ class TestTestQueryImport:
             )
 
         assert resp.status_code == 403
+
+
+    @pytest.mark.asyncio
+    async def test_document_backed_sources_are_matched_by_their_title(self, client):
+        """Resolving a name as ``custom_name or url_title or url`` leaves a
+        document-backed source with an empty name — those two fields are only
+        set for URL sources — so it was dropped and every correct label in a
+        document KB was reported as matching nothing, inviting the user to
+        clear labels that were right. Ingestion writes the document's *title*,
+        and that title is what the validation run scores against.
+        """
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+        fake_cls, _created = self._fake_query_cls([])
+
+        from types import SimpleNamespace
+        doc_source = SimpleNamespace(
+            custom_name=None,
+            source_type="document",
+            document_uuid="doc-1",
+            url_title=None,
+            url=None,
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.models.kb_test_query.KBTestQuery", fake_cls),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[doc_source])
+            mock_svc.resolve_document_titles = AsyncMock(
+                return_value={"doc-1": "NSF PAPPG 24-1.pdf"},
+            )
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/import",
+                json=self._payload("Question,Source\nQ1,NSF PAPPG 24-1.pdf\n"),
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["unmatched_source_labels"] == [], (
+            "a label naming an uploaded document by its title was reported as "
+            "matching no source"
+        )
+
+    @pytest.mark.asyncio
+    async def test_import_warns_on_source_labels_matching_no_source(self, client):
+        """A label that matches no source scores 0 retrieval precision forever.
+
+        This is how the 2 CFR 200 set silently lost its precision metric: an
+        imported taxonomy ("Subpart E-i — Cost Principles | §§200.400-200.419")
+        named nothing in the KB, so every question carrying it was scored as a
+        retrieval miss no matter how good the retrieval was.
+        """
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        csv_text = (
+            "Question,Source\n"
+            "Q1,Subpart E-i — Cost Principles | §§200.400-200.419\n"
+            "Q2,Subpart E-i — Cost Principles | §§200.400-200.419\n"
+            "Q3,Subpart E—Cost Principles\n"
+        )
+        fake_cls, _created = self._fake_query_cls([])
+
+        from types import SimpleNamespace
+        real_source = SimpleNamespace(
+            custom_name=None,
+            source_type="url",
+            document_uuid=None,
+            url_title="Subpart E—Cost Principles",
+            url="https://example.gov/subpart-e",
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.models.kb_test_query.KBTestQuery", fake_cls),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(return_value=[real_source])
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/import",
+                json=self._payload(csv_text),
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["created"] == 3          # every row still imports
+        unmatched = body["unmatched_source_labels"]
+        assert len(unmatched) == 1
+        assert unmatched[0]["label"] == "Subpart E-i — Cost Principles | §§200.400-200.419"
+        assert unmatched[0]["questions"] == 2  # the label that does match is not reported
+
+    @pytest.mark.asyncio
+    async def test_import_succeeds_when_label_check_fails(self, client):
+        """The questions are already written when the check runs, so a failure
+        there must not report the import as failed."""
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+        fake_cls, _created = self._fake_query_cls([])
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.models.kb_test_query.KBTestQuery", fake_cls),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+            mock_svc.get_kb_sources = AsyncMock(side_effect=RuntimeError("mongo down"))
+            mock_svc.resolve_document_titles = AsyncMock(return_value={})
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/import",
+                json=self._payload("Question,Source\nQ1,Doc A\n"),
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["created"] == 1
+        assert resp.json()["unmatched_source_labels"] == []
 
 
 class TestTestQueryBulkDelete:

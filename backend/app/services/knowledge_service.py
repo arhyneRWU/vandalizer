@@ -1562,7 +1562,10 @@ async def _ingest_url_source(
     await source.save()
     try:
         from app.services.web_fetcher import fetch_url
-        from app.utils.bot_challenge import looks_like_bot_challenge
+        from app.utils.bot_challenge import (
+            looks_like_bot_challenge,
+            looks_like_boilerplate_only,
+        )
         from app.utils.fetch_errors import describe_empty_fetch
 
         result = await fetch_url(source.url)
@@ -1579,6 +1582,15 @@ async def _ingest_url_source(
             # page. Embedding it would poison retrieval with junk text.
             source.status = "error"
             source.error_message = "Blocked by the site's bot protection (verification page returned instead of content)"
+            await source.save()
+            return None
+
+        if looks_like_boilerplate_only(raw_text):
+            # A JavaScript-rendered page answered with HTTP 200 but only site
+            # chrome (.gov banner, nav, session dialog). Embedding it teaches
+            # the KB padlock trivia instead of the document.
+            source.status = "error"
+            source.error_message = "Page returned only site navigation/boilerplate — content is JavaScript-rendered and did not load"
             await source.save()
             return None
 
