@@ -43,6 +43,7 @@ dependencies = [
     "tokenizers>=0.20,<1",
     "langchain-text-splitters>=0.3,<2",
     "pdf-inspector>=0.2,<1.15",
+    "xlrd>=2.0.2",
 ]
 
 [project.optional-dependencies]
