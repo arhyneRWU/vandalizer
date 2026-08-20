@@ -17,7 +17,7 @@ the user's behalf.
 from dataclasses import dataclass
 from typing import Optional
 
-from app.services.context_budget import input_budget_for
+from app.services.context_budget import input_budget_for, token_safety_margin
 
 # Lower is stricter. An unlabelled model is treated as *less* protected than
 # one explicitly marked internal: `privacy` has never been enforced anywhere in
@@ -44,6 +44,35 @@ class RoutingDecision:
     model_name: str
     switched: bool
     reason: str
+
+
+def _sized_for(
+    input_tokens: int,
+    current_name: str, current_config: Optional[dict],
+    other_name: str, other_config: Optional[dict],
+) -> int:
+    """``input_tokens`` restated in *other*'s units, never smaller.
+
+    The caller measures the request once, with the model the user is on. That
+    number carries *that* model's safety margin — 1.0 where the count is exact
+    (a local vocabulary, or OpenAI), 1.20 where it is an estimate. Comparing it
+    against another model's budget silently mixes rulers: a request measured
+    exactly looks like it fits a model whose own count would come out 20%
+    higher, the router switches, and that model rejects it. That is the
+    "estimate reads low, so we fail" failure the margin exists to prevent,
+    relocated to the routing boundary.
+
+    Re-measuring per candidate would mean re-tokenizing the whole prompt for
+    each one, so the margin is rescaled instead. Where the two models tokenize
+    differently the rescale is approximate — which is why it only ever rounds
+    *up*: over-stating routes a request early, which costs the user nothing but
+    a larger model, while under-stating hard-fails the request outright.
+    """
+    current_margin = token_safety_margin(current_name, current_config)
+    other_margin = token_safety_margin(other_name, other_config)
+    if other_margin <= current_margin or current_margin <= 0:
+        return input_tokens
+    return int(input_tokens / current_margin * other_margin)
 
 
 def choose_document_model(
@@ -78,7 +107,10 @@ def choose_document_model(
         return stay
 
     candidate_budget = input_budget_for(candidate_name, candidate_config)
-    if input_tokens > candidate_budget:
+    candidate_tokens = _sized_for(
+        input_tokens, current_name, current_config, candidate_name, candidate_config,
+    )
+    if candidate_tokens > candidate_budget:
         return RoutingDecision(
             current_name,
             False,
@@ -130,7 +162,8 @@ def suggest_document_model(
         if m.get("name")
         and m.get("name") != current_name
         and _privacy_rank(m) <= current_rank
-        and input_tokens <= input_budget_for(m.get("name", ""), m)
+        and _sized_for(input_tokens, current_name, current_config, m.get("name", ""), m)
+        <= input_budget_for(m.get("name", ""), m)
     ]
     if not fits:
         return None

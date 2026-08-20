@@ -746,3 +746,84 @@ def test_a_tokenizer_that_cannot_encode_is_treated_as_absent(tmp_path, monkeypat
     assert cb.token_safety_margin("Fake/Broken", cfg) > 1.0, (
         "the margin stayed at 1.0 for a model whose count is not exact"
     )
+
+
+# ---------------------------------------------------------------------------
+# Configuration: what wins, and how discovery is turned off
+# ---------------------------------------------------------------------------
+
+
+def test_an_exact_count_is_not_multiplied_by_a_stale_configured_margin(tmp_path, monkeypatch):
+    """The guidance for a model with no local vocabulary is to configure a
+    margin. When that deployment later mounts its model cache — the headline
+    feature — those models start counting exactly, and the configured number
+    becomes a second correction applied to a figure that needs none: every
+    budget inflated, and every trim over-aggressive by the same factor through
+    raw_usable.
+    """
+    from app.services import context_budget as cb
+
+    _write_tokenizer(tmp_path, "Fake--Exact", dict(_MINIMAL_VOCAB, truncation=None, padding=None))
+    cb._find_vocabulary.cache_clear()
+    cb._load_tokenizer.cache_clear()
+
+    cfg = {"tokenizer_cache_root": str(tmp_path), "token_safety_margin": 1.35}
+    assert cb.token_safety_margin("Fake/Exact", cfg) == 1.0, (
+        "a configured margin was applied on top of an exact count"
+    )
+
+
+def test_a_configured_margin_still_wins_for_an_estimated_model(tmp_path):
+    """The setting is not ignored — it is the whole point for models whose
+    count is an estimate."""
+    from app.services import context_budget as cb
+
+    cfg = {"tokenizer_cache_root": str(tmp_path), "token_safety_margin": 1.35}
+    assert cb.token_safety_margin("some/hosted-model", cfg) == 1.35
+
+
+def test_an_emptied_cache_root_turns_discovery_off(tmp_path, monkeypatch):
+    """`TOKENIZER_CACHE_ROOT=` is how an operator opts out. Collapsing "unset"
+    and "set to empty" made it fall through to the hardcoded /hf-cache and
+    quietly ignore them.
+    """
+    from app.services import context_budget as cb
+
+    _write_tokenizer(tmp_path, "Fake--Findable", dict(_MINIMAL_VOCAB, truncation=None, padding=None))
+    cb._find_vocabulary.cache_clear()
+    cb._load_tokenizer.cache_clear()
+    cb._settings_tokenizer_cache_root.cache_clear()
+
+    # The default root has to be findable for this to discriminate: otherwise
+    # an ignored opt-out and an honoured one both return None, for different
+    # reasons, and the test proves nothing.
+    monkeypatch.setattr(cb, "DEFAULT_TOKENIZER_CACHE_ROOT", str(tmp_path))
+
+    # Present when the root points at it...
+    assert cb.resolve_exact_tokenizer(
+        "Fake/Findable", {"tokenizer_cache_root": str(tmp_path)},
+    ) is not None
+
+    # ...and gone when the operator empties the root, rather than silently
+    # falling through to the default and loading it anyway.
+    assert cb.resolve_exact_tokenizer(
+        "Fake/Findable", {"tokenizer_cache_root": ""},
+    ) is None
+
+    monkeypatch.setattr(cb, "_settings_tokenizer_cache_root", lambda: "")
+    assert cb.resolve_exact_tokenizer("Fake/Findable", {}) is None
+
+
+def test_an_unreadable_settings_object_still_falls_back_to_the_default(tmp_path, monkeypatch):
+    """None means "no answer" and must not be mistaken for "no root"."""
+    from app.services import context_budget as cb
+
+    _write_tokenizer(tmp_path, "Fake--Defaulted", dict(_MINIMAL_VOCAB, truncation=None, padding=None))
+    cb._find_vocabulary.cache_clear()
+    cb._load_tokenizer.cache_clear()
+    monkeypatch.setattr(cb, "DEFAULT_TOKENIZER_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setattr(cb, "_settings_tokenizer_cache_root", lambda: None)
+
+    # Falls back to the default and finds it, rather than reading the failure
+    # as an operator opt-out.
+    assert cb.resolve_exact_tokenizer("Fake/Defaulted", {}) is not None

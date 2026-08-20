@@ -63,20 +63,25 @@ DEFAULT_TOKENIZER_CACHE_ROOT = "/hf-cache"
 
 
 @lru_cache(maxsize=1)
-def _settings_tokenizer_cache_root() -> str:
-    """The deployment-wide cache root, or "" when it cannot be read.
+def _settings_tokenizer_cache_root() -> str | None:
+    """The deployment-wide cache root, or None when settings cannot be read.
+
+    None means "no answer", not "no root". Settings already carries the default,
+    so an empty string here is an operator explicitly turning discovery off —
+    collapsing the two made ``TOKENIZER_CACHE_ROOT=`` fall through to the
+    hardcoded default and quietly ignore the opt-out.
 
     Cached because this is consulted on every token count. Deliberately
-    forgiving: a settings failure must degrade to the default, not take down
-    the budget planner and with it chat.
+    forgiving: a settings failure degrades to the default rather than taking
+    down the budget planner and with it chat.
     """
     try:
         from app.config import Settings
 
-        return Settings().tokenizer_cache_root or ""
+        return Settings().tokenizer_cache_root
     except Exception:  # pragma: no cover - defensive
         logger.debug("could not read tokenizer_cache_root from settings")
-        return ""
+        return None
 
 # Tokens a request costs beyond the text it carries.
 #
@@ -182,8 +187,12 @@ def _find_vocabulary(model_name: str, cache_root: str) -> Optional[str]:
 
     "Qwen/Qwen3-VL-8B-Instruct" lives at
     ``<root>/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/<rev>/``.
-    Newest snapshot wins, so a re-pulled model is picked up without config
-    changes.
+    Newest snapshot wins at the time of lookup.
+
+    Note the lookup is cached on ``(model_name, cache_root)``, and the loader on
+    the resolved path, so a model re-pulled while the process is running keeps
+    serving the snapshot found first. Picking up a new one needs a restart —
+    which is worth knowing before relying on "newest wins" operationally.
     """
     if not model_name or not cache_root:
         return None
@@ -220,11 +229,14 @@ def resolve_exact_tokenizer(model_name: str, model_config: Optional[dict] = None
     if explicit:
         return _load_tokenizer(str(explicit))
 
-    root = (
-        cfg.get("tokenizer_cache_root")
-        or _settings_tokenizer_cache_root()
-        or DEFAULT_TOKENIZER_CACHE_ROOT
-    )
+    root = cfg.get("tokenizer_cache_root")
+    if root is None:
+        settings_root = _settings_tokenizer_cache_root()
+        root = settings_root if settings_root is not None else DEFAULT_TOKENIZER_CACHE_ROOT
+    if not root:
+        # Explicitly emptied, at either level: discovery is off. Falling back to
+        # the default here is what made the opt-out unreachable.
+        return None
     path = _find_vocabulary(model_name or "", str(root))
     return _load_tokenizer(path) if path else None
 
@@ -268,18 +280,29 @@ def token_safety_margin(
     Returns 1.0 for OpenAI models, where the count is exact and inflating it
     would only trigger premature routing.
 
-    An explicit ``token_safety_margin`` on the model config wins for any model,
-    so a deployment can tune against its own measurements. A configured value
-    below 1.0 is refused — that re-creates the original bug by configuration,
-    leaving the planner optimistic in the direction that hard-fails.
+    An explicit ``token_safety_margin`` on the model config wins for any model
+    whose count is an *estimate*, so a deployment can tune against its own
+    measurements. A configured value below 1.0 is refused — that re-creates the
+    original bug by configuration, leaving the planner optimistic in the
+    direction that hard-fails.
+
+    Exactness beats a configured margin. The guidance for a model with no local
+    vocabulary is to set this value; when that deployment later mounts its model
+    cache, those models start counting exactly and the configured number becomes
+    a stale second correction applied on top of a figure that needs none —
+    inflating every budget, and making every trim over-aggressive by the same
+    factor through ``raw_usable``. ``stored_count_margin`` still honours the
+    configured value: it corrects a tiktoken figure taken at ingestion, which is
+    not the same question.
     """
+    # An exact count needs no correction. Inflating it would only route early.
+    if resolve_exact_tokenizer(model_name, model_config) is not None:
+        return 1.0
+
     configured = _configured_margin(model_name, model_config)
     if configured is not None:
         return configured
 
-    # An exact count needs no correction. Inflating it would only route early.
-    if resolve_exact_tokenizer(model_name, model_config) is not None:
-        return 1.0
     if _is_openai_model(model_name):
         return 1.0
     _warn_estimated_once(model_name or "<unnamed>")
