@@ -621,7 +621,14 @@ export const TRACK_ORDER: AudienceId[] = ['leadership', 'deploy', 'team', 'resea
 
 export function getTrack(id: string | undefined): Track | undefined {
   if (!id) return undefined
-  return (TRACKS as Record<string, Track>)[id]
+  // Index only the audiences we actually define. A bare lookup resolves
+  // inherited members too, so /docs/present/toString returned
+  // Object.prototype.toString — truthy, so the caller's `if (!track)` redirect
+  // was skipped, and dereferencing .id and .slides on a Function threw. That
+  // route is public and unauthenticated, so the failure is a blank screen for
+  // anyone who can reach the page.
+  if (!TRACK_ORDER.includes(id as AudienceId)) return undefined
+  return TRACKS[id as AudienceId]
 }
 
 // Dev-time completeness guard — catches an audience added without full content.
