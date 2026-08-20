@@ -161,6 +161,46 @@ def detect_artifact_kind(value) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def end_approval_wait(
+    workflow_result_id: PydanticObjectId,
+    *,
+    error: str = "",
+) -> None:
+    """Take a run's activity out of its approval wait, closing it if it ended.
+
+    ``_pause_for_approval`` stamps ``meta_summary.pending_review_uuid`` on the
+    ActivityEvent while a run waits on a reviewer, and the stale reaper skips
+    rows carrying it. So every path that ends the wait has to clear it — and a
+    rejected or expired review ends the *run*, which the activity never learned
+    about: it was left at "running" and only the reaper ever closed it. Passing
+    ``error`` closes the row too, so the rail agrees with the WorkflowResult.
+
+    Never raises: a review decision must not fail because a bookkeeping write
+    on the activity did.
+    """
+    from app.models.activity import ActivityEvent, ActivityStatus
+
+    update: dict = {"$unset": {"meta_summary.pending_review_uuid": ""}}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    set_ops: dict = {"last_updated_at": now}
+    if error:
+        set_ops.update({
+            "status": ActivityStatus.FAILED.value,
+            "finished_at": now,
+            "error": error,
+        })
+    update["$set"] = set_ops
+
+    try:
+        await ActivityEvent.get_motor_collection().update_one(
+            {"workflow_result": workflow_result_id}, update,
+        )
+    except Exception:
+        logger.exception(
+            "Could not end approval wait on activity for result %s", workflow_result_id,
+        )
+
+
 async def expire_overdue_approvals() -> dict:
     """Find pending approvals past their expires_at and apply timeout_action.
 
@@ -210,6 +250,10 @@ async def expire_overdue_approvals() -> dict:
                 result.status = "failed"
                 result.current_step_detail = "Auto-rejected: review deadline passed"
                 await result.save()
+            await end_approval_wait(
+                approval.workflow_result_id,
+                error="Auto-rejected: review deadline passed.",
+            )
             counts["rejected"] += 1
             await log_event(
                 action="workflow.approval_timeout_rejected",
@@ -258,9 +302,16 @@ async def expire_overdue_approvals() -> dict:
 
         elif action == TIMEOUT_NONE:
             # Just mark expired — workflow stays paused; humans must act.
+            # The activity, though, has to stop reading as in-flight: no one can
+            # decide an expired review, so the run is not going to move on its
+            # own and the rail would spin on it indefinitely.
             approval.status = STATUS_EXPIRED
             approval.expired_at = now
             await approval.save()
+            await end_approval_wait(
+                approval.workflow_result_id,
+                error="Review deadline passed with no decision — run is still paused.",
+            )
             counts["expired"] += 1
 
         else:

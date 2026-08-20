@@ -414,6 +414,25 @@ def _make_progress_updater(db, workflow_result_id):
     return update_progress
 
 
+def _clear_pause_marker(db, activity_id) -> None:
+    """Drop the ``meta_summary.pending_review_uuid`` marker from an activity.
+
+    Set by :func:`_pause_for_approval` while a run waits on a reviewer. Every
+    path that takes the run out of that wait — resume, reject, timeout — has to
+    clear it, or the row stays "awaiting approval" and the stale reaper keeps
+    skipping it forever.
+    """
+    import datetime as _dt
+
+    db.activity_event.update_one(
+        {"_id": activity_id},
+        {
+            "$unset": {"meta_summary.pending_review_uuid": ""},
+            "$set": {"last_updated_at": _dt.datetime.now(_dt.timezone.utc)},
+        },
+    )
+
+
 def _pause_for_approval(db, final_output, engine, workflow_id, workflow_result_id,
                         search_from=0, activity_id=None):
     """Persist the approval request and flip the run to ``pending_approval``.
@@ -530,7 +549,17 @@ def _pause_for_approval(db, final_output, engine, workflow_id, workflow_result_i
         try:
             db.activity_event.update_one(
                 {"_id": ObjectId(activity_id)},
-                {"$set": {"workflow_result": ObjectId(workflow_result_id)}},
+                {"$set": {
+                    "workflow_result": ObjectId(workflow_result_id),
+                    # Marks the run as parked on a human rather than stalled.
+                    # Three consumers read it: the activity rail and the run
+                    # history render "awaiting approval" with a link straight
+                    # to the review, and tasks.activity.reap_stale_running
+                    # skips the row instead of failing a run whose only crime
+                    # is that its reviewer has not looked yet.
+                    "meta_summary.pending_review_uuid": approval_uuid,
+                    "last_updated_at": datetime.now(timezone.utc),
+                }},
             )
         except Exception as e:
             logger.warning("Could not link activity %s to paused run: %s", activity_id, e)
@@ -1267,6 +1296,18 @@ def resume_workflow_after_approval(self, approval_uuid):
     _act = db.activity_event.find_one(
         {"workflow_result": ObjectId(workflow_result_id)}, {"_id": 1}
     )
+
+    # The run is moving again: drop the pause marker so the rail stops showing
+    # "awaiting approval" and the stale reaper starts covering this row again.
+    # Done before execute() rather than after, because a pass that fails or
+    # pauses on a second gate never reaches the finalize block below.
+    if _act:
+        try:
+            _clear_pause_marker(db, _act["_id"])
+        except Exception as e:
+            logger.warning(
+                "Could not clear pause marker on activity %s: %s", _act["_id"], e,
+            )
 
     try:
         from app.services.metering import metered

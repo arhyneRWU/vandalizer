@@ -22,7 +22,7 @@ from app.models.approval import (
 from app.models.document import SmartDocument
 from app.models.user import User
 from app.models.workflow import Workflow, WorkflowResult
-from app.services import access_control, audit_service
+from app.services import access_control, approval_service, audit_service
 
 router = APIRouter()
 
@@ -296,6 +296,16 @@ async def reject_review(
         result.status = "failed"
         result.current_step_detail = f"Rejected by reviewer: {body.comments}" if body.comments else "Rejected by reviewer"
         await result.save()
+
+    # The run is out of its approval wait and will not resume — close the
+    # activity so the rail shows a rejected run instead of one still spinning.
+    await approval_service.end_approval_wait(
+        approval.workflow_result_id,
+        error=(
+            f"Rejected by reviewer: {body.comments}" if body.comments
+            else "Rejected by reviewer."
+        ),
+    )
 
     await audit_service.log_event(
         action="workflow.reject",

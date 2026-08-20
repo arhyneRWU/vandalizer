@@ -230,6 +230,55 @@ class TestApproveWithEdit:
 
 
 # ---------------------------------------------------------------------------
+# Reject endpoint — activity bookkeeping
+# ---------------------------------------------------------------------------
+
+
+class TestRejectEndsApprovalWait:
+    """A rejected run is over, and the activity has to say so.
+
+    The rail skips stale-reaping rows that carry a pending-review marker, so a
+    reject that only touched the WorkflowResult would leave the activity
+    spinning at "running" with nothing left to ever close it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reject_closes_the_activity(self, client):
+        user = _make_user("reviewer1")
+        approval = _make_approval(assigned=("reviewer1",))
+        cookies, headers = _auth("reviewer1")
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "reviewer1", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.reviews.ApprovalRequest") as MockApproval, \
+             patch("app.routers.reviews.WorkflowResult") as MockResult, \
+             patch("app.routers.reviews.audit_service") as mock_audit, \
+             patch("app.routers.reviews._notify_owner", new_callable=AsyncMock), \
+             patch(
+                 "app.routers.reviews.approval_service.end_approval_wait",
+                 new_callable=AsyncMock,
+             ) as mock_end:
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockApproval.find_one = AsyncMock(return_value=approval)
+            MockResult.get = AsyncMock(return_value=None)
+            mock_audit.log_event = AsyncMock()
+
+            resp = await client.post(
+                f"/api/reviews/{approval.uuid}/reject",
+                json={"comments": "budget is wrong"},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert approval.status == "rejected"
+        mock_end.assert_awaited_once()
+        assert mock_end.await_args[0][0] == approval.workflow_result_id
+        # The reviewer's reason is what the rail shows on the closed row.
+        assert "budget is wrong" in mock_end.await_args[1]["error"]
+
+
+# ---------------------------------------------------------------------------
 # Assignee resolution (sync, used by Celery worker)
 # ---------------------------------------------------------------------------
 

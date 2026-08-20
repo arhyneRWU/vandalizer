@@ -1279,3 +1279,43 @@ class TestCancelIsAtomic:
         mock_celery.control.revoke.assert_not_called()
         query = coll.update_one.await_args.args[0]
         assert query["status"]["$nin"], "the update was not guarded on status"
+
+
+class TestCancelClearsTheReviewMarker:
+    @patch("app.services.workflow_service.celery_app")
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_cancelling_drops_the_pending_review_marker(
+        self, mock_wr_cls, mock_celery,
+    ):
+        """meta_summary.pending_review_uuid exempts a row from the stale reaper
+        and drives every "awaiting approval" affordance. Cancelling rewrites the
+        activity without touching meta_summary, so the marker outlived the run:
+        the row stayed reaper-exempt for good and kept offering a review for a
+        run that had stopped.
+        """
+        from app.models.activity import ActivityStatus
+        from app.services import workflow_service
+
+        result = _make_result("s1", "running")
+        result.celery_task_id = None
+        coll = MagicMock()
+        coll.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+        mock_wr_cls.get_motor_collection.return_value = coll
+
+        act = MagicMock()
+        act.is_running = True
+        act.meta_summary = {"pending_review_uuid": "rev-1", "kept": "yes"}
+        act.save = AsyncMock()
+
+        with patch("app.models.activity.ActivityEvent") as MockAct:
+            MockAct.find_one = AsyncMock(return_value=act)
+            await workflow_service._cancel_result(result)
+
+        assert act.status == ActivityStatus.CANCELED.value
+        assert "pending_review_uuid" not in act.meta_summary, (
+            "the marker survived cancellation, so the row stays reaper-exempt "
+            "and keeps offering a review"
+        )
+        # Only the marker is dropped; the rest of meta_summary is untouched.
+        assert act.meta_summary["kept"] == "yes"
+        act.save.assert_awaited_once()
