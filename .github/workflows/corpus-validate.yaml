@@ -1,0 +1,157 @@
+name: Corpus Validation
+
+on:
+  push:
+    branches: [main]
+    paths: ["benchmarks/corpus/**", ".github/workflows/corpus-validate.yaml"]
+  pull_request:
+    branches: [main]
+    paths: ["benchmarks/corpus/**", ".github/workflows/corpus-validate.yaml"]
+  # No paths filter here: GitHub ignores paths on release events. The
+  # tag-prefix guard on asset-validate does the scoping instead, and the
+  # tree-validate guard keeps release/dispatch events from running the
+  # tree checks redundantly.
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      asset_url_digital:
+        description: "URL of the digital tarball (pre-release verification)"
+        required: false
+      asset_url_scanned:
+        description: "URL of the scanned tarball (pre-release verification)"
+        required: false
+
+jobs:
+  tree-validate:
+    name: Corpus tree checks
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      # scan_person_names.py needs PyMuPDF, which lives in the backend
+      # environment; the two pypdf-only tools below run against an
+      # ephemeral env from the repository root instead.
+      - name: Install backend dependencies
+        run: make backend-install
+
+      - name: Structural key checks (no binaries)
+        run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_release.py --keys benchmarks/corpus/CSU-NSF-001
+
+      - name: Retired-identity denylist
+        run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_identity_safety.py benchmarks/corpus/CSU-NSF-001
+
+      # --baseline is the reviewed candidate set (invented place names, mostly).
+      # Without it the tool exits 1 on the standing candidates by design; with
+      # it, only a *new* name-shaped string fails the run.
+      - name: Structural person-name scan (in-tree files)
+        run: |
+          cd backend
+          uv run python ../benchmarks/corpus/CSU-NSF-001/tools/scan_person_names.py ../benchmarks/corpus/CSU-NSF-001 \
+            --baseline ../benchmarks/corpus/CSU-NSF-001/tools/name_scan_baseline_tree.json
+
+  asset-validate:
+    name: Corpus asset checks
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'corpus-v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install backend dependencies
+        run: make backend-install
+
+      - name: Download assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Never interpolate ${{ }} into the script body: the expression is
+          # substituted before bash parses the line, so a tag containing $( )
+          # would execute. Through env, it is only ever data.
+          TAG: ${{ github.event.release.tag_name }}
+          URL_DIGITAL: ${{ inputs.asset_url_digital }}
+          URL_SCANNED: ${{ inputs.asset_url_scanned }}
+        run: |
+          rm -rf /tmp/corpus-assets
+          mkdir -p /tmp/corpus-assets
+          if [ "${{ github.event_name }}" = "release" ]; then
+            gh release download "$TAG" --dir /tmp/corpus-assets --pattern 'CSU-NSF-001-*.tar.gz'
+          else
+            curl -fsSL "$URL_DIGITAL" -o /tmp/corpus-assets/CSU-NSF-001-v0.4.0-digital.tar.gz
+            curl -fsSL "$URL_SCANNED" -o /tmp/corpus-assets/CSU-NSF-001-v0.4.0-scanned.tar.gz
+          fi
+
+      - name: Verify sha256 against manifest (fails before anything is scanned)
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, pathlib, sys
+          assets_dir = pathlib.Path("/tmp/corpus-assets")
+          manifest = json.loads(pathlib.Path("benchmarks/corpus/CSU-NSF-001/manifest.json").read_text())
+          ok = True
+          for asset in manifest["release_assets"]["assets"]:
+              path = assets_dir / asset["name"]
+              if not path.exists():
+                  print(f"MISSING: {asset['name']}"); ok = False; continue
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              status = "OK" if digest == asset["sha256"] else f"MISMATCH (got {digest})"
+              print(f"{asset['name']}: {status}")
+              ok = ok and digest == asset["sha256"]
+          # The download pattern and the unpack glob are both wider than the
+          # manifest, so anything else attached to the release would be parsed
+          # unhashed. The manifest is the authority on what the release *is*.
+          expected = {asset["name"] for asset in manifest["release_assets"]["assets"]}
+          for extra in sorted(p.name for p in assets_dir.glob("*.tar.gz") if p.name not in expected):
+              print(f"UNEXPECTED (not listed in manifest release_assets): {extra}"); ok = False
+          sys.exit(0 if ok else 1)
+          EOF
+
+      # The scans walk this directory whole, so it must hold the release and
+      # nothing else: pdf/, source/, scanned/.
+      - name: Unpack
+        run: |
+          rm -rf /tmp/corpus-bin
+          mkdir -p /tmp/corpus-bin
+          for f in /tmp/corpus-assets/*.tar.gz; do tar -xzf "$f" -C /tmp/corpus-bin; done
+          ls -1 /tmp/corpus-bin
+
+      - name: Structural person-name scan (binaries)
+        run: |
+          cd backend
+          uv run python ../benchmarks/corpus/CSU-NSF-001/tools/scan_person_names.py /tmp/corpus-bin \
+            --baseline ../benchmarks/corpus/CSU-NSF-001/tools/name_scan_baseline_assets.json
+
+      - name: Zero residual text in scanned variants
+        run: cd backend && uv run python ../benchmarks/corpus/CSU-NSF-001/tools/check_scans.py --binaries /tmp/corpus-bin
+
+      - name: Full release validation (binaries)
+        run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_release.py --keys benchmarks/corpus/CSU-NSF-001 --binaries /tmp/corpus-bin
+
+      - name: Retired-identity denylist (binaries)
+        run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_identity_safety.py benchmarks/corpus/CSU-NSF-001 /tmp/corpus-bin
+
+      # --allow pins the one citation already adjudicated, so a *new* suspect
+      # is the only thing that fails the second pass.
+      - name: Answer-key citations verified against extracted text
+        run: |
+          cd backend
+          uv run python ../benchmarks/corpus/CSU-NSF-001/tools/validate_keys.py --keys ../benchmarks/corpus/CSU-NSF-001 --binaries /tmp/corpus-bin
+          uv run python ../benchmarks/corpus/CSU-NSF-001/tools/validate_keys2.py --keys ../benchmarks/corpus/CSU-NSF-001 --binaries /tmp/corpus-bin \
+            --allow Q021:04_Project_Description.pdf:11
+
+      - name: References listed vs cited
+        run: cd backend && uv run python ../benchmarks/corpus/CSU-NSF-001/tools/check_references.py --binaries /tmp/corpus-bin
