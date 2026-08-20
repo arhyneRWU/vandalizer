@@ -317,10 +317,12 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
     // render canvas + text layer ourselves, so pdf.sandbox is never loaded and
     // that path is unreachable.
     //
-    // Before adding an annotation layer, switching to `pdfjs-dist/web/pdf_viewer`,
-    // or wiring PDFScriptingManager: upgrade pdfjs-dist to >=6.2.108 first, and
-    // pass enableScripting: false explicitly. Uploaded PDFs are untrusted and
-    // are rendered in other team members' browsers, and no CSP is set.
+    // That CVE is remediated as of pdfjs-dist 6.2.108, which this project now
+    // pins at or above. The caution still stands for the layers above: before
+    // adding an annotation layer, switching to `pdfjs-dist/web/pdf_viewer`, or
+    // wiring PDFScriptingManager, pass enableScripting: false explicitly.
+    // Uploaded PDFs are untrusted and are rendered in other team members'
+    // browsers, and no CSP is set.
     const loadTask = pdfjsLib.getDocument({
       url: inlineUrl,
       withCredentials: true,
@@ -328,7 +330,10 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
     loadTask.promise
       .then((doc) => {
         if (cancelled) {
-          doc.destroy()
+          // pdfjs 6 removed PDFDocumentProxy.destroy(); tearing down the
+          // loading task disposes the document and its worker together, and
+          // the task is what we still hold here.
+          void loadTask.destroy()
           return
         }
         pdfDocRef.current = doc
@@ -340,11 +345,8 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
 
     return () => {
       cancelled = true
-      loadTask.destroy?.()
-      if (pdfDocRef.current) {
-        pdfDocRef.current.destroy()
-        pdfDocRef.current = null
-      }
+      pdfDocRef.current = null
+      void loadTask.destroy()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPdf, inlineUrl])
@@ -597,7 +599,13 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
             const termLower = term.toLowerCase().replace(/\s+/g, ' ').trim()
             if (!termLower || !fieldLower.includes(termLower)) continue
 
-            const [vx1, vy1, vx2, vy2] = viewport.convertToViewportRectangle(a.rect)
+            // pdfjs 6 dropped convertToViewportRectangle; it transformed the
+            // two corners, which is what convertToViewportPoint does one at a
+            // time. The min/abs below already normalise the result, so the
+            // corner order does not matter.
+            const [rx1, ry1, rx2, ry2] = a.rect
+            const [vx1, vy1] = viewport.convertToViewportPoint(rx1, ry1)
+            const [vx2, vy2] = viewport.convertToViewportPoint(rx2, ry2)
             const left = Math.min(vx1, vx2)
             const top = Math.min(vy1, vy2)
             const width = Math.abs(vx2 - vx1)
