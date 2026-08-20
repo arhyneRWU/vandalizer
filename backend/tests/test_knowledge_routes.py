@@ -2326,6 +2326,39 @@ class TestTestQueryBulkDelete:
         assert calls == [{"knowledge_base_uuid": "kb-uuid-1", "uuid": {"$in": ["q-1", "q-2"]}}]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [None, "not json", "[]", '"x"'])
+    async def test_bulk_delete_malformed_body_is_a_client_error(self, client, body):
+        """A body that is empty, not JSON, or JSON that is not an object used
+        to raise inside the handler and surface as a 500 — reading it with
+        ``request.json()`` throws, and ``.get`` throws again on a JSON array.
+        """
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                content=body,
+                headers={**headers, "Content-Type": "application/json"},
+                cookies=cookies,
+            )
+
+        assert resp.status_code < 500, (
+            f"malformed body {body!r} produced {resp.status_code}"
+        )
+        assert resp.status_code in (400, 422)
+
+    @pytest.mark.asyncio
     async def test_bulk_delete_rejects_empty_selection(self, client):
         user = _make_user()
         cookies, headers = _auth()

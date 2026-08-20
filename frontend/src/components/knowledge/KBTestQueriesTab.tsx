@@ -29,6 +29,17 @@ export type DraftShape = {
   notes: string
 }
 
+// Mirrors _TEST_QUERY_BULK_DELETE_MAX in backend/app/routers/knowledge.py.
+export const BULK_DELETE_BATCH = 2000
+
+/** Split ids into request-sized batches, so a selection larger than the
+ * server's cap deletes instead of being rejected whole. */
+export function chunkForBulkDelete(uuids: string[], size = BULK_DELETE_BATCH): string[][] {
+  const batches: string[][] = []
+  for (let i = 0; i < uuids.length; i += size) batches.push(uuids.slice(i, i + size))
+  return batches
+}
+
 export const EMPTY_DRAFT: DraftShape = {
   query: '',
   expected_answer: '',
@@ -138,6 +149,12 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
     })
   }
 
+  // Writing rows into a slice the current filter hides reads as a silent
+  // failure — generation has no success toast, so the only sign it worked is
+  // a counter ticking up in the filter bar, which invites a re-run and a
+  // duplicate batch. Any operation that adds rows returns the list to 'all'.
+  const revealNewRows = () => setFilter('all')
+
   const handleAdd = async () => {
     if (!draft.query.trim()) return
     setAdding(true)
@@ -152,6 +169,7 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
       })
       setDraft(EMPTY_DRAFT)
       setShowAdd(false)
+      revealNewRows()
       await onChange()
     } finally {
       setAdding(false)
@@ -200,14 +218,22 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
       title: `Delete ${uuids.length} test ${uuids.length === 1 ? 'query' : 'queries'}`,
       message:
         `Delete ${uuids.length} selected test ${uuids.length === 1 ? 'query' : 'queries'}? ` +
-        'This cannot be undone. Past validation runs keep their own copy of the ' +
-        'questions they scored.',
+        'This cannot be undone. Past runs keep the scores and answers they ' +
+        'recorded, but a validation run re-exported afterwards will have a ' +
+        'blank expected answer for any question deleted here.',
       destructive: true,
     })
     if (!ok) return
     setBulkDeleting(true)
     try {
-      const { deleted } = await bulkDeleteKBTestQueries(kbUuid, uuids)
+      // The endpoint caps a batch, and "hundreds, imported repeatedly" is the
+      // population this feature exists for — one generation run from crossing
+      // it. Sending the lot would 400 the whole thing and delete nothing,
+      // leaving unchecking rows by hand as the only way forward.
+      let deleted = 0
+      for (const batch of chunkForBulkDelete(uuids)) {
+        deleted += (await bulkDeleteKBTestQueries(kbUuid, batch)).deleted
+      }
       setSelected(new Set())
       setEditingUuid(null)
       await onChange()
@@ -226,6 +252,7 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
       // Runs on a background worker and polls for completion — the inline LLM
       // call could exceed the proxy's gateway timeout and 502 on larger KBs.
       await generateKBTestQueriesAndWait(kbUuid, { coverage })
+      revealNewRows()
       await onChange()
     } catch (e) {
       toast(`Generation failed: ${(e as Error).message}`, 'error')
@@ -480,7 +507,7 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
       {showImport && (
         <ImportTestQueriesModal
           kbUuid={kbUuid}
-          onImported={onChange}
+          onImported={async () => { revealNewRows(); await onChange() }}
           onClose={() => setShowImport(false)}
         />
       )}
