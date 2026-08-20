@@ -645,9 +645,23 @@ async def _cancel_result(result) -> None:
     """
     # Set the terminal state first so the UI reflects the stop immediately and
     # the engine's cooperative check (if it happens to be between steps) bails.
+    #
+    # An atomic, guarded update rather than result.save(): Beanie's save() emits
+    # a $set over every field of the in-memory copy, and over a batch the caller
+    # loops serially with a DB write, a Celery call and an activity write per
+    # run. A run that completes inside that window would be written back from
+    # the pre-completion snapshot — discarding the final_output the user already
+    # paid for — and a run that reached an approval gate would have its
+    # approval_request_id reset to None, orphaning the ApprovalRequest. The
+    # guard also means a run that finished a moment ago is left alone.
+    updated = await WorkflowResult.get_motor_collection().update_one(
+        {"_id": result.id, "status": {"$nin": list(_TERMINAL_STATUSES)}},
+        {"$set": {"status": "canceled", "error": "Canceled by user"}},
+    )
+    if updated.matched_count == 0:
+        return
     result.status = "canceled"
     result.error = "Canceled by user"
-    await result.save()
 
     # Interrupt the worker. revoke(terminate=True) kills the prefork child
     # running this task id; if the task is still queued it is dropped before it
@@ -734,6 +748,12 @@ async def run_workflow_batch(
         doc_title = doc.title if doc else doc_uuid
 
         session_id = str(uuid_mod.uuid4())[:8]
+        # Generate the task id up front and persist it, exactly as run_workflow
+        # does. Without it _cancel_result has nothing to revoke, and revocation
+        # is the *only* thing that interrupts a step already in flight — the
+        # engine's cooperative check runs between steps, so a one-step batch
+        # run past that point would finish its LLM call regardless of STOP.
+        celery_task_id = str(uuid_mod.uuid4())
 
         result = WorkflowResult(
             workflow=wf.id,
@@ -743,6 +763,7 @@ async def run_workflow_batch(
             batch_id=batch_id,
             document_title=doc_title,
             model=model,
+            celery_task_id=celery_task_id,
         )
         await result.insert()
 
@@ -758,6 +779,7 @@ async def run_workflow_batch(
                 "activity_id": activity_id,
             },
             queue="workflows",
+            task_id=celery_task_id,
         )
 
     return batch_id
@@ -856,13 +878,53 @@ async def cancel_batch(
         return None
 
     canceled = 0
+    canceled_ids = []
     for r in results:
         if r.status in _TERMINAL_STATUSES:
             continue
         await _cancel_result(r)
+        canceled_ids.append(r.id)
         canceled += 1
 
+    await _expire_approvals_for(canceled_ids)
+
     return {"batch_id": batch_id, "status": "canceled", "canceled": canceled}
+
+
+async def _expire_approvals_for(workflow_result_ids: list) -> None:
+    """Close any approval still pending on a run we just canceled.
+
+    ``pending_approval`` is not a terminal status, so a run parked at a gate is
+    canceled along with the rest of the batch — but its ApprovalRequest stayed
+    pending in the reviewer's inbox. Approving it fired
+    ``tasks.workflow.resume_after_approval``, which restarted a run the user had
+    explicitly stopped, spending tokens hours after the fact. (The resume task
+    now refuses a canceled run as well; this stops the review being offered at
+    all, which is the part the reviewer sees.)
+
+    Best-effort: a stopped batch must not fail because of the inbox.
+    """
+    if not workflow_result_ids:
+        return
+    try:
+        from app.models.approval import STATUS_EXPIRED, STATUS_PENDING, ApprovalRequest
+
+        await ApprovalRequest.get_motor_collection().update_many(
+            {
+                "workflow_result_id": {"$in": workflow_result_ids},
+                "status": STATUS_PENDING,
+            },
+            {"$set": {
+                "status": STATUS_EXPIRED,
+                "expired_at": datetime.datetime.now(datetime.timezone.utc),
+                "reviewer_comments": "Run canceled by user",
+            }},
+        )
+    except Exception:
+        logger.warning(
+            "Failed to expire approvals for canceled runs %s",
+            workflow_result_ids, exc_info=True,
+        )
 
 
 async def test_step(task_name: str, task_data: dict, document_uuids: list[str], user_id: str, model: str | None = None) -> str:
