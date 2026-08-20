@@ -27,6 +27,8 @@ jobs:
     name: Corpus tree checks
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -43,6 +45,9 @@ jobs:
       # ephemeral env from the repository root instead.
       - name: Install backend dependencies
         run: make backend-install
+
+      - name: Citation-scorer unit tests
+        run: cd backend && uv run --with pytest pytest ../benchmarks/corpus/CSU-NSF-001/tools/test_citation_accuracy.py -q
 
       - name: Structural key checks (no binaries)
         run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_release.py --keys benchmarks/corpus/CSU-NSF-001
@@ -63,6 +68,8 @@ jobs:
     name: Corpus asset checks
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'corpus-v'))
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
 

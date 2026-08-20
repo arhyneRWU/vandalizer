@@ -21,8 +21,9 @@ proposals search engines index.
 `.github/workflows/corpus-validate.yaml` runs two jobs:
 
 - **tree-validate** (every PR/push touching `benchmarks/corpus/**`):
-  structural key checks, the retired-identity denylist, and a structural
-  person-name scan over every in-tree file.
+  structural key checks, the retired-identity denylist, a structural
+  person-name scan over every file in the corpus's own directory, and the
+  citation-scorer unit tests.
 - **asset-validate** (on publishing a `corpus-v*` release, or manually via
   workflow_dispatch): downloads the assets, verifies each sha256 against the
   manifest — a mismatch fails before anything is scanned — then runs the
@@ -30,6 +31,10 @@ proposals search engines index.
   scanned variants carry zero residual text, and re-verifies every answer-key
   citation against the extracted text using the product's own extraction
   helpers.
+
+Both jobs are wired to CSU-NSF-001 by path: a second corpus added here needs
+its own steps in `.github/workflows/corpus-validate.yaml` before anything
+validates it.
 
 The person-name scan is the load-bearing check: the denylist can only catch
 names already known to be wrong, while the structural scan finds every
@@ -48,12 +53,17 @@ directory holding the documents, the keys, and a bundled copy of the validators
 in the tree the keys and the documents live in different places.
 
 Set `KEYS=benchmarks/corpus/CSU-NSF-001`, and `BIN` to the directory the release
-tarballs were unpacked into (holding `pdf/`, `source/`, `scanned/`).
+tarballs were unpacked into (holding `pdf/`, `source/`, `scanned/`). `BIN` must
+be an **absolute** path: the examples below `cd backend` partway through, so a
+relative `BIN` would resolve against the wrong directory.
 
 Two of the eight need only pypdf and python-docx, so they run from the
-repository root against an ephemeral environment. The other six need PyMuPDF,
-and `validate_keys.py` additionally imports the product's own extraction
-helpers, so all six run from `backend/` against its environment.
+repository root against an ephemeral environment. Five need PyMuPDF —
+`scan_person_names.py`, `check_references.py`, `check_scans.py`,
+`validate_keys.py`, and `validate_keys2.py` — and `validate_keys.py`
+additionally imports the product's own extraction helpers, so all five run from
+`backend/` against its environment. The eighth, `citation_accuracy.py`, imports
+only the standard library and runs anywhere.
 
 Keys only — everything a pull request can check without the assets:
 
@@ -85,7 +95,7 @@ uv run python ../$KEYS/tools/validate_keys2.py --keys ../$KEYS --binaries $BIN \
 Scoring a harness run — `raw.json` is a list of `{"id": ..., "got": ...}` rows:
 
 ```bash
-cd backend && uv run python ../$KEYS/tools/citation_accuracy.py --keys ../$KEYS raw.json
+python $KEYS/tools/citation_accuracy.py --keys $KEYS raw.json
 ```
 
 Every tool exits non-zero on failure. Three carry a reviewed exception set, so

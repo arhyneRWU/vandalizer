@@ -25,7 +25,7 @@ No natural-person name may represent a synthetic investigator, administrator, ne
 
 ## Release validation
 
-From the package root, run `python tools/validate_identity_safety.py .` and `python tools/validate_release.py .`. The first command checks identity policy across Word, PDF, Excel, JSON, CSV, and Markdown files. The second checks question-key parity, source-page bounds, fixed PDF pagination, the complete 24-reference citation set, manifest inputs, and the authoritative budget total. It also checks the `corroborating_sources` entries: every question carries the field, each listed document exists, each page is within that document's page range, and no corroborating page duplicates one already in the question's canonical `sources`.
+From the package root, run `python tools/validate_identity_safety.py .` and `python tools/validate_release.py .`. The first command checks identity policy across Word, PDF, Excel, JSON, CSV, and Markdown files. The second checks question-key parity, source-page bounds, fixed PDF pagination, the complete 24-reference citation set, manifest inputs, and the authoritative budget total. It also checks the `corroborating_sources` entries against six rules: every question carries the field; each listed document exists in the package; each listed page is an integer within that document's page range; no entry duplicates a document-and-page pair already in the question's canonical `sources`; an unanswerable question's list is empty; and a workbook entry carries no page number. (In this repository the validators take explicit paths — see the directory README one level up, *Running the validators*.)
 
 ## What changed in v0.3.2
 

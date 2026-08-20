@@ -25,6 +25,8 @@ from docx import Document
 from pypdf import PdfReader
 
 
+# The natural-person names earlier corpus versions used for synthetic roles,
+# retired in v0.3.3; the denylist has to spell them out in order to test for them.
 LEGACY_NAMES = [
     "Elena Maris", "David Okafor", "Priya Nolen", "Samuel Reed", "Andrew Rhyne",
     "Sedgemoor", "Obuya", "Vasquez-Osei", "Bellweather", "Okonkwo-Hale", "Ryland",
