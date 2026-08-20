@@ -6,7 +6,9 @@ telling the rail, the run history, and the stale reaper that this run is parked
 on a person. Every path out of the wait has to clear it.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from types import SimpleNamespace
 
 import pytest
 from bson import ObjectId
@@ -121,6 +123,63 @@ class TestEndApprovalWait:
         assert update["$set"]["status"] == "failed"
         assert update["$set"]["error"] == "Rejected by reviewer."
         assert "finished_at" in update["$set"]
+
+    @pytest.mark.asyncio
+    async def test_it_targets_the_review_rather_than_the_run(self):
+        """A batch shares one ActivityEvent across every document, and
+        _pause_for_approval overwrites `workflow_result` on each pause. So
+        matching on the run found the row only for whichever document paused
+        last, and missed entirely for the others — leaving the marker behind,
+        and with it a row the reaper will never touch.
+        """
+        from app.services import approval_service
+
+        coll = MagicMock()
+        coll.update_one = _AsyncNoop()
+        with patch("app.models.activity.ActivityEvent.get_motor_collection", return_value=coll), \
+             patch("app.models.workflow.WorkflowResult.get", new=AsyncMock(return_value=None)):
+            await approval_service.end_approval_wait(ObjectId(), approval_uuid="rev-7")
+
+        query = coll.update_one.calls[0][0][0]
+        assert query == {"meta_summary.pending_review_uuid": "rev-7"}
+
+    @pytest.mark.asyncio
+    async def test_one_document_rejection_does_not_fail_the_whole_batch(self):
+        """The shared row represents the batch. Closing it because one document
+        was rejected would report every other document as failed while they are
+        still running."""
+        from app.services import approval_service
+
+        coll = MagicMock()
+        coll.update_one = _AsyncNoop()
+        batch_run = SimpleNamespace(batch_id="b-1")
+        with patch("app.models.activity.ActivityEvent.get_motor_collection", return_value=coll), \
+             patch("app.models.workflow.WorkflowResult.get", new=AsyncMock(return_value=batch_run)):
+            await approval_service.end_approval_wait(
+                ObjectId(), approval_uuid="rev-7", error="Rejected by reviewer.",
+            )
+
+        update = coll.update_one.calls[0][0][1]
+        # The wait ends...
+        assert update["$unset"] == {"meta_summary.pending_review_uuid": ""}
+        # ...but the row stays open for the documents still running.
+        assert "status" not in update["$set"]
+
+    @pytest.mark.asyncio
+    async def test_a_single_run_rejection_still_closes_its_row(self):
+        from app.services import approval_service
+
+        coll = MagicMock()
+        coll.update_one = _AsyncNoop()
+        single_run = SimpleNamespace(batch_id=None)
+        with patch("app.models.activity.ActivityEvent.get_motor_collection", return_value=coll), \
+             patch("app.models.workflow.WorkflowResult.get", new=AsyncMock(return_value=single_run)):
+            await approval_service.end_approval_wait(
+                ObjectId(), approval_uuid="rev-7", error="Rejected by reviewer.",
+            )
+
+        update = coll.update_one.calls[0][0][1]
+        assert update["$set"]["status"] == "failed"
 
     @pytest.mark.asyncio
     async def test_never_raises(self):
