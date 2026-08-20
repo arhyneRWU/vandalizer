@@ -511,6 +511,38 @@ class TestKnowledgeBaseAccess:
             user_org_ancestry=["org-b"],
         ) is False
 
+    def test_none_ancestry_bypasses_org_scope(self):
+        # None follows the get_user_org_ancestry contract: bypass filtering
+        # (admins/examiners, or a deployment with no orgs configured). A
+        # catalog item they can see must also be viewable/adoptable.
+        user = _make_user("examiner1", is_examiner=True)
+        kb = _make_knowledge_base(
+            user_id="owner1",
+            verified=True,
+            organization_ids=["org-a"],
+        )
+        access = _team_access()
+        assert can_view_knowledge_base(
+            kb, user, access, user_org_ancestry=None,
+        ) is True
+        assert can_manage_knowledge_base(
+            kb, user, access, user_org_ancestry=None,
+        ) is True
+
+    def test_empty_ancestry_still_denies_org_scoped_kb(self):
+        # [] means "org-less user in an org-enabled deployment" — org-scoped
+        # items stay hidden, unlike the None bypass.
+        user = _make_user("viewer")
+        kb = _make_knowledge_base(
+            user_id="owner1",
+            verified=True,
+            organization_ids=["org-a"],
+        )
+        access = _team_access()
+        assert can_view_knowledge_base(
+            kb, user, access, user_org_ancestry=[],
+        ) is False
+
     def test_team_admin_can_manage_shared_kb(self):
         user = _make_user("team-admin")
         kb = _make_knowledge_base(

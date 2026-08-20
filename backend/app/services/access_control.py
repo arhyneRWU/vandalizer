@@ -62,8 +62,11 @@ def _org_scope_allows(
 ) -> bool:
     if not organization_ids:
         return True
+    # None follows the get_user_org_ancestry contract: bypass org filtering
+    # (admins/examiners, or a deployment with no orgs configured). An org-less
+    # user in an org-enabled deployment gets [] and is denied.
     if user_org_ancestry is None:
-        return False
+        return True
     return bool(set(organization_ids) & set(user_org_ancestry))
 
 
@@ -719,12 +722,13 @@ async def get_authorized_knowledge_base(
         return None
 
     access = team_access or await get_team_access_context(user)
+    ancestry = await _load_user_org_ancestry(user, user_org_ancestry, kb.organization_ids)
     allowed = (
         can_manage_knowledge_base(
             kb,
             user,
             access,
-            user_org_ancestry=user_org_ancestry,
+            user_org_ancestry=ancestry,
             allow_admin=allow_admin,
         )
         if manage
@@ -732,7 +736,7 @@ async def get_authorized_knowledge_base(
             kb,
             user,
             access,
-            user_org_ancestry=user_org_ancestry,
+            user_org_ancestry=ancestry,
             allow_admin=allow_admin,
         )
     )

@@ -863,6 +863,19 @@ async def update_item_metadata(
         )
         await meta.insert()
 
+    # Org scoping is enforced on the KnowledgeBase document itself
+    # (can_view_knowledge_base) while the catalog filters on this metadata.
+    # Mirror the scope onto the KB so "visible in the catalog" and
+    # "adoptable" can't diverge.
+    if item_kind == "knowledge_base" and organization_ids is not None:
+        try:
+            kb = await KnowledgeBase.get(PydanticObjectId(item_id))
+        except Exception:
+            kb = None
+        if kb and kb.organization_ids != organization_ids:
+            kb.organization_ids = organization_ids
+            await kb.save()
+
     return {
         "id": str(meta.id),
         "item_kind": meta.item_kind,
@@ -1441,6 +1454,26 @@ async def sync_verified_kb_tags(kb: KnowledgeBase) -> None:
         if item.tags != new_tags:
             item.tags = new_tags
             await item.save()
+
+
+async def sync_verified_kb_org_scope(kb: KnowledgeBase) -> None:
+    """Push the KB's org scoping onto its catalog metadata, if any.
+
+    Called after a user edits organization_ids on a verified KB so the Explore
+    catalog's visibility filter (VerifiedItemMetadata.organization_ids) stays
+    in step with the access check (KnowledgeBase.organization_ids). No-op for
+    unverified KBs or KBs with no catalog metadata row.
+    """
+    if not kb.verified:
+        return
+    meta = await VerifiedItemMetadata.find_one(
+        VerifiedItemMetadata.item_kind == "knowledge_base",
+        VerifiedItemMetadata.item_id == str(kb.id),
+    )
+    new_org_ids = list(kb.organization_ids or [])
+    if meta and meta.organization_ids != new_org_ids:
+        meta.organization_ids = new_org_ids
+        await meta.save()
 
 
 async def _mark_item_verified(item_id: PydanticObjectId, item_kind: str) -> None:

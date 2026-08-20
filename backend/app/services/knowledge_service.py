@@ -507,8 +507,10 @@ async def update_knowledge_base(
         kb.description = description[:5000] or None
     if shared_with_team is not None:
         kb.shared_with_team = shared_with_team
-    if organization_ids is not None:
+    org_scope_changed = False
+    if organization_ids is not None and organization_ids != list(kb.organization_ids or []):
         kb.organization_ids = organization_ids
+        org_scope_changed = True
     tags_changed = False
     if tags is not None:
         normalized = _normalize_tags(tags)
@@ -523,6 +525,9 @@ async def update_knowledge_base(
     if tags_changed and kb.verified:
         from app.services.verification_service import sync_verified_kb_tags
         await sync_verified_kb_tags(kb)
+    if org_scope_changed and kb.verified:
+        from app.services.verification_service import sync_verified_kb_org_scope
+        await sync_verified_kb_org_scope(kb)
 
     return kb
 
