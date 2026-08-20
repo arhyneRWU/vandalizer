@@ -369,10 +369,12 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         else:
             raw_text = extract_text_from_file(str(absolute_path), extension)
 
-        # Count tokens using the same tokenizer the budget planner uses so the
-        # pre-flight oversize check is accurate.
-        from app.services.context_budget import count_tokens
-        token_count = count_tokens(raw_text) if raw_text else 0
+        # Stored raw, on purpose. The safety margin that makes a count safe to
+        # budget against depends on the model doing the reading, which is not
+        # known here and is not fixed for the life of the document — so
+        # find_oversize_documents applies it per-model at comparison time.
+        from app.services.context_budget import count_raw_tokens
+        token_count = count_raw_tokens(raw_text) if raw_text else 0
 
         from app.utils.extraction_quality import nonletter_ratio
         extraction_ratio = nonletter_ratio(raw_text) if raw_text else None

@@ -382,6 +382,19 @@ export function deleteKBTestQuery(uuid: string, queryUuid: string) {
   })
 }
 
+/**
+ * Delete several test queries in one request. Ids that no longer exist (or
+ * belong to another KB) are skipped server-side, so a stale list still
+ * removes what it can; the response reports how many were actually deleted.
+ */
+export function bulkDeleteKBTestQueries(uuid: string, queryUuids: string[]) {
+  return apiFetch<{ deleted: number }>(`/api/knowledge/${uuid}/test-queries/bulk-delete`, {
+    method: 'POST',
+    body: JSON.stringify({ query_uuids: queryUuids }),
+  })
+}
+
+
 export type KBTestQueryImportResult = {
   created: number
   updated: number

@@ -72,8 +72,14 @@ export interface OversizeDocument {
 
 export interface Citation {
   document_id?: string | null
+  /** SmartDocument uuid behind this source, when one exists and is still
+   *  readable. Absent for URL-backed sources and deleted documents — those
+   *  stay preview-only because there is nothing to open. */
+  document_uuid?: string | null
   document_title: string
   page?: number | null
+  /** Page was interpolated from OCR text, not measured. See #603. */
+  page_approximate?: boolean
   sheet?: string | null
   chunk_id?: string | null
   score?: number | null

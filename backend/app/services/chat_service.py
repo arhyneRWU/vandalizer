@@ -35,6 +35,7 @@ from app.services.model_routing import (
     choose_document_model,
     suggest_document_model,
 )
+from app.services.page_locator import locator_for_meta
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -173,6 +174,50 @@ def annotate_pages(text: str, markers: list[dict] | None) -> str:
     return "".join(out)
 
 
+def page_note_for(markers: list[dict] | None, *, annotated: bool) -> str:
+    """The instruction that tells the model how to cite pages in this document.
+
+    Returns "" when the document got no page markers — promising citations the
+    model has no way to make is worse than saying nothing (non-PDF formats, or
+    PDFs ingested before page markers existed).
+
+    The two notes are deliberately parallel in force. An earlier version made
+    the measured-page note conditional ("cite when you quote or reference a
+    specific passage") while the interpolated one was a directive, so the
+    document whose page numbers were *trustworthy* carried the weaker
+    instruction. Measured against a live 30B: the scanned document was cited,
+    the digital one on one question in three.
+
+    The interpolated note rules out asserting exactness by name. Telling a
+    model to hedge left room for it to hedge *and* claim a passage was
+    "explicitly stated" on a page, which is what it did — five times out of
+    five at temperature 0, on a document whose page markers are 100%
+    interpolated.
+    """
+    if not annotated or not _has_page_markers(markers):
+        return ""
+    if _has_approximate_pages(markers):
+        # Boundaries were interpolated from character offsets, so an
+        # exact-sounding citation is invented precision.
+        return (
+            "\n_`[p. ~N]` marks the *estimated* start of page N — this document "
+            "was scanned, so page positions are approximate. Always give pages "
+            "as approximate, e.g. \"around p. 4\". Never state a page as exact "
+            "and never say a passage is \"explicitly\" or \"clearly\" on a given "
+            "page._\n"
+        )
+    return (
+        "\n_`[p. N]` marks the start of page N. Cite the page for every fact you "
+        "take from this document, e.g. \"p. 3\"._\n"
+    )
+
+
+def _has_page_markers(markers: list[dict] | None) -> bool:
+    return any(
+        isinstance(m, dict) and m.get("kind") == "page" for m in (markers or [])
+    )
+
+
 def _has_approximate_pages(markers: list[dict] | None) -> bool:
     """True when any usable page marker came from interpolation, not measurement."""
     return any(
@@ -201,24 +246,7 @@ def build_document_segments(
         if doc.raw_text:
             markers = getattr(doc, "text_markers", None)
             body = annotate_pages(doc.raw_text, markers)
-            # Only explain the markers when the document actually got some —
-            # otherwise the note would promise page citations the model has no
-            # way to make (non-PDF formats, or PDFs ingested before #603).
-            if body == doc.raw_text:
-                page_note = ""
-            elif _has_approximate_pages(markers):
-                # Scanned/OCR'd document: boundaries are interpolated, so an
-                # exact-sounding citation would be invented precision.
-                page_note = (
-                    "\n_`[p. ~N]` marks the approximate start of page N — this "
-                    "document was scanned, so page positions are estimated. Cite "
-                    "pages as approximate, e.g. \"around p. 4\"._\n"
-                )
-            else:
-                page_note = (
-                    "\n_`[p. N]` marks the start of page N. Cite the page when you "
-                    "quote or reference a specific passage._\n"
-                )
+            page_note = page_note_for(markers, annotated=body != doc.raw_text)
             segments.append(DocumentSegment(
                 label=f"doc:{doc.title or doc.uuid}",
                 text=f"\n\n## Document: {doc.title}\n{page_note}{body}",
@@ -540,7 +568,7 @@ async def chat_stream(
         try:
             kb_segment, kb_sources = await _build_kb_segment(
                 kb_uuid, message, model_name, manifest=kb_manifest,
-                history=previous_messages,
+                history=previous_messages, user_id=user_id,
             )
             if kb_segment:
                 doc_segments.insert(0, kb_segment)
@@ -583,6 +611,10 @@ async def chat_stream(
     # Measured before any trimming: both routing and the dialog's suggestion
     # ask "could another model have held what the user actually sent?", and the
     # post-compaction total cannot answer that — it always fits by definition.
+    # `model_config` carries this model's token safety margin, so the estimate
+    # is an upper bound rather than an optimistic one. Routing decides off this
+    # number: an estimate that reads low makes the router see headroom that is
+    # not there and decline to move a request that does not fit.
     requested_input_tokens = estimate_input_tokens(
         model_name=model_name,
         system_prompt=system_prompt or "",
@@ -590,6 +622,7 @@ async def chat_stream(
         history=previous_messages,
         documents=doc_segments,
         attachments=attachment_segments,
+        model_config=model_config,
     )
 
     routing = RoutingDecision(model_name, False, "")
@@ -1181,6 +1214,7 @@ async def _build_kb_segment(
     model_name: str,
     manifest: Optional[list[dict]] = None,
     history: Optional[list[ModelMessage]] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[Optional[DocumentSegment], list[dict]]:
     """Retrieve KB context for one chat turn.
 
@@ -1271,6 +1305,29 @@ async def _build_kb_segment(
         return None, []
 
     kb_sources: list[dict] = []
+    snippet_blocks: list[str] = []
+    any_approximate = False
+    for r in kb_results:
+        meta = r.get("metadata") or {}
+        src = meta.get("source_name", "Unknown")
+        page = meta.get("page")
+        sheet = meta.get("sheet")
+        approximate = bool(meta.get("page_approximate"))
+        locator = locator_for_meta(meta)
+        label = f"{src} ({locator})" if locator else src
+        any_approximate = any_approximate or approximate
+        snippet_blocks.append(f"\n**Source: {label}**\n{r['content']}\n")
+        kb_sources.append({
+            "document_id": meta.get("source_id"),
+            "document_title": src,
+            "page": page if isinstance(page, int) else None,
+            "page_approximate": approximate,
+            "sheet": sheet if isinstance(sheet, str) else None,
+            "chunk_id": r.get("chunk_id"),
+            "score": r.get("score"),
+            "similarity": r.get("similarity"),
+            "content_preview": (r.get("content") or "")[:240],
+        })
     kb_text = (
         "\n\n## Retrieved Knowledge Base Snippets\n"
         "_The following are partial excerpts from a larger corpus, ranked "
@@ -1278,27 +1335,38 @@ async def _build_kb_segment(
         "off-topic, or miss the best answer. Cite by filename only when a "
         "snippet actually supports your claim._\n"
     )
-    for r in kb_results:
-        meta = r.get("metadata") or {}
-        src = meta.get("source_name", "Unknown")
-        page = meta.get("page")
-        sheet = meta.get("sheet")
-        label = src
-        if isinstance(page, int):
-            label = f"{src} (p. {page})"
-        elif isinstance(sheet, str) and sheet:
-            label = f"{src} ({sheet})"
-        kb_text += f"\n**Source: {label}**\n{r['content']}\n"
-        kb_sources.append({
-            "document_id": meta.get("source_id"),
-            "document_title": src,
-            "page": page if isinstance(page, int) else None,
-            "sheet": sheet if isinstance(sheet, str) else None,
-            "chunk_id": r.get("chunk_id"),
-            "score": r.get("score"),
-            "similarity": r.get("similarity"),
-            "content_preview": (r.get("content") or "")[:240],
-        })
+    if any_approximate:
+        # A tilde the model has not had explained to it does not survive: it
+        # gets normalised away and the estimate is restated as fact. Measured
+        # five times out of five at temperature 0 on a fully interpolated
+        # document, which is why page_note_for rules out exactness by name for
+        # document chat. The same labels reach the model here.
+        kb_text += (
+            "_A page written as `p. ~N` is an *estimate* — that source was "
+            "scanned, so page positions were interpolated rather than read. "
+            "Give such pages as approximate, e.g. \"around p. 4\". Never state "
+            "one as exact and never say a passage is \"explicitly\" or "
+            "\"clearly\" on it._\n"
+        )
+    kb_text += "".join(snippet_blocks)
+
+    # Attach the openable SmartDocument behind each cited source, so the UI can
+    # offer "open the document at the cited page" and not just a text preview —
+    # the page numbers are a retrieval heuristic, so verifying them in the
+    # document itself is exactly what a reader needs to do. URL sources,
+    # deleted documents, and documents this reader cannot view resolve to
+    # nothing and stay preview-only.
+    from app.services.knowledge_service import resolve_openable_documents
+
+    openable = await resolve_openable_documents(
+        [s["document_id"] for s in kb_sources if s.get("document_id")],
+        user_id=user_id,
+    )
+    for src_dict in kb_sources:
+        doc_uuid = openable.get(src_dict.get("document_id") or "")
+        if doc_uuid:
+            src_dict["document_uuid"] = doc_uuid
+
     return DocumentSegment(label="kb", text=kb_text), kb_sources
 
 

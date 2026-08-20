@@ -6,7 +6,7 @@ Document chat puts whole documents in the prompt. When they don't fit,
 `plan_and_compact_context` trims the middle out and the model answers from
 what's left — correctly, confidently, and from part of the document.
 
-Measured on a real 79-page NOAA grant proposal:
+Measured on a real 79-page grant proposal:
 
 ```
 annotated size : 41,213 tokens

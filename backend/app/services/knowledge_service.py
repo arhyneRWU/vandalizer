@@ -387,6 +387,63 @@ async def resolve_document_titles(sources) -> dict[str, str]:
     return {d.uuid: d.title for d in docs if d.title}
 
 
+async def resolve_openable_documents(
+    source_uuids: list[str], user_id: str | None = None
+) -> dict[str, str]:
+    """Map KB source uuid -> SmartDocument uuid for sources a user can open.
+
+    Only document-backed sources whose SmartDocument still exists (and isn't
+    soft-deleted) are returned, so callers can offer an "open the document"
+    affordance without ever pointing at a document that 404s. URL sources and
+    orphaned rows are simply absent from the mapping.
+
+    ``user_id`` is the person who will click the affordance, and it matters:
+    membership is checked when a document is *added* to a KB, against the
+    adder. A KB shared with a team (or a verified one) can therefore hold
+    sources pointing at another member's personal-space documents, which
+    ``can_view_document`` denies to everyone but their owner. Offering "open"
+    on one of those yields a 404 from the download endpoint — a dead button,
+    since the reader can already see the chunk preview either way. Documents
+    the caller cannot view are dropped here so the affordance is never shown.
+
+    Omitting ``user_id`` skips the check and is only correct where no reader is
+    in scope.
+
+    Like title resolution, this is a display nicety — a lookup failure must
+    never break the caller.
+    """
+    ids = [u for u in dict.fromkeys(source_uuids) if u]
+    if not ids:
+        return {}
+    try:
+        sources = await KnowledgeBaseSource.find({"uuid": {"$in": ids}}).to_list()
+        by_doc: dict[str, list[str]] = {}
+        for s in sources:
+            if s.source_type == "document" and s.document_uuid:
+                by_doc.setdefault(s.document_uuid, []).append(s.uuid)
+        if not by_doc:
+            return {}
+        docs = await SmartDocument.find(
+            {"uuid": {"$in": list(by_doc)}, "soft_deleted": {"$ne": True}}
+        ).to_list()
+        if user_id:
+            user = await User.find_one(User.user_id == user_id)
+            if user is None:
+                return {}
+            team_access = await access_control.get_team_access_context(user)
+            docs = [
+                d for d in docs
+                if access_control.can_view_document(d, user, team_access)
+            ]
+    except Exception:
+        return {}
+    return {
+        source_uuid: d.uuid
+        for d in docs
+        for source_uuid in by_doc.get(d.uuid, [])
+    }
+
+
 async def get_kb_manifest(kb_uuid: str, limit: int = 60) -> list[dict]:
     """Compact listing of a KB's sources for chat prompt injection and
     named-document retrieval targeting.

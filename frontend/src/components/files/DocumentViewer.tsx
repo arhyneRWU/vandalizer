@@ -442,6 +442,15 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
       setTotalHighlights(0)
       setCurrentHighlight(0)
       setHighlightMiss(false)
+      // No passage to search for, but a caller can still know the page — a
+      // citation whose preview text is empty, say. Honour it rather than
+      // silently leaving the reader on page 1; there is no "miss" to report
+      // because no search was attempted.
+      if (preferPage != null) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => scrollToPage(preferPage))
+        })
+      }
       return
     }
 
