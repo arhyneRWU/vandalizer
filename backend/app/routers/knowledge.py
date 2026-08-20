@@ -910,10 +910,11 @@ async def export_kb_validation_run(
     """Download the per-query results of a KB validation run so evaluators can
     analyze, document, and compare runs outside Vandalizer.
 
-    One row per test query: question, expected answer (re-joined from the
-    current test queries — the snapshot doesn't store it), actual and baseline
-    answers, judge score/verdict/reasoning, retrieved sources, and run-level
-    metadata (judge model, mode, catalog version, run date).
+    One row per test query: question, expected answer (recorded on the run, so
+    it survives the live test query being deleted; older runs fall back to
+    re-joining the current set), actual and baseline answers, judge
+    score/verdict/reasoning, retrieved sources, and run-level metadata (judge
+    model, mode, catalog version, run date).
 
     ``run_uuid`` may be ``latest`` to export the most recent full validation
     run. ``format`` is ``csv`` (default), ``xlsx``, or ``json``. Uses the same
