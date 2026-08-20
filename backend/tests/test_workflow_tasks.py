@@ -125,6 +125,58 @@ class TestExecuteWorkflowTask:
         db.workflow.update_one.assert_called_once()
 
     @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_completion_does_not_overwrite_a_cancelled_run(
+        self, mock_build, mock_get_db,
+    ):
+        """Cancellation flips the row out-of-band and revokes the worker, but a
+        step already in flight can finish before the revoke lands. Writing
+        "completed" unconditionally undid the user's stop, so a batch they
+        halted reported success — and on a batch that was the *only* thing
+        stopping it, since batch runs carried no task id to revoke.
+        """
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "test"}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_get_db.return_value = db
+
+        mock_engine = MagicMock()
+        mock_engine.execute.return_value = ("Final output", [{"name": "Doc", "output": ["uuid1"]}])
+        mock_engine.usage = MagicMock(tokens_in=100, tokens_out=50)
+        mock_build.return_value = mock_engine
+
+        with patch("app.tasks.quality_tasks.auto_validate_workflow"), \
+             patch("app.tasks.activity_tasks.generate_activity_description_task"):
+            execute_workflow_task(
+                workflow_result_id=str(result_id),
+                workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["uuid1"]},
+                model="gpt-4o",
+            )
+
+        completed = [
+            c for c in db.workflow_result.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("status") == "completed"
+        ]
+        assert completed, "no completion write was issued at all"
+        for call in completed:
+            assert call[0][0].get("status") == {"$ne": "canceled"}, (
+                "the completion write was not guarded, so it would resurrect a "
+                "run the user stopped"
+            )
+
+    @patch("app.tasks.workflow_tasks._get_db")
     def test_missing_workflow_raises(self, mock_get_db):
         from app.tasks.workflow_tasks import execute_workflow_task
 

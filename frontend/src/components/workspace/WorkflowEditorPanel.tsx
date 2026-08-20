@@ -1104,9 +1104,10 @@ export function WorkflowEditorPanel() {
             No input required — runs directly
           </div>
         )}
-        {runner.running && !runner.batchId ? (
-          // Single run in progress — offer an active STOP (red, matches the
-          // app's destructive-action convention; same geometry as RUN).
+        {runner.running && (runner.batchId || runner.sessionId) ? (
+          // Run in progress (single or batch) — offer an active STOP (red,
+          // matches the app's destructive-action convention; same geometry as
+          // RUN). For a batch this cancels every per-document run.
           <button
             onClick={runner.stop}
             disabled={runner.cancelling}
@@ -1136,13 +1137,7 @@ export function WorkflowEditorPanel() {
           <button
             onClick={handleRun}
             disabled={runner.running || missingInput || !hasSteps}
-            title={
-              !hasSteps
-                ? 'Add at least one step before running this workflow'
-                : runner.running && runner.batchId
-                  ? 'Stop is not yet available for batch runs'
-                  : undefined
-            }
+            title={!hasSteps ? 'Add at least one step before running this workflow' : undefined}
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
@@ -5356,7 +5351,7 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
 }) {
   const isCompleted = batchStatus.status === 'completed'
   const isError = batchStatus.status === 'failed'
-  const isDone = isCompleted || isError
+  const isCanceled = batchStatus.status === 'canceled'
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
 
   const renderOutput = (data: unknown): string => {
@@ -5374,12 +5369,12 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
     <div style={{
       backgroundColor: '#fff', borderRadius: 'var(--ui-radius, 8px)',
       boxShadow: '0 6px 18px rgba(0,0,0,0.05)', padding: 20,
-      border: isDone
-        ? (isError ? '2px solid #fca5a5' : '2px solid #86efac')
+      border: isError ? '2px solid #fca5a5'
+        : isCompleted ? '2px solid #86efac'
         : '2px solid #e5e7eb',
     }}>
       <div style={{ fontWeight: 600, fontSize: 14, color: '#202124', marginBottom: 8 }}>
-        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : 'Batch Output'}
+        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : isCanceled ? 'Batch Stopped' : 'Batch Output'}
       </div>
 
       {/* Progress summary */}
