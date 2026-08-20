@@ -136,6 +136,11 @@ interface UIStateContextValue {
   viewDocumentRequest: ViewDocumentRequest | null
   viewDocument: (uuid: string, title: string, highlight?: ViewDocumentRequest['highlight']) => void
   clearViewDocumentRequest: () => void
+  // The document the file viewer currently holds (null when it is showing the
+  // browser instead). Panels that link into the viewer read this to tell
+  // "open it" from "it is already open" — see the chat citation menu.
+  openDocumentUuid: string | null
+  setOpenDocumentUuid: (uuid: string | null) => void
 }
 
 const UIStateContext = createContext<UIStateContextValue | null>(null)
@@ -286,6 +291,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeProjectTeamId, setActiveProjectTeamId] = useState<string | null>(null)
   const [activeProjectRole, setActiveProjectRole] = useState<string | null>(null)
   const [viewDocumentRequest, setViewDocumentRequest] = useState<ViewDocumentRequest | null>(null)
+  const [openDocumentUuid, setOpenDocumentUuid] = useState<string | null>(null)
   const pendingExtractionResultsRef = useRef<PendingExtractionResults | null>(null)
   const pendingWorkflowSessionRef = useRef<string | null>(null)
   const [workflowOpenSignal, setWorkflowOpenSignal] = useState(0)
@@ -697,6 +703,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     highlightTerms, highlightPage, setHighlightTerms,
     activitySignal, bumpActivitySignal,
     viewDocumentRequest, viewDocument, clearViewDocumentRequest,
+    openDocumentUuid, setOpenDocumentUuid,
   }), [
     selectedDocUuids, selectedDocNames, selectedFolderUuids,
     railDocked, toggleRailDocked,
@@ -704,6 +711,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     highlightTerms, highlightPage, setHighlightTerms,
     activitySignal, bumpActivitySignal,
     viewDocumentRequest, viewDocument, clearViewDocumentRequest,
+    openDocumentUuid,
   ])
 
   return (

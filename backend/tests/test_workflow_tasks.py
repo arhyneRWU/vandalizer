@@ -1334,7 +1334,12 @@ class TestPreflightContextOverflow:
         return _mock_db(
             workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
             result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
-            sys_config={"available_models": [{"name": "qwen3", "context_window": 65_536}]},
+            # Margin pinned to 1.0 so this fixture measures the pre-flight
+            # wiring rather than the stored-count divergence allowance, which
+            # is covered directly in test_context_budget.py.
+            sys_config={"available_models": [
+                {"name": "qwen3", "context_window": 65_536, "token_safety_margin": 1.0},
+            ]},
             step_docs=[{"_id": step_id, "name": "Assess", "data": {}, "tasks": [task_id]}],
             task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "assess"}}],
             smart_docs=[
