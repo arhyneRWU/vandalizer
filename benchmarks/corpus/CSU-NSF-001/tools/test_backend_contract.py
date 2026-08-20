@@ -61,7 +61,7 @@ class TestNormalizeWithMap:
         assert text[index_map[-1]] == "d"
 
     def test_a_normalized_hit_projects_back_onto_the_original_text(self):
-        text = "Header\n\nTOTAL   requested:  $1,169,898.51"
+        text = "Header\n\nTOTAL   requested:  $1,184,398.51"
         normalized, index_map = normalize_with_map(text)
 
         position = normalized.find("total requested")

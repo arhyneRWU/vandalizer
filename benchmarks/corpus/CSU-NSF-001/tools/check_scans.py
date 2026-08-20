@@ -3,8 +3,8 @@
 The scanned set exists to exercise OCR. If a rasterization left a text layer
 behind, the pipeline reads it directly and the OCR measurement is a fiction —
 which is invisible in the results, because the answers get *better*. So the
-gate is zero extracted characters, plus the shape of the set: eleven documents
-and thirty-six pages at every degradation level.
+gate is zero extracted characters, plus the shape of the set: sixteen documents
+and forty-two pages at every degradation level.
 
 Run: cd backend && uv run python \\
        ../benchmarks/corpus/CSU-NSF-001/tools/check_scans.py --binaries DIR
@@ -16,8 +16,8 @@ from pathlib import Path
 import pymupdf
 
 LEVELS = ("light", "medium", "heavy")
-EXPECTED_PDFS = 11
-EXPECTED_PAGES = 36
+EXPECTED_PDFS = 16
+EXPECTED_PAGES = 42
 
 
 def main() -> int:

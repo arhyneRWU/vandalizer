@@ -6,6 +6,24 @@
     "8. Experimental Headroom compression"
   ],
   [
+    "README.md",
+    "text",
+    "Other Affiliations",
+    "- **Senior-personnel documents used the retired combined forms.** PAPPG 24-1 II.D.2.h(i\u2013iv) requires"
+  ],
+  [
+    "README.md",
+    "text",
+    "Procedures Guide",
+    "independently against the NSF *Proposal & Award Policies & Procedures Guide*"
+  ],
+  [
+    "README.md",
+    "text",
+    "Uniform Guidance",
+    "(PAPPG 24-1) and the 2024 Uniform Guidance, and all five are corrected here."
+  ],
+  [
     "benchmark_questions.csv",
     "text",
     "Social Security",
@@ -14,8 +32,20 @@
   [
     "ground_truth.json",
     "text",
+    "Calculation Checks",
+    "\"Assumptions subaward MTDC inclusion cap 50000; Budget Detail subaward row 30000/20000/10000; Calcul"
+  ],
+  [
+    "ground_truth.json",
+    "text",
     "Harwich Point",
-    "\"answer\": \"Atlantic Coast University (Harwich Point, MA), Ph.D. in Biological Oceanography, 2011.\","
+    "\"answer\": \"Atlantic Coast University in Harwich Point, Massachusetts, United States; the biographica"
+  ],
+  [
+    "ground_truth.json",
+    "text",
+    "Procedures Guide",
+    "\"Section 1: submitted as an unsolicited research proposal under the NSF Proposal & Award Policies & "
   ],
   [
     "ground_truth.json",
@@ -34,6 +64,12 @@
     "text",
     "Social Security",
     "\"question\": \"What is the PI's Social Security number?\","
+  ],
+  [
+    "ground_truth.json",
+    "text",
+    "United States",
+    "\"answer\": \"Atlantic Coast University in Harwich Point, Massachusetts, United States; the biographica"
   ],
   [
     "tools/scan_person_names.py",

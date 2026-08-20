@@ -1,9 +1,10 @@
 {
   "case_id": "CSU-NSF-001",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "created": "2026-08-10",
   "synthetic": true,
   "changelog": {
+    "0.5.0": "Sponsor-policy modernization release, from an external audit of v0.4.0 verified against the current authorities. Five findings corrected. (1) 2 CFR 200.1 (89 FR 30046, effective for rate proposals submitted on or after October 1, 2024): the MTDC subaward inclusion is the first $50,000 of each subaward regardless of the period of performance, not the retired $25,000. The rate agreement, budget policy, budget justification, and budget workbook now apply it, so MTDC exclusions fall from $182,636.20 to $157,636.20, the MTDC base rises from $624,849.57 to $649,849.57, F&A at 58% rises from $362,412.75 to $376,912.75, and the total amount requested rises from $1,169,898.51 to $1,184,398.51 (authoritative 1,184,398.51428). (2) PAPPG 24-1 II.D.2.i(i): the postdoc-only mentoring plan is replaced by one one-page Mentoring Plan covering the postdoctoral scholar and the graduate research assistant. (3) PAPPG 24-1 II.D.2.g: Facilities, Equipment and Other Resources carries no quantifiable financial information — the $2.4 million and $62,000 figures are gone, and the institutional capital and internal seed-award figures move to a new internal CSU Research Infrastructure Summary. (4) PAPPG 24-1 II.D.2.h(i–iv): senior personnel now carry four separate documents each — per-person Biographical Sketch, Current and Pending (Other) Support with no 'recently completed' category, per-person Synergistic Activities, and a COA workbook. (5) 2 CFR 200 Appendix III §C.7: the rate agreement's Section III.D states competitive-segment rate applicability instead of a provisional successor rate. Also: the proposal is now framed as unsolicited under PAPPG 24-1, the Budget Justification's Cost Sharing statement is aligned with that framing (it now reads that because the proposal is unsolicited no program solicitation imposes mandatory cost sharing, replacing the v0.4.0 'required by the solicitation'), and §3 of the Project Description is retitled 'Preliminary Studies'. Questions keep their IDs and count (30); Q021 is rewritten for the combined mentoring-plan requirement, and every answer, source pin, and corroborating pin is re-derived against the v0.5.0 renders. Published v0.3.3 model-benchmark tables predate this recomputation and are not comparable on the budget questions.",
     "0.4.0": "Citation-scoring fairness release: added corroborating_sources to every question \u2014 pages that also state the decisive fact but are outside the minimal canonical sources set \u2014 so automated citation scoring accepts a true citation to a corroborating page instead of punishing it (the failure mode measured in ui-insight/vandalizer#628, where all five of one model's apparent citation failures were correct citations to unlisted pages). Questions, answers, and the existing sources lists are unchanged, so v0.3.3 benchmark results remain valid. Shipped README now states the synthetic-degradation, context-limit, and shared-GPU-latency caveats.",
     "0.3.3": "Identity-safety release: replaced every synthetic natural-person identity with a stable non-person role identifier; converted fictional biosketch publications to explicit synthetic product records without authors, journals, DOIs, volumes, or pages; removed personal workbook metadata; synchronized Q023 and Q030 across both key files; retained verified real references and genuine figure credits.",
     "0.3.2": "Citation-validation clarification: changed the Section 5.2 assay-method citation from the inclusive range [13-15] to the explicit list [13,14,15]. This makes the Hatfield et al. reference visible to literal-token validators without changing scientific content, reference numbering, pagination, questions, answers, or ground-truth page mappings. Regenerated the Project Description and References Cited PDFs from their Word sources.",
@@ -21,10 +22,17 @@
     "06_Data_Management_Plan.pdf",
     "07_References_Cited.pdf",
     "08_Facilities_Equipment_Resources.pdf",
-    "09_Postdoc_Mentoring_Plan.pdf",
-    "10_Biographical_Sketches.pdf",
-    "11_Current_Pending_Support.pdf",
-    "CSU_NSF_001_Budget.xlsx"
+    "09_Mentoring_Plan.pdf",
+    "10_Biographical_Sketch_PI.pdf",
+    "11_Biographical_Sketch_CoPI.pdf",
+    "12_Current_Pending_PI.pdf",
+    "13_Current_Pending_CoPI.pdf",
+    "14_Synergistic_Activities_PI.pdf",
+    "15_Synergistic_Activities_CoPI.pdf",
+    "16_CSU_Research_Infrastructure_Summary.pdf",
+    "CSU_NSF_001_Budget.xlsx",
+    "COA_PI.xlsx",
+    "COA_CoPI.xlsx"
   ],
   "withheld_ground_truth_files": [
     "ground_truth.json",
@@ -40,15 +48,23 @@
     "06_Data_Management_Plan.docx",
     "07_References_Cited.docx",
     "08_Facilities_Equipment_Resources.docx",
-    "09_Postdoc_Mentoring_Plan.docx",
-    "10_Biographical_Sketches.docx",
-    "11_Current_Pending_Support.docx"
+    "09_Mentoring_Plan.docx",
+    "10_Biographical_Sketch_PI.docx",
+    "11_Biographical_Sketch_CoPI.docx",
+    "12_Current_Pending_PI.docx",
+    "13_Current_Pending_CoPI.docx",
+    "14_Synergistic_Activities_PI.docx",
+    "15_Synergistic_Activities_CoPI.docx",
+    "16_CSU_Research_Infrastructure_Summary.docx",
+    "CSU_NSF_001_Budget.xlsx",
+    "COA_PI.xlsx",
+    "COA_CoPI.xlsx"
   ],
   "release_assets": {
-    "tag": "corpus-v0.4.0",
+    "tag": "corpus-v0.5.0",
     "assets": [
-      {"name": "CSU-NSF-001-v0.4.0-digital.tar.gz", "contents": ["pdf/", "source/"], "sha256": "9ca1ff316c73bc02f84e431c54a845b962854bd05c9c14be121592e90a67efd1"},
-      {"name": "CSU-NSF-001-v0.4.0-scanned.tar.gz", "contents": ["scanned/light/", "scanned/medium/", "scanned/heavy/"], "sha256": "d79133654c70b3f75849d98f0d94e248651e0deb9adad7e723923eb9041dd767"}
+      {"name": "CSU-NSF-001-v0.5.0-digital.tar.gz", "contents": ["pdf/", "source/"], "sha256": "7ad666cdc104c5b294e6861aed45d035344f3817749a0a326e5869399018296a"},
+      {"name": "CSU-NSF-001-v0.5.0-scanned.tar.gz", "contents": ["scanned/light/", "scanned/medium/", "scanned/heavy/"], "sha256": "a75141c60cfe3e0bd7fb33056d29c30d1b7b68e528c1116f1b656abb032dbc21"}
     ]
   },
   "identity_safety": {

@@ -23,13 +23,36 @@ Run: cd backend && uv run python \\
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-# benchmarks/corpus/CSU-NSF-001/tools/validate_keys.py -> repo root is four up.
-REPO = Path(__file__).resolve().parents[4]
-assert (REPO / "backend").is_dir(), f"backend/ not found under {REPO}"
+
+def repo_root() -> Path:
+    """The Vandalizer checkout whose extraction helpers this pass borrows.
+
+    In the tree this file sits four directories under the repository root. The
+    corpus also keeps a copy of these tools beside the documents, outside any
+    checkout, and the two copies are kept identical on purpose — so the search
+    walks up first, then falls back to `VANDALIZER_REPO` and to the default
+    clone location, rather than hard-coding one person's home directory.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "backend" / "app" / "services").is_dir():
+            return parent
+    candidates = [Path(os.environ["VANDALIZER_REPO"])] if os.environ.get("VANDALIZER_REPO") else []
+    candidates.append(Path.home() / "vandalizer")
+    for candidate in candidates:
+        if (candidate / "backend" / "app" / "services").is_dir():
+            return candidate
+    raise SystemExit(
+        "cannot find the vandalizer checkout: this pass imports the product's own "
+        "extraction helpers, so point VANDALIZER_REPO at the repository root"
+    )
+
+
+REPO = repo_root()
 sys.path.insert(0, str(REPO / "backend"))
 
 import app.services.document_readers as dr  # noqa: E402
@@ -62,15 +85,17 @@ KNOWN_UNVERIFIABLE = frozenset({
     ("Q015", "02_CSU_Synthetic_Budget_Policy.pdf"),
     ("Q015", "05_Budget_Justification.pdf"),
     ("Q019", "02_CSU_Synthetic_Budget_Policy.pdf"),
+    ("Q019", "04_Project_Description.pdf"),
     ("Q019", "05_Budget_Justification.pdf"),
     ("Q021", "04_Project_Description.pdf"),
     ("Q021", "05_Budget_Justification.pdf"),
-    ("Q021", "09_Postdoc_Mentoring_Plan.pdf"),
+    ("Q021", "09_Mentoring_Plan.pdf"),
     ("Q022", "08_Facilities_Equipment_Resources.pdf"),
     ("Q024", "04_Project_Description.pdf"),
-    ("Q024", "11_Current_Pending_Support.pdf"),
+    ("Q024", "12_Current_Pending_PI.pdf"),
+    ("Q024", "13_Current_Pending_CoPI.pdf"),
     ("Q025", "05_Budget_Justification.pdf"),
-    ("Q025", "11_Current_Pending_Support.pdf"),
+    ("Q025", "12_Current_Pending_PI.pdf"),
     ("Q027", "04_Project_Description.pdf"),
     ("Q027", "08_Facilities_Equipment_Resources.pdf"),
 })

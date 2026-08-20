@@ -30,6 +30,7 @@ import fnmatch
 import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -134,19 +135,97 @@ def pdf_pages(path):
             yield number, page.get_text()
 
 
+def table_lines(table):
+    """Every cell of a table, including the cells of tables nested inside it.
+
+    `_Cell.text` joins the cell's own paragraphs and stops there, so a table
+    laid out inside a table cell — the person-months grid in the Current and
+    Pending documents is one — contributes nothing unless the walk recurses.
+    A name in a nested cell is exactly the shape this scanner exists to catch,
+    and it was invisible until this recursion existed.
+    """
+    for row in table.rows:
+        for cell in row.cells:
+            yield cell.text
+            for nested in cell.tables:
+                yield from table_lines(nested)
+
+
 def docx_lines(path):
     doc = Document(path)
     for paragraph in doc.paragraphs:
         yield paragraph.text
     for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                yield cell.text
+        yield from table_lines(table)
     for section in doc.sections:
         for paragraph in section.header.paragraphs:
             yield paragraph.text
         for paragraph in section.footer.paragraphs:
             yield paragraph.text
+
+
+def _element_text(element):
+    """The concatenated `<t>` runs under an element, at any depth."""
+    return "".join(node.text or "" for node in element.iterfind(".//{*}t"))
+
+
+def _sheet_names(archive):
+    """Worksheet part name -> the sheet name a reader sees, best effort."""
+    names = {}
+    try:
+        rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        target_for = {rel.get("Id"): rel.get("Target") or ""
+                      for rel in rels.iterfind("{*}Relationship")}
+        book = ET.fromstring(archive.read("xl/workbook.xml"))
+        rid = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        for sheet in book.iterfind("{*}sheets/{*}sheet"):
+            target = target_for.get(sheet.get(rid), "").lstrip("/")
+            part = target if target.startswith("xl/") else f"xl/{target}"
+            names[part] = sheet.get("name") or part
+    except (KeyError, ET.ParseError):
+        pass
+    return names
+
+
+def xlsx_cells(path):
+    """Every cell's text in a workbook, as (sheet, text).
+
+    Read with `zipfile` rather than openpyxl deliberately: this tool already
+    ships alongside the corpus and is run from wherever it was unpacked, so it
+    stays on the standard library plus the two readers it cannot do without.
+    A workbook is a zip of XML — a cell holds an index into the shared-string
+    table, an inline string, or a literal value, and a formula's text can hide
+    a name as easily as a label can.
+
+    Until this existed the `.xlsx` branch yielded no lines at all, which made
+    the scanner blind to the one file type whose *cells* hold person-shaped
+    rows: the COA workbooks.
+    """
+    with zipfile.ZipFile(path) as archive:
+        members = set(archive.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in members:
+            table = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = [_element_text(item) for item in table.iterfind("{*}si")]
+        sheet_names = _sheet_names(archive)
+        for part in sorted(name for name in members
+                           if name.startswith("xl/worksheets/") and name.endswith(".xml")):
+            sheet = sheet_names.get(part, Path(part).stem)
+            root = ET.fromstring(archive.read(part))
+            for cell in root.iterfind(".//{*}c"):
+                kind = cell.get("t")
+                if kind == "s":
+                    value = cell.findtext("{*}v")
+                    index = int(value) if value and value.isdigit() else None
+                    text = shared[index] if index is not None and index < len(shared) else ""
+                elif kind == "inlineStr":
+                    text = _element_text(cell)
+                else:
+                    text = cell.findtext("{*}v") or ""
+                formula = cell.findtext("{*}f") or ""
+                for chunk in (text, formula):
+                    if chunk.strip():
+                        yield sheet, chunk
 
 
 def office_metadata(path):
@@ -221,7 +300,7 @@ def collect(package: Path, show_permitted: bool):
             lines = (("body", line) for line in docx_lines(path))
             meta = office_metadata(path)
         elif suffix == ".xlsx":
-            lines = iter(())
+            lines = ((sheet, text) for sheet, text in xlsx_cells(path))
             meta = office_metadata(path)
         else:
             # Keys, prose and tooling. `where` deliberately does not carry a

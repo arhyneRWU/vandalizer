@@ -43,6 +43,11 @@ import re
 from pathlib import Path
 
 # Titles as the model tends to write them, mapped to the filename stem.
+#
+# v0.5.0 split the two combined personnel documents per person, so three of
+# these titles now name two documents apiece. The generic alias resolves to the
+# PI's file and the Co-PI's is reached by the longer alias below it — see
+# `doc_for()` for how a longer alias starting at the same place wins.
 ALIASES = {
     "fa rate agreement": "01", "rate agreement": "01", "f&a rate": "01",
     "budget policy": "02", "csu-rsp-204": "02",
@@ -52,9 +57,16 @@ ALIASES = {
     "data management": "06",
     "references cited": "07",
     "facilities": "08", "equipment": "08",
-    "postdoc": "09", "mentoring plan": "09",
+    "postdoc": "09", "mentoring plan": "09", "mentoring": "09",
     "biographical": "10", "biosketch": "10",
-    "current and pending": "11", "current & pending": "11",
+    "biographical sketch (co-pi)": "11", "biosketch (co-pi)": "11",
+    "co-pi biosketch": "11", "co-pi biographical": "11",
+    "current and pending": "12", "current & pending": "12", "c&p": "12",
+    "current and pending (co-pi)": "13", "current & pending (co-pi)": "13",
+    "co-pi current and pending": "13",
+    "synergistic": "14", "synergistic activities (co-pi)": "15",
+    "co-pi synergistic": "15",
+    "infrastructure summary": "16", "research infrastructure": "16",
 }
 
 CITE = re.compile(r"(?:\bp\.?\s*|\bpage\s+)(\d{1,3})\b", re.I)
@@ -69,16 +81,24 @@ def doc_for(context: str) -> str | None:
     earliest mention mis-attributes every citation after the first.
     """
     lowered = context.lower()
-    best, best_pos = None, -1
+    # Compared by where each mention *ends*, not where it starts. Titles now
+    # overlap: "the Co-PI biosketch" contains "biosketch", which starts later
+    # and names a different document, and by start position the generic title
+    # would win every time. On a tie the longer alias wins, which is how
+    # "current and pending (co-pi)" beats the "current and pending" inside it.
+    best, best_end, best_len = None, -1, 0
     # The extension is optional: self-identifying page markers carry the stem
     # alone (`[05_Budget_Justification p. 2]`) and models copy that form.
     for hit in re.finditer(r"(\d{2})_[a-z][a-z_]*(?:\.pdf)?", lowered):
-        if hit.start() > best_pos:
-            best, best_pos = hit.group(1), hit.start()
+        if hit.end() > best_end:
+            best, best_end, best_len = hit.group(1), hit.end(), len(hit.group(0))
     for alias, stem in ALIASES.items():
         pos = lowered.rfind(alias)
-        if pos > best_pos:
-            best, best_pos = stem, pos
+        if pos < 0:
+            continue
+        end = pos + len(alias)
+        if end > best_end or (end == best_end and len(alias) > best_len):
+            best, best_end, best_len = stem, end, len(alias)
     return best
 
 

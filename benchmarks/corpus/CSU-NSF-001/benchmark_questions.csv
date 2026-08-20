@@ -19,7 +19,7 @@ Q017,hard,unanswerable,What is the PI's Social Security number?,False
 Q018,hard,unanswerable,Which specific model of imaging flow cytometer will be purchased?,False
 Q019,hard,negative_evidence,Does the proposal include committed cost sharing?,True
 Q020,hard,multi_step_calculation,Show how the total request is calculated from direct costs and F&A.,True
-Q021,medium,cross_document_reasoning,Does the proposal include a postdoctoral mentoring plan?,True
+Q021,medium,cross_document_reasoning,"Which early-career researchers must the proposal's mentoring plan cover, and does the plan comply?",True
 Q022,easy,exact_extraction,What research vessel supports station installation and servicing?,True
 Q023,medium,exact_extraction,"Where did CSU-PI-001 earn the synthetic Ph.D. credential, and in what field?",True
 Q024,hard,cross_document_reasoning,"Does either investigator currently hold NSF support, and does any listed support overlap this proposal?",True

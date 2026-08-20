@@ -1,8 +1,45 @@
-# CSU-NSF-001 Synthetic Proposal Benchmark (v0.4.0)
+# CSU-NSF-001 Synthetic Proposal Benchmark (v0.5.0)
 
 ## Purpose
 
 This package is a synthetic NSF proposal case for testing document ingestion, OCR, retrieval, context compression, citations, calculations, refusal behavior, and cross-document reasoning. It is not a valid proposal or institutional record. The institutions, sites, addresses, agreements, preliminary results, proposed experiments, and project records are fictional. Synthetic roles use stable non-person identifiers and do not represent real people. The scientific literature and open-license image sources cited in the revised narrative are real.
+
+## What changed in v0.5.0
+
+An external sponsor-policy review of v0.4.0 found that the packet modelled
+requirements that the sponsor has since retired. Five findings were verified
+independently against the NSF *Proposal & Award Policies & Procedures Guide*
+(PAPPG 24-1) and the 2024 Uniform Guidance, and all five are corrected here.
+
+- **The MTDC subaward threshold was the retired $25,000.** 2 CFR 200.1 (89 FR 30046, effective for rate proposals submitted on or after October 1, 2024) sets it at the first **$50,000** of each subaward, regardless of the period of performance. The rate agreement, budget policy, budget justification, and budget workbook now state and apply that rule, which moves the budget — see the table below.
+- **The mentoring plan covered the postdoctoral scholar only.** PAPPG 24-1 II.D.2.i(i) requires one plan covering both postdoctoral scholars and graduate students, so `09_Postdoc_Mentoring_Plan` is replaced by a single one-page `09_Mentoring_Plan` with shared and group-specific components for each.
+- **Facilities, Equipment and Other Resources carried dollar figures.** PAPPG 24-1 II.D.2.g bars quantifiable financial information there, so the $2.4 million genomics-core investment and the $62,000 instrument price are gone from `08_Facilities_Equipment_Resources`, which now describes the same resources narratively. Those institutional figures move to a new internal document, `16_CSU_Research_Infrastructure_Summary`, which is where the cross-document questions now find them.
+- **Senior-personnel documents used the retired combined forms.** PAPPG 24-1 II.D.2.h(i–iv) requires four documents per person, so the combined `10_Biographical_Sketches` and `11_Current_Pending_Support` are replaced by per-person Biographical Sketches (10, 11), Current and Pending (Other) Support (12, 13) with no "recently completed" category, Synergistic Activities (14, 15), and a Collaborators and Other Affiliations workbook each.
+- **The rate agreement imposed a provisional successor rate.** 2 CFR 200 Appendix III §C.7 applies negotiated rates for the life of each competitive segment, and Section III.D now states that instead.
+
+The proposal is also framed explicitly as unsolicited under PAPPG 24-1 — the Budget Justification's cost-sharing statement follows from that framing — and §3 of the Project Description is retitled "Preliminary Studies".
+
+### Corrected budget
+
+| Line | v0.4.0 | v0.5.0 |
+|---|---|---|
+| Total direct costs | $807,485.77 | $807,485.77 |
+| Subaward included in MTDC | $25,000 | **$50,000** — $30,000 in Year 1, $20,000 in Year 2 |
+| Subaward excluded from MTDC | $35,000 | **$10,000** — Year 3 |
+| MTDC exclusions | $182,636.20 | **$157,636.20** |
+| MTDC base | $624,849.57 | **$649,849.57** |
+| F&A at 58% of the MTDC base | $362,412.75 | **$376,912.75** |
+| **Total amount requested** | $1,169,898.51 | **$1,184,398.51** |
+
+The authoritative total is 1,184,398.51428; $1,184,398.51 is the displayed value, and every document, key, workbook cell, and validator constant agrees on it.
+
+### Keys and comparability
+
+The 30 question IDs and the question count are unchanged. Q021 is rewritten for the combined mentoring-plan requirement, and every answer, source page, and corroborating page was re-derived against the v0.5.0 renders rather than carried forward. **Published model-benchmark tables for this corpus were measured against the v0.3.3 answer key and predate this recomputation**, so they are not comparable on the budget questions or on the questions that cited the retired senior-personnel documents.
+
+### Packaging note
+
+The DOCX and XLSX sources edited for this release keep the zip member timestamps they were written with. They were deliberately not re-saved to normalize those timestamps, because re-saving risks content and hash drift against renders that are already verified. The sha256 of every release asset is pinned in `manifest.json`.
 
 ## What changed in v0.4.0
 
@@ -25,7 +62,7 @@ No natural-person name may represent a synthetic investigator, administrator, ne
 
 ## Release validation
 
-From the package root, run `python tools/validate_identity_safety.py .` and `python tools/validate_release.py .`. The first command checks identity policy across Word, PDF, Excel, JSON, CSV, and Markdown files. The second checks question-key parity, source-page bounds, fixed PDF pagination, the complete 24-reference citation set, manifest inputs, and the authoritative budget total. It also checks the `corroborating_sources` entries against six rules: every question carries the field; each listed document exists in the package; each listed page is an integer within that document's page range; no entry duplicates a document-and-page pair already in the question's canonical `sources`; an unanswerable question's list is empty; and a workbook entry carries no page number. (In this repository the validators take explicit paths — see the directory README one level up, *Running the validators*.)
+From the package root, run `python tools/validate_identity_safety.py .` and `python tools/validate_release.py .`. The first command checks identity policy across Word, PDF, Excel, JSON, CSV, and Markdown files. The second checks question-key parity, source-page bounds, fixed PDF pagination, the complete 24-reference citation set, manifest inputs, and the authoritative budget total. It also checks the `corroborating_sources` entries against six rules: every question carries the field; each listed document exists in the package; each listed page is an integer within that document's page range; no entry duplicates a document-and-page pair already in the question's canonical `sources`; an unanswerable question's list is empty; and a workbook entry carries no page number. With the documents present it also checks the sponsor-policy invariants this release turns on: that Facilities, Equipment and Other Resources states no dollar amount, that the subaward threshold stated in the rate agreement, the budget policy, and the budget justification is the same figure and matches the workbook's inclusion constant, and that neither Current and Pending document carries a "recently completed" category. (In the vandalizer repository the validators take explicit paths instead of a package directory — see `benchmarks/corpus/README.md`, *Running the validators*.)
 
 ## What changed in v0.3.2
 
@@ -69,10 +106,10 @@ The packet was revised for realism in formatting and content while keeping every
 - $62,000 equipment purchase (excluded from MTDC)
 - $30,000 participant-support program, 20 non-CSU participants (excluded from MTDC)
 - $55,636.20 graduate tuition remission (excluded from MTDC)
-- $60,000 subaward with only the first $25,000 included in MTDC, once per project period
+- $60,000 subaward with the first $50,000 included in MTDC as incurred — $30,000 in Year 1 and $20,000 in Year 2 — and the remaining $10,000 (Year 3) excluded
 - $34,000 internal service-center charges (included in MTDC)
-- Formula-driven authoritative budget total: $1,169,898.51
-- Distractor figures: $1.25 million economic-loss example, $20,000 prior internal seed award, $2.4 million institutional genomics-core investment
+- Formula-driven authoritative budget total: $1,184,398.51
+- Distractor figures: $1.25 million economic-loss example, $20,000 prior internal seed award, $2.4 million institutional genomics-core investment. The seed award is stated in the Project Description and the internal Research Infrastructure Summary; the genomics-core investment now only in the latter
 
 ## Files supplied to the system under test
 
@@ -84,12 +121,19 @@ The packet was revised for realism in formatting and content while keeping every
 6. `06_Data_Management_Plan.pdf`
 7. `07_References_Cited.pdf`
 8. `08_Facilities_Equipment_Resources.pdf`
-9. `09_Postdoc_Mentoring_Plan.pdf`
-10. `10_Biographical_Sketches.pdf`
-11. `11_Current_Pending_Support.pdf`
-12. `CSU_NSF_001_Budget.xlsx`
+9. `09_Mentoring_Plan.pdf`
+10. `10_Biographical_Sketch_PI.pdf`
+11. `11_Biographical_Sketch_CoPI.pdf`
+12. `12_Current_Pending_PI.pdf`
+13. `13_Current_Pending_CoPI.pdf`
+14. `14_Synergistic_Activities_PI.pdf`
+15. `15_Synergistic_Activities_CoPI.pdf`
+16. `16_CSU_Research_Infrastructure_Summary.pdf`
+17. `CSU_NSF_001_Budget.xlsx`
+18. `COA_PI.xlsx`
+19. `COA_CoPI.xlsx`
 
-Editable DOCX versions are included for controlled scan generation and later revisions.
+Sixteen PDFs, 42 pages, plus three workbooks. Editable DOCX versions are included for controlled scan generation and later revisions.
 
 ## Files withheld from the system under test
 

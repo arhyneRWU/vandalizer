@@ -35,7 +35,7 @@ class TestDocumentAttribution:
         assert doc_for("as given in the Project Summary ") == "03"
 
     def test_returns_none_when_no_document_is_named(self):
-        assert doc_for("the total is $1,169,898.51 on ") is None
+        assert doc_for("the total is $1,184,398.51 on ") is None
 
     def test_picks_the_nearest_document_not_the_first_one(self):
         """A bulleted answer names several documents before the citation.
@@ -56,8 +56,8 @@ class TestDocumentAttribution:
         assert doc_for(window) == "05"
 
     def test_a_filename_beats_an_earlier_prose_title(self):
-        window = "unlike the Project Summary, 11_Current_Pending_Support.pdf "
-        assert doc_for(window) == "11"
+        window = "unlike the Project Summary, 12_Current_Pending_PI.pdf "
+        assert doc_for(window) == "12"
 
     def test_an_earlier_filename_loses_to_a_nearer_prose_title(self):
         window = "04_Project_Description.pdf differs; the Budget Justification "
@@ -75,12 +75,33 @@ class TestDocumentAttribution:
         window = "01_CSU_Synthetic_FA_Rate_Agreement said X; 05_Budget_Justification "
         assert doc_for(window) == "05"
 
+    def test_a_qualified_title_beats_the_generic_one_inside_it(self):
+        """The split documents, and why mentions are compared by where they end.
+
+        v0.5.0 split three documents in two, and every Co-PI title now contains
+        the generic title as a substring: "the Co-PI biosketch" holds
+        "biosketch", "current and pending (co-pi)" holds "current and pending".
+        Comparing mentions by where they *start* hands all three to the generic
+        alias — it starts later — and every Co-PI citation is scored against
+        the PI's document. Ending position, with the longer alias breaking a
+        tie, is what makes the qualified title win.
+        """
+        assert doc_for("as the Co-PI biosketch ") == "11"
+        assert doc_for("in the current and pending (co-pi) ") == "13"
+        assert doc_for("listed under Co-PI synergistic activities ") == "15"
+        # The generic forms still resolve to the PI's document.
+        assert doc_for("as the biosketch ") == "10"
+        assert doc_for("in the current and pending ") == "12"
+        # Two of the aliases the rename and the new document needed.
+        assert doc_for("described in the mentoring plan ") == "09"
+        assert doc_for("in the research infrastructure summary ") == "16"
+
     def test_a_plain_number_is_not_mistaken_for_a_document(self):
         """'$25,000 of' and 'FY27 rate' must not read as document stems."""
         assert doc_for("the first $25,000 of the subaward on ") is None
 
 
-# Q007 as the v0.4.0 key states it: the Project Summary is the canonical source
+# Q007 as the key states it: the Project Summary is the canonical source
 # for the total NSF request, and five other pages state the same figure. The
 # workbook row is included on purpose — it has a null page.
 Q007_SOURCES = [
@@ -90,8 +111,8 @@ Q007_CORROBORATING = [
     ["04_Project_Description.pdf", 2, "Section 1 restates the total NSF request"],
     ["05_Budget_Justification.pdf", 1, "Header table, total amount requested"],
     ["05_Budget_Justification.pdf", 3, "Budget Reconciliation, authoritative total"],
-    ["11_Current_Pending_Support.pdf", 1, "CSU-PI-001 Pending entry"],
-    ["11_Current_Pending_Support.pdf", 2, "CSU-COI-001 Pending entry"],
+    ["12_Current_Pending_PI.pdf", 1, "CSU-PI-001 Pending entry"],
+    ["13_Current_Pending_CoPI.pdf", 2, "CSU-COI-001 Pending entry"],
     ["CSU_NSF_001_Budget.xlsx", None, "Budget Detail TOTAL row and NSF Summary line J"],
 ]
 PAIRS = page_pairs(Q007_SOURCES)
@@ -150,7 +171,7 @@ class TestClassify:
 
     def test_a_bare_citation_to_a_corroborating_page_is_bare_page(self):
         """No document named, so the page is all there is to go on. p.2 is a
-        corroborating page only (11_Current_Pending_Support), and the old rule
+        corroborating page only (13_Current_Pending_CoPI), and the old rule
         checked the canonical pages alone, which scored it `bare_miss`.
         """
         assert classify(None, 2, PAIRS, PAIRS_CORR) == "bare_page"
