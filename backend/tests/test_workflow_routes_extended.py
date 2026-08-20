@@ -589,6 +589,14 @@ class TestDownloadBatchResults:
             ],
         }
 
+    def _outputs(self, item_statuses):
+        """What get_batch_completed_outputs returns: completed runs only, each
+        already carrying the fields the renderers read."""
+        return [
+            self._session_status(sid) | {"session_id": sid}
+            for sid, st in item_statuses if st == "completed"
+        ]
+
     def _session_status(self, sid):
         return {
             "status": "completed",
@@ -614,11 +622,8 @@ class TestDownloadBatchResults:
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.workflows.svc") as mock_svc:
             MockUser.find_one = AsyncMock(return_value=user)
-            mock_svc.get_batch_status = AsyncMock(
-                return_value=self._batch([("s1", "completed"), ("s2", "running"), ("s3", "completed")])
-            )
-            mock_svc.get_workflow_status = AsyncMock(
-                side_effect=lambda sid, **kw: self._session_status(sid)
+            mock_svc.get_batch_completed_outputs = AsyncMock(
+                return_value=self._outputs([("s1", "completed"), ("s2", "running"), ("s3", "completed")])
             )
 
             resp = await client.get(
@@ -661,10 +666,9 @@ class TestDownloadBatchResults:
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.workflows.svc") as mock_svc:
             MockUser.find_one = AsyncMock(return_value=user)
-            mock_svc.get_batch_status = AsyncMock(
-                return_value=self._batch([("s1", "completed")])
+            mock_svc.get_batch_completed_outputs = AsyncMock(
+                return_value=[evil_status("s1") | {"session_id": "s1"}]
             )
-            mock_svc.get_workflow_status = AsyncMock(side_effect=lambda sid, **kw: evil_status(sid))
 
             resp = await client.get(
                 "/api/workflows/batch-download?batch_id=b1&format=json",
@@ -709,12 +713,11 @@ class TestDownloadBatchResults:
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.workflows.svc") as mock_svc:
             MockUser.find_one = AsyncMock(return_value=user)
-            mock_svc.get_batch_status = AsyncMock(
-                return_value=self._batch([
-                    ("s1", "completed"), ("s2", "completed"), ("s3", "completed"),
-                ])
+            mock_svc.get_batch_completed_outputs = AsyncMock(
+                return_value=[
+                    same_name(sid) | {"session_id": sid} for sid in ("s1", "s2", "s3")
+                ]
             )
-            mock_svc.get_workflow_status = AsyncMock(side_effect=lambda sid, **kw: same_name(sid))
 
             resp = await client.get(
                 "/api/workflows/batch-download?batch_id=b1&format=json",
@@ -731,6 +734,62 @@ class TestDownloadBatchResults:
                 f"no member attributable to {sid} in {names}"
             )
 
+    async def test_the_bundle_costs_one_lookup_however_many_runs(self, client):
+        """get_workflow_status was called per run and does a find_one plus a
+        Workflow.get each time, so a 300-document batch meant ~600 sequential
+        round trips in a single request. Nothing caps batch size — a folder can
+        expand one arbitrarily.
+        """
+        import io as _io
+        import zipfile
+
+        user = _make_user()
+        cookies, headers = _auth()
+        many = [(f"s{i}", "completed") for i in range(40)]
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_completed_outputs = AsyncMock(
+                return_value=self._outputs(many)
+            )
+            mock_svc.get_workflow_status = AsyncMock()
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert len(zipfile.ZipFile(_io.BytesIO(resp.content)).namelist()) == 40
+        assert mock_svc.get_batch_completed_outputs.await_count == 1
+        mock_svc.get_workflow_status.assert_not_awaited()
+
+    async def test_an_oversized_batch_is_refused_with_a_reason(self, client):
+        """Better a clear refusal than minutes of CPU and a worker-wide stall."""
+        from app.routers.workflows import MAX_BATCH_DOWNLOAD_RUNS
+
+        user = _make_user()
+        cookies, headers = _auth()
+        too_many = [(f"s{i}", "completed") for i in range(MAX_BATCH_DOWNLOAD_RUNS + 1)]
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_completed_outputs = AsyncMock(
+                return_value=self._outputs(too_many)
+            )
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 413
+        assert str(MAX_BATCH_DOWNLOAD_RUNS) in resp.json()["detail"]
+
     async def test_no_completed_runs_returns_409(self, client):
         user = _make_user()
         cookies, headers = _auth()
@@ -739,9 +798,9 @@ class TestDownloadBatchResults:
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.workflows.svc") as mock_svc:
             MockUser.find_one = AsyncMock(return_value=user)
-            mock_svc.get_batch_status = AsyncMock(
-                return_value=self._batch([("s1", "running"), ("s2", "queued")])
-            )
+            # Empty list means "batch exists, nothing finished"; None would be
+            # "no such batch", which is the 404 case.
+            mock_svc.get_batch_completed_outputs = AsyncMock(return_value=[])
 
             resp = await client.get(
                 "/api/workflows/batch-download?batch_id=b1&format=json",
@@ -758,7 +817,7 @@ class TestDownloadBatchResults:
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.workflows.svc") as mock_svc:
             MockUser.find_one = AsyncMock(return_value=user)
-            mock_svc.get_batch_status = AsyncMock(return_value=None)
+            mock_svc.get_batch_completed_outputs = AsyncMock(return_value=None)
 
             resp = await client.get(
                 "/api/workflows/batch-download?batch_id=missing&format=json",

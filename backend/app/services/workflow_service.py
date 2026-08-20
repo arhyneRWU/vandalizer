@@ -916,6 +916,62 @@ async def get_batch_status(
     }
 
 
+async def get_batch_completed_outputs(
+    batch_id: str, user: User | None = None, share_token: str | None = None
+) -> list[dict] | None:
+    """Every completed run in a batch, in the shape the download renderers want.
+
+    Two queries for the whole batch rather than two per run. ``get_workflow_status``
+    does a ``find_one`` plus a ``Workflow.get`` each time, so bundling a
+    300-document batch meant ~600 sequential round trips in one request; nothing
+    caps batch size, and a folder can expand one arbitrarily.
+
+    Authorization is unchanged in strength. Every run in a batch is created
+    against the same workflow, so authorizing that workflow once is what the
+    per-run check was doing N times — and any row that somehow points elsewhere
+    is dropped rather than trusted.
+
+    Returns ``None`` when the batch is unknown or the caller is not authorized
+    for it, matching :func:`get_batch_status`.
+    """
+    results = await WorkflowResult.find(
+        WorkflowResult.batch_id == batch_id,
+    ).to_list()
+    if not results:
+        return None
+
+    first = results[0]
+    if not first.workflow:
+        return None
+    workflow = await get_authorized_workflow(
+        str(first.workflow), user, share_token=share_token
+    ) if user is not None else await Workflow.get(first.workflow)
+    if not workflow:
+        return None
+
+    workflow_name = getattr(workflow, "name", None)
+    authorized_workflow_id = first.workflow
+
+    outputs: list[dict] = []
+    for r in results:
+        if r.status != "completed":
+            continue
+        if r.workflow != authorized_workflow_id:
+            # A batch is created against one workflow; anything else was not
+            # covered by the check above.
+            continue
+        outputs.append({
+            "session_id": r.session_id,
+            "status": r.status,
+            "final_output": r.final_output,
+            "steps_output": r.steps_output,
+            "output_step_names": r.output_step_names,
+            "workflow_name": workflow_name,
+            "document_title": r.document_title,
+        })
+    return outputs
+
+
 async def cancel_batch(
     batch_id: str, user: User, share_token: str | None = None
 ) -> dict | None:
