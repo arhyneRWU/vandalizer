@@ -79,6 +79,20 @@ export function pendingReviewUuid(activity: ActivityEvent): string | null {
   return typeof uuid === 'string' && uuid ? uuid : null
 }
 
+/** The review a row is *currently* waiting on, or null.
+ *
+ * The marker records that a run paused on a review; it does not record that it
+ * still is. Several exits leave it behind — cancelling rewrites the activity
+ * without touching meta_summary, and a failure stamped after the marker keeps
+ * it — so reading the marker alone makes a terminal row render as awaiting
+ * approval, with a clock, a live link to a review nobody can act on, and its
+ * real error text suppressed. Only a live row can be waiting on anyone.
+ */
+export function activeReviewUuid(activity: ActivityEvent): string | null {
+  const live = activity.status === 'running' || activity.status === 'queued'
+  return live ? pendingReviewUuid(activity) : null
+}
+
 // Threshold mirrors SystemConfig.retention_config.activity_stale_threshold_minutes
 // (default 30 min) so the UI flips to "timed out" the instant the threshold
 // passes, instead of waiting for the next backend reap cycle.
@@ -266,7 +280,7 @@ export function ActivityRail() {
           <div className="h-[5px]" />
 
           {activities.map((activity) => {
-            const awaitingReview = pendingReviewUuid(activity)
+            const awaitingReview = activeReviewUuid(activity)
             const Icon = awaitingReview ? ClipboardCheck : activityIcon(activity.type)
             const stale = isStale(activity, staleThresholdMinutes)
             // A paused run is not "running": the shimmer would claim work is

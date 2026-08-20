@@ -689,6 +689,12 @@ async def _cancel_result(result) -> None:
             act.status = ActivityStatus.CANCELED.value
             act.error = "Canceled by user"
             act.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            # Drop the pending-review marker: the run is not waiting on anyone
+            # any more. Leaving it makes the row exempt from the stale reaper
+            # for good, and any surface reading the marker keeps offering a
+            # review for a run that has stopped.
+            if isinstance(act.meta_summary, dict):
+                act.meta_summary.pop("pending_review_uuid", None)
             await act.save()
     except Exception:
         logger.warning(

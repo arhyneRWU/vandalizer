@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { CheckCircle, XCircle, Loader2, Clock, FileText, ChevronDown, ChevronRight, Zap, Download, ClipboardCheck } from 'lucide-react'
 import DOMPurify from 'dompurify'
@@ -203,7 +204,12 @@ function RunRow({ run, type }: { run: HistoryRun; type: 'workflow' | 'extraction
   // reads as a run that has been going for three days. The marker is the only
   // thing that distinguishes it, so the row relabels itself and offers the one
   // link that moves the run forward.
-  const reviewUuid = run.pending_review_uuid || null
+  // Only a live run can still be waiting on a reviewer. The marker records the
+  // pause, not that it is ongoing, and several exits leave it behind — so
+  // without this a canceled or failed run shows an amber "awaiting approval"
+  // pill over its real status, plus a link to a review nobody can act on.
+  const runIsLive = run.status === 'running' || run.status === 'queued'
+  const reviewUuid = runIsLive ? (run.pending_review_uuid || null) : null
   const displayStatus = reviewUuid ? 'awaiting approval' : run.status
   const hasSnapshot = run.result_snapshot && Object.keys(run.result_snapshot).length > 0
   // Workflow runs don't snapshot their output into the history payload — the
@@ -293,15 +299,16 @@ function RunRow({ run, type }: { run: HistoryRun; type: 'workflow' | 'extraction
       {/* Outside the button on purpose — an anchor nested in a button is
           invalid markup and swallows the link's own keyboard activation. */}
       {reviewUuid && (
-        <a
-          href={`/reviews/${reviewUuid}`}
+        <Link
+          to={'/reviews/$uuid' as never}
+          params={{ uuid: reviewUuid } as never}
           style={{
             display: 'inline-block', margin: '-6px 0 12px 48px',
             fontSize: 12, fontWeight: 600, color: '#0ea5e9', textDecoration: 'none',
           }}
         >
           Open review →
-        </a>
+        </Link>
       )}
 
       {expanded && hasResults && (

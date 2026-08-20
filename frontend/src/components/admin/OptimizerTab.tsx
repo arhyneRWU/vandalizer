@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Eye, Play, RefreshCw, Sparkles, XCircle,
@@ -83,9 +84,9 @@ export function OptimizerTab() {
           <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>
             Every tuning run across workflows, extraction sets, and knowledge bases.
             Read-only — applying a config happens in{' '}
-            <a href="/tuning" style={{ color: '#0ea5e9', textDecoration: 'none', fontWeight: 600 }}>
+            <Link to={'/tuning' as never} style={{ color: '#0ea5e9', textDecoration: 'none', fontWeight: 600 }}>
               your tuning inbox
-            </a>, which only lists items you own.
+            </Link>, which only lists items you own.
           </p>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>

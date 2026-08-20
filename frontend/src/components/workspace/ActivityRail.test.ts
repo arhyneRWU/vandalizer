@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isStale, pendingReviewUuid } from './ActivityRail'
+import { activeReviewUuid, isStale, pendingReviewUuid } from './ActivityRail'
 import type { ActivityEvent } from '../../types/chat'
 
 function run(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
@@ -73,5 +73,38 @@ describe('isStale', () => {
 
   it('falls back to started_at when no update has landed', () => {
     expect(isStale(run({ last_updated_at: null }), 30)).toBe(true)
+  })
+})
+
+
+describe('activeReviewUuid', () => {
+  const MARKER = { pending_review_uuid: 'rev-1' }
+
+  it('offers the review while the run is still parked on it', () => {
+    expect(activeReviewUuid(run({ status: 'running', meta_summary: MARKER }))).toBe('rev-1')
+    expect(activeReviewUuid(run({ status: 'queued', meta_summary: MARKER }))).toBe('rev-1')
+  })
+
+  it('stops offering it once the run is cancelled', () => {
+    // _cancel_result rewrites the activity without touching meta_summary, so
+    // the marker outlives the run. Reading it alone left a cancelled row
+    // rendering the clipboard icon, a clock, "Awaiting approval", and a click
+    // through to a review nobody could act on.
+    expect(activeReviewUuid(run({ status: 'canceled', meta_summary: MARKER }))).toBeNull()
+  })
+
+  it('stops offering it once the run has failed', () => {
+    // The marker is stamped before the notify step, so a failure raised after
+    // it keeps the marker — and the row suppressed its own error text in
+    // favour of the approval tooltip.
+    expect(activeReviewUuid(run({ status: 'failed', meta_summary: MARKER }))).toBeNull()
+  })
+
+  it('stops offering it once the run has completed', () => {
+    expect(activeReviewUuid(run({ status: 'completed', meta_summary: MARKER }))).toBeNull()
+  })
+
+  it('is null for a live run that was never paused', () => {
+    expect(activeReviewUuid(run({ status: 'running' }))).toBeNull()
   })
 })

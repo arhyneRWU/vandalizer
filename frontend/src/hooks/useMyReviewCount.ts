@@ -20,8 +20,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 let inFlight: Promise<void> | null = null
 const subscribers = new Set<(count: number) => void>()
 
-function refresh(): Promise<void> {
-  if (inFlight) return inFlight
+function fetchOnce(): Promise<void> {
   inFlight = getMyReviewCount()
     .then(data => {
       cached = data.count
@@ -32,6 +31,24 @@ function refresh(): Promise<void> {
     })
     .finally(() => { inFlight = null })
   return inFlight
+}
+
+/** Coalesce concurrent polls: the background timer must not stack requests. */
+function refresh(): Promise<void> {
+  return inFlight ?? fetchOnce()
+}
+
+/** Re-read the count *after* whatever is in flight, for callers that just
+ * changed it.
+ *
+ * Returning the in-flight promise instead would make the re-poll a no-op
+ * whenever the 30s timer happened to fire first: the request already on the
+ * wire was issued before the decision, so it resolves with the pre-decision
+ * count and the badge stays stale for another full interval — exactly what
+ * deciding a review is supposed to clear.
+ */
+export function refreshMyReviewCount(): Promise<void> {
+  return inFlight ? inFlight.then(fetchOnce) : fetchOnce()
 }
 
 export function useMyReviewCount() {
@@ -50,5 +67,8 @@ export function useMyReviewCount() {
     }
   }, [])
 
-  return { count, refresh }
+  // The only callers of this are surfaces that have *just* decided a review,
+  // so they get the variant that re-reads after any in-flight poll rather than
+  // adopting its pre-decision answer.
+  return { count, refresh: refreshMyReviewCount }
 }
