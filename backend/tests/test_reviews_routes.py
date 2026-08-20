@@ -2,6 +2,7 @@
 
 import datetime
 import secrets
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -150,6 +151,7 @@ class TestReviewAuthorization:
         with patch("app.dependencies.decode_token", return_value={"sub": "randomuser", "type": "access"}), \
              patch("app.dependencies.User") as MockUser, \
              patch("app.routers.reviews.ApprovalRequest") as MockApproval, \
+             patch("app.routers.reviews.WorkflowResult") as MockResult, \
              patch(
                  "app.routers.reviews.access_control.get_authorized_workflow",
                  new_callable=AsyncMock,
@@ -157,6 +159,73 @@ class TestReviewAuthorization:
              ):
             MockUser.find_one = AsyncMock(return_value=user)
             MockApproval.find_one = AsyncMock(return_value=approval)
+            # Somebody else's run, so the "you ran this" path does not apply.
+            MockResult.get = AsyncMock(return_value=SimpleNamespace(user_id="someone-else"))
+
+            resp = await client.get(
+                f"/api/reviews/{approval.uuid}",
+                cookies=cookies,
+                headers=headers,
+            )
+        assert resp.status_code == 404
+
+
+    async def test_the_person_who_ran_it_can_view_their_own_review(self, client):
+        """requester_user_id is the workflow's *owner*, which is often someone
+        else — a team member running a shared workflow, or a share-link
+        recipient. Their own activity row links straight here, so they followed
+        a link from their own run and got "Review not found", having also lost
+        the previous behaviour where that row opened the workflow.
+
+        Viewing is not deciding: _can_decide_approval is a strictly narrower
+        check and is unaffected.
+        """
+        user = _make_user("runner")
+        approval = _make_approval(assigned=("reviewer1",))
+        approval.requester_user_id = "workflow-owner"
+        cookies, headers = _auth("runner")
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "runner", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.reviews.ApprovalRequest") as MockApproval, \
+             patch("app.routers.reviews.WorkflowResult") as MockResult, \
+             patch("app.routers.reviews.User") as MockRouterUser, \
+             patch(
+                 "app.routers.reviews.access_control.get_authorized_workflow",
+                 new_callable=AsyncMock,
+                 return_value=None,
+             ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockApproval.find_one = AsyncMock(return_value=approval)
+            # Only used to render the requester's display name.
+            MockRouterUser.find_one = AsyncMock(return_value=None)
+            MockResult.get = AsyncMock(return_value=SimpleNamespace(user_id="runner"))
+
+            resp = await client.get(
+                f"/api/reviews/{approval.uuid}",
+                cookies=cookies,
+                headers=headers,
+            )
+        assert resp.status_code == 200
+
+    async def test_a_failed_run_lookup_does_not_grant_access(self, client):
+        """An authorization check must fail closed."""
+        user = _make_user("randomuser")
+        approval = _make_approval(assigned=("reviewer1",))
+        cookies, headers = _auth("randomuser")
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "randomuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.reviews.ApprovalRequest") as MockApproval, \
+             patch("app.routers.reviews.WorkflowResult") as MockResult, \
+             patch(
+                 "app.routers.reviews.access_control.get_authorized_workflow",
+                 new_callable=AsyncMock,
+                 return_value=None,
+             ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            MockApproval.find_one = AsyncMock(return_value=approval)
+            MockResult.get = AsyncMock(side_effect=RuntimeError("mongo down"))
 
             resp = await client.get(
                 f"/api/reviews/{approval.uuid}",

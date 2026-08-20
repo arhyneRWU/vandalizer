@@ -164,6 +164,7 @@ def detect_artifact_kind(value) -> str:
 async def end_approval_wait(
     workflow_result_id: PydanticObjectId,
     *,
+    approval_uuid: str | None = None,
     error: str = "",
 ) -> None:
     """Take a run's activity out of its approval wait, closing it if it ended.
@@ -175,15 +176,37 @@ async def end_approval_wait(
     about: it was left at "running" and only the reaper ever closed it. Passing
     ``error`` closes the row too, so the rail agrees with the WorkflowResult.
 
+    Two things make a batch different, and both are handled here.
+
+    A batch shares one ActivityEvent across every document
+    (``run_workflow_batch`` hands the same ``activity_id`` to all of them), and
+    ``_pause_for_approval`` overwrites ``workflow_result`` on each pause. So
+    matching on ``workflow_result`` finds the row only for whichever document
+    paused last, and misses entirely for the others — leaving the marker in
+    place, and with it a row the reaper will never touch. Matching on the
+    approval's own uuid finds exactly the row that is waiting on *this* review,
+    for a batch and a single run alike.
+
+    And one document's rejection is not the batch's failure. Where several runs
+    share a row, the wait is ended without closing it, so the documents still
+    running keep their row; the ``WorkflowResult`` for the rejected one is
+    already marked by the caller.
+
     Never raises: a review decision must not fail because a bookkeeping write
     on the activity did.
     """
     from app.models.activity import ActivityEvent, ActivityStatus
 
-    update: dict = {"$unset": {"meta_summary.pending_review_uuid": ""}}
     now = datetime.datetime.now(datetime.timezone.utc)
+    update: dict = {"$unset": {"meta_summary.pending_review_uuid": ""}}
     set_ops: dict = {"last_updated_at": now}
-    if error:
+
+    try:
+        shared_with_a_batch = await _is_batch_run(workflow_result_id)
+    except Exception:  # pragma: no cover - defensive
+        shared_with_a_batch = False
+
+    if error and not shared_with_a_batch:
         set_ops.update({
             "status": ActivityStatus.FAILED.value,
             "finished_at": now,
@@ -191,14 +214,28 @@ async def end_approval_wait(
         })
     update["$set"] = set_ops
 
+    # Prefer the approval's own uuid; fall back to the run for callers that
+    # have no approval in hand.
+    query: dict = (
+        {"meta_summary.pending_review_uuid": approval_uuid}
+        if approval_uuid
+        else {"workflow_result": workflow_result_id}
+    )
+
     try:
-        await ActivityEvent.get_motor_collection().update_one(
-            {"workflow_result": workflow_result_id}, update,
-        )
+        await ActivityEvent.get_motor_collection().update_one(query, update)
     except Exception:
         logger.exception(
             "Could not end approval wait on activity for result %s", workflow_result_id,
         )
+
+
+async def _is_batch_run(workflow_result_id: PydanticObjectId) -> bool:
+    """True when this run is one document of a batch sharing an activity row."""
+    from app.models.workflow import WorkflowResult
+
+    result = await WorkflowResult.get(workflow_result_id)
+    return bool(result and result.batch_id)
 
 
 async def expire_overdue_approvals() -> dict:
@@ -252,6 +289,7 @@ async def expire_overdue_approvals() -> dict:
                 await result.save()
             await end_approval_wait(
                 approval.workflow_result_id,
+                approval_uuid=approval.uuid,
                 error="Auto-rejected: review deadline passed.",
             )
             counts["rejected"] += 1
@@ -310,6 +348,7 @@ async def expire_overdue_approvals() -> dict:
             await approval.save()
             await end_approval_wait(
                 approval.workflow_result_id,
+                approval_uuid=approval.uuid,
                 error="Review deadline passed with no decision — run is still paused.",
             )
             counts["expired"] += 1
