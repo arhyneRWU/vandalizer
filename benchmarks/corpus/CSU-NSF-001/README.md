@@ -39,7 +39,7 @@ The 30 question IDs and the question count are unchanged. Q021 is rewritten for 
 
 ### Packaging note
 
-The DOCX and XLSX sources edited for this release keep the zip member timestamps they were written with. They were deliberately not re-saved to normalize those timestamps, because re-saving risks content and hash drift against renders that are already verified. The sha256 of every release asset is pinned in `manifest.json`.
+The DOCX and XLSX sources edited for this release keep the zip member timestamps they were written with. They were deliberately not re-saved to normalize those timestamps, because re-saving risks content and hash drift against renders that are already verified. One exception is metadata only: the budget workbook's `docProps` members were rewritten in place so that all three workbooks carry the same fixed document properties — a generic synthetic-generator creator and a fixed created and modified date of 2026-08-20 — in place of the build-time values a library had written. Only those two members changed; every other member of that file is byte-identical to the one the verified renders were made from, and no workbook was re-saved. The sha256 of every release asset is pinned in `manifest.json`.
 
 ## What changed in v0.4.0
 
