@@ -2,6 +2,7 @@
 
 import datetime
 import secrets
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2270,6 +2271,166 @@ class TestTestQueryImport:
             resp = await client.post(
                 "/api/knowledge/kb-uuid-1/test-queries/import",
                 json=self._payload("Question\nQ1\n"),
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 403
+
+
+class TestTestQueryBulkDelete:
+    """POST /{uuid}/test-queries/bulk-delete — prune a large test set."""
+
+    @staticmethod
+    def _recording_find(deleted_count=0):
+        """Stand-in for KBTestQuery.find that records the Mongo filter it was
+        handed and reports ``deleted_count`` from .delete()."""
+        calls = []
+
+        def fake_find(*args, **kwargs):
+            calls.append(args[0] if args else kwargs)
+            result = MagicMock()
+            result.delete = AsyncMock(return_value=SimpleNamespace(deleted_count=deleted_count))
+            return result
+
+        return fake_find, calls
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_scopes_to_kb_and_dedupes(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+        fake_find, calls = self._recording_find(deleted_count=2)
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.models.kb_test_query.KBTestQuery.find", side_effect=fake_find),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                json={"query_uuids": ["q-1", "q-2", "q-1", "", 7]},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": 2}
+        # Blanks and non-strings dropped, duplicates collapsed, KB scope applied.
+        assert calls == [{"knowledge_base_uuid": "kb-uuid-1", "uuid": {"$in": ["q-1", "q-2"]}}]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [None, "not json", "[]", '"x"'])
+    async def test_bulk_delete_malformed_body_is_a_client_error(self, client, body):
+        """A body that is empty, not JSON, or JSON that is not an object used
+        to raise inside the handler and surface as a 500 — reading it with
+        ``request.json()`` throws, and ``.get`` throws again on a JSON array.
+        """
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                content=body,
+                headers={**headers, "Content-Type": "application/json"},
+                cookies=cookies,
+            )
+
+        assert resp.status_code < 500, (
+            f"malformed body {body!r} produced {resp.status_code}"
+        )
+        assert resp.status_code in (400, 422)
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_rejects_empty_selection(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                json={"query_uuids": []},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_caps_batch_size(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(return_value=kb)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                json={"query_uuids": [f"q-{i}" for i in range(2001)]},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 400
+        assert "2000" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_view_only_user_gets_403(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb(user_id="someone-else", verified=True)
+
+        async def gated_lookup(uuid, u, manage=False, **kw):
+            return None if manage else kb
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.get_knowledge_base = AsyncMock(side_effect=gated_lookup)
+
+            resp = await client.post(
+                "/api/knowledge/kb-uuid-1/test-queries/bulk-delete",
+                json={"query_uuids": ["q-1"]},
                 cookies=cookies,
                 headers=headers,
             )
