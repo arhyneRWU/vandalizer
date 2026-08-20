@@ -5,6 +5,7 @@ Uses mocked Beanie models and Celery to avoid DB/broker dependencies.
 """
 
 import datetime
+import re
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
@@ -97,9 +98,10 @@ def _make_result(session_id="abc123", status="completed", final_output=None, wor
 # ---------------------------------------------------------------------------
 
 class TestCreateWorkflow:
+    @patch("app.services.library_service.ensure_bookmark", new_callable=AsyncMock)
     @patch("app.services.name_conflicts.ensure_workflow_name_available", new_callable=AsyncMock)
     @patch("app.services.workflow_service.Workflow")
-    async def test_creates_workflow(self, mock_wf_cls, mock_ensure):
+    async def test_creates_workflow(self, mock_wf_cls, mock_ensure, mock_bookmark):
         from app.services.workflow_service import create_workflow
 
         mock_wf = MagicMock()
@@ -114,6 +116,142 @@ class TestCreateWorkflow:
         )
         assert result is mock_wf
         mock_wf.insert.assert_awaited_once()
+
+    @patch("app.services.library_service.ensure_bookmark", new_callable=AsyncMock)
+    @patch("app.services.name_conflicts.ensure_workflow_name_available", new_callable=AsyncMock)
+    @patch("app.services.workflow_service.Workflow")
+    async def test_a_new_workflow_is_bookmarked_so_it_is_visible(
+        self, mock_wf_cls, mock_ensure, mock_bookmark,
+    ):
+        """Workflows are listed *only* through library bookmarks, so one created
+        without a bookmark renders in no listing, no picker and no search while
+        still holding its name against name_conflicts — invisible, undeletable,
+        and its name unusable.
+
+        This path was the last one leaving the bookmark to a second request from
+        the client: LibraryTab makes it only when a personal library happens to
+        be loaded, and useWorkflows.create never made it at all.
+        """
+        from app.models.library import LibraryItemKind
+        from app.services.workflow_service import create_workflow
+
+        mock_wf = MagicMock()
+        mock_wf.insert = AsyncMock()
+        mock_wf_cls.return_value = mock_wf
+
+        await create_workflow(name="My Workflow", user_id="user1")
+
+        mock_bookmark.assert_awaited_once()
+        args = mock_bookmark.await_args.args
+        assert args[0] is mock_wf.id
+        assert args[1] == LibraryItemKind.WORKFLOW
+        assert args[2] == "user1"
+
+
+class TestDuplicateWorkflowBookmarks:
+    async def test_copy_gets_a_library_bookmark(self):
+        # "Make a copy" in the editor never added the bookmark itself, so every
+        # copy it produced was invisible in the library while still holding its
+        # name against name_conflicts. Bookmarking belongs on this side.
+        from app.models.library import LibraryItemKind
+
+        original = _make_workflow(name="Budget Analyzer")
+        new_wf = _make_workflow(name="Budget Analyzer (Copy)")
+        ensure = AsyncMock()
+
+        with (
+            patch("app.services.workflow_service.get_authorized_workflow", new_callable=AsyncMock, return_value=original),
+            patch("app.services.workflow_service.get_workflow", new_callable=AsyncMock, return_value={"name": "Budget Analyzer", "steps": [], "description": None}),
+            patch("app.services.workflow_service.Workflow") as mock_wf_cls,
+            patch("app.services.name_conflicts.next_available_name", new_callable=AsyncMock, return_value="Budget Analyzer (Copy)"),
+            patch("app.services.library_service.ensure_bookmark", ensure),
+        ):
+            mock_wf_cls.return_value = new_wf
+            mock_wf_cls.get = AsyncMock(return_value=original)
+
+            from app.services.workflow_service import duplicate_workflow
+
+            await duplicate_workflow(
+                str(original.id), MagicMock(), user_id="user1", team_id=None,
+            )
+
+        ensure.assert_awaited_once()
+        args = ensure.await_args[0]
+        assert args[0] == new_wf.id
+        assert args[1] == LibraryItemKind.WORKFLOW
+        assert args[2] == "user1"
+
+
+class TestListWorkflows:
+    def _user(self, user_id="user1", team=None):
+        user = MagicMock()
+        user.user_id = user_id
+        user.current_team = team
+        return user
+
+    @patch("app.services.workflow_service.Workflow")
+    async def test_returns_newest_first(self, mock_wf_cls):
+        # Unsorted, Mongo hands back insertion order, so a capped page showed
+        # the oldest workflows and hid everything created since.
+        from app.services.workflow_service import list_workflows
+
+        chain = MagicMock()
+        mock_wf_cls.find.return_value = chain
+        chain.sort.return_value = chain
+        chain.skip.return_value = chain
+        chain.limit.return_value = chain
+        chain.to_list = AsyncMock(return_value=[])
+
+        await list_workflows(self._user(), skip=20, limit=10)
+
+        chain.sort.assert_called_once_with("-created_at", "-_id")
+        chain.skip.assert_called_once_with(20)
+        chain.limit.assert_called_once_with(10)
+
+    @patch("app.services.workflow_service.Workflow")
+    async def test_search_is_escaped_before_it_becomes_a_regex(self, mock_wf_cls):
+        # The filter is interpolated into a $regex; an unescaped "C++ (v2)"
+        # is invalid regex syntax and errors the whole listing.
+        from app.services.workflow_service import list_workflows
+
+        chain = MagicMock()
+        mock_wf_cls.find.return_value = chain
+        chain.sort.return_value = chain
+        chain.skip.return_value = chain
+        chain.limit.return_value = chain
+        chain.to_list = AsyncMock(return_value=[])
+
+        await list_workflows(self._user(), search="C++ (v2)")
+
+        query = mock_wf_cls.find.call_args[0][0]
+        assert query["name"]["$regex"] == re.escape("C++ (v2)")
+
+    @patch("app.services.workflow_service.Workflow")
+    async def test_count_matches_the_same_filter_the_page_uses(self, mock_wf_cls):
+        from app.services.workflow_service import count_workflows, list_workflows
+
+        chain = MagicMock()
+        mock_wf_cls.find.return_value = chain
+        chain.sort.return_value = chain
+        chain.skip.return_value = chain
+        chain.limit.return_value = chain
+        chain.to_list = AsyncMock(return_value=[])
+        chain.count = AsyncMock(return_value=412)
+
+        user = self._user()
+        await list_workflows(user, search="budget")
+        list_query = mock_wf_cls.find.call_args[0][0]
+
+        total = await count_workflows(user, search="budget")
+        count_query = mock_wf_cls.find.call_args[0][0]
+
+        assert total == 412
+        assert list_query == count_query
+
+    async def test_team_scope_without_a_team_counts_zero(self):
+        from app.services.workflow_service import count_workflows
+
+        assert await count_workflows(self._user(team=None), scope="team") == 0
 
 
 class TestGetWorkflowStatus:

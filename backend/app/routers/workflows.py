@@ -35,6 +35,7 @@ from app.schemas.workflows import (
     ValidateWorkflowResponse,
     ValidationInputsResponse,
     ValidationPlanResponse,
+    WorkflowPageResponse,
     WorkflowResponse,
     WorkflowStatusResponse,
 )
@@ -177,7 +178,7 @@ async def create_workflow(req: CreateWorkflowRequest, user: User = Depends(get_c
     )
 
 
-@router.get("", response_model=list[WorkflowResponse])
+@router.get("", response_model=WorkflowPageResponse)
 async def list_workflows(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
@@ -185,21 +186,33 @@ async def list_workflows(
     search: str | None = Query(default=None),
     user: User = Depends(get_current_user),
 ):
+    """One page of the caller's visible workflows, newest first.
+
+    ``search`` filters server-side across the whole result set, not just the
+    current page — filtering a capped page client-side made every workflow
+    past the cap unfindable.
+    """
     workflows = await svc.list_workflows(user=user, skip=skip, limit=limit, scope=scope, search=search)
+    total = await svc.count_workflows(user=user, scope=scope, search=search)
     author_map = await resolve_authors(
         (wf.created_by_user_id or wf.user_id) for wf in workflows
     )
     # One team-access lookup powers can_manage for every workflow in the page.
     team_access = await access_control.get_team_access_context(user)
-    return [
-        WorkflowResponse(
-            id=str(wf.id), name=wf.name, description=wf.description,
-            user_id=wf.user_id, team_id=wf.team_id, num_executions=wf.num_executions,
-            can_manage=access_control.can_manage_workflow(wf, user, team_access),
-            created_by=author_map.get(wf.created_by_user_id or wf.user_id),
-        )
-        for wf in workflows
-    ]
+    return WorkflowPageResponse(
+        items=[
+            WorkflowResponse(
+                id=str(wf.id), name=wf.name, description=wf.description,
+                user_id=wf.user_id, team_id=wf.team_id, num_executions=wf.num_executions,
+                can_manage=access_control.can_manage_workflow(wf, user, team_access),
+                created_by=author_map.get(wf.created_by_user_id or wf.user_id),
+            )
+            for wf in workflows
+        ],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.get("/status", response_model=WorkflowStatusResponse)
