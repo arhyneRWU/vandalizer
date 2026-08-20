@@ -334,13 +334,19 @@ export function ExtractionEditorPanel() {
 
     const src: ExtractionFieldSource | undefined = resultSources[field]
     if (src && src.verified && src.quote) {
-      const highlight = { terms: [src.quote], page: src.page ?? null }
+      const highlight = {
+        terms: [src.quote],
+        page: src.page ?? null,
+        // The badge the user just clicked already reads "p. ~12" when the page
+        // is interpolated; the viewer must not then assert it as fact.
+        pageApproximate: src.page_approximate ?? false,
+      }
       if (src.document_uuid) {
         // Routes through the open-document request so this works even when
         // the source document isn't the one currently in the viewer.
         viewDocument(src.document_uuid, src.document_title ?? 'Document', highlight)
       } else {
-        setHighlightTerms(highlight.terms, highlight.page)
+        setHighlightTerms(highlight.terms, highlight.page, highlight.pageApproximate)
       }
       return
     }

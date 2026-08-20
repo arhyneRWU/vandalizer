@@ -20,6 +20,9 @@ interface DocumentViewerProps {
   // to prefer matches on that page, and to still jump the viewer there when
   // the passage can't be text-matched at all.
   highlightPage?: number | null
+  /** The cited page was interpolated from OCR text, not read from the
+   *  document's structure — so the viewer must not state it as fact. */
+  highlightPageApproximate?: boolean
   onClearHighlights?: () => void
   processing?: boolean
   taskStatus?: string | null
@@ -117,7 +120,25 @@ function highlightHtmlSearch(root: HTMLElement, query: string): number {
   return count
 }
 
-export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = null, onClearHighlights, processing, taskStatus }: DocumentViewerProps) {
+/** What to say when the passage could not be found in the document.
+ *
+ * The page only gets stated as fact when it was *read* from the document's
+ * structure. When it was interpolated from OCR text it is an estimate, and
+ * this fallback fires hardest on exactly those documents — the quote came out
+ * of the OCR text while the search runs against the PDF's own text layer, so
+ * the two routinely disagree. Asserting the page here is the conflation the
+ * "p. ~N" notation exists to prevent.
+ */
+export function highlightMissLabel(
+  page: number | null | undefined, approximate: boolean,
+): string {
+  if (page == null) return 'not found in this document'
+  return approximate
+    ? `passage not matched — showing approximately page ${page}`
+    : `passage not matched — showing page ${page}`
+}
+
+export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = null, highlightPageApproximate = false, onClearHighlights, processing, taskStatus }: DocumentViewerProps) {
   const [zoom, setZoom] = useState(2) // index into ZOOM_LEVELS, default 100%
   const [isPdf, setIsPdf] = useState<boolean | null>(null) // null = loading
   const [isSpreadsheet, setIsSpreadsheet] = useState(false)
@@ -1194,9 +1215,7 @@ export function DocumentViewer({ docUuid, highlightTerms = [], highlightPage = n
                 </span>
               ) : (
                 <span style={{ marginLeft: 6, color: '#b45309', fontWeight: 500 }}>
-                  {effectivePage != null
-                    ? `passage not matched — showing page ${effectivePage}`
-                    : 'not found in this document'}
+                  {highlightMissLabel(effectivePage, highlightPageApproximate)}
                 </span>
               )}
             </div>

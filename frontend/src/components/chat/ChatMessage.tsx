@@ -210,6 +210,9 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
     viewDocument(citation.document_uuid, citation.document_title, {
       terms: anchor ? [anchor] : [],
       page: citation.page ?? null,
+      // Same reason as the extraction path: the chip says "p. ~N" for an
+      // interpolated page, so the viewer's fallback must not drop the hedge.
+      pageApproximate: citation.page_approximate ?? false,
     })
   }
 
