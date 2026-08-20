@@ -632,6 +632,105 @@ class TestDownloadBatchResults:
         # Only the two completed runs are bundled, not the running one.
         assert len(zf.namelist()) == 2
 
+    async def test_a_step_supplied_filename_cannot_escape_the_archive(self, client):
+        """`filename` on a DataExport/DocumentRenderer/PackageBuilder step is
+        free text from the workflow's own configuration and reached writestr
+        unsanitised, so a step named ``../../evil`` produced a ZIP member that
+        archive tools which do not normalise paths extract outside the target
+        directory.
+        """
+        import io
+        import zipfile
+
+        user = _make_user()
+        cookies, headers = _auth()
+
+        def evil_status(sid):
+            st = self._session_status(sid)
+            st["final_output"] = {
+                "output": {
+                    "type": "file_download",
+                    "data_b64": "cHduZWQ=",
+                    "file_type": "csv",
+                    "filename": "../../evil.csv",
+                },
+            }
+            return st
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_status = AsyncMock(
+                return_value=self._batch([("s1", "completed")])
+            )
+            mock_svc.get_workflow_status = AsyncMock(side_effect=lambda sid, **kw: evil_status(sid))
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+        assert names, "nothing was bundled"
+        for name in names:
+            assert ".." not in name, f"member {name!r} can traverse out of the archive"
+            assert not name.startswith("/"), f"member {name!r} is an absolute path"
+            assert "/" not in name and "\\" not in name, (
+                f"member {name!r} still carries a path component"
+            )
+
+    async def test_identical_step_filenames_stay_distinct_and_attributed(self, client):
+        """A step-supplied filename is static config, identical across every run
+        in the batch. Used bare it told the reader nothing about which document
+        produced which file, and the collision counter — keyed only on the
+        original name — could still emit two members with the same name.
+        """
+        import io
+        import zipfile
+
+        user = _make_user()
+        cookies, headers = _auth()
+
+        def same_name(sid):
+            st = self._session_status(sid)
+            st["final_output"] = {
+                "output": {
+                    "type": "file_download",
+                    "data_b64": "cHduZWQ=",
+                    "file_type": "csv",
+                    "filename": "export.csv",
+                },
+            }
+            return st
+
+        with patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}), \
+             patch("app.dependencies.User") as MockUser, \
+             patch("app.routers.workflows.svc") as mock_svc:
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_svc.get_batch_status = AsyncMock(
+                return_value=self._batch([
+                    ("s1", "completed"), ("s2", "completed"), ("s3", "completed"),
+                ])
+            )
+            mock_svc.get_workflow_status = AsyncMock(side_effect=lambda sid, **kw: same_name(sid))
+
+            resp = await client.get(
+                "/api/workflows/batch-download?batch_id=b1&format=json",
+                cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+        assert len(names) == 3
+        assert len(set(names)) == 3, f"duplicate members in the archive: {names}"
+        # Each member names the run it came from, not just the step's config.
+        for sid in ("s1", "s2", "s3"):
+            assert any(sid in n for n in names), (
+                f"no member attributable to {sid} in {names}"
+            )
+
     async def test_no_completed_runs_returns_409(self, client):
         user = _make_user()
         cookies, headers = _auth()

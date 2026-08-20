@@ -306,6 +306,44 @@ def _zip_member_for_step(step_name: str, value):
     return f"{safe_name}.txt", str(value).encode()
 
 
+def _safe_zip_member(name: str) -> str:
+    """Reduce a caller-supplied filename to a single safe archive member name.
+
+    ``filename`` on a DataExport/DocumentRenderer/PackageBuilder step is free
+    text from the workflow's own configuration and reaches us unsanitised, so a
+    step named ``../../evil`` would be written into the ZIP verbatim. Archive
+    tools that do not normalise member paths then extract it outside the target
+    directory. Keep the last path component only, and refuse the traversal
+    spellings outright.
+    """
+    cleaned = name.replace("\\", "/").split("/")[-1].strip()
+    cleaned = "".join(c if c.isalnum() or c in " _-." else "_" for c in cleaned)
+    cleaned = cleaned.lstrip(".") or "output"
+    return cleaned
+
+
+def _unique_member(member: str, seen: dict[str, int]) -> str:
+    """A member name not yet used in this archive.
+
+    The counter has to record the *resolved* name, not just the original:
+    otherwise ``report.pdf`` colliding once yields ``report_1.pdf``, and a later
+    run legitimately named ``report_1.pdf`` is not in ``seen`` and is written
+    under the same name — zipfile emits a duplicate-name warning and one entry
+    silently wins on extraction.
+    """
+    if member not in seen:
+        seen[member] = 0
+        return member
+    stem, _, m_ext = member.rpartition(".")
+    while True:
+        seen[member] += 1
+        n = seen[member]
+        candidate = f"{stem}_{n}.{m_ext}" if m_ext else f"{member}_{n}"
+        if candidate not in seen:
+            seen[candidate] = 0
+            return candidate
+
+
 def _session_base_filename(status: dict, session_id: str) -> str:
     """Build a filesystem-safe base name (no extension) unique per session.
 
@@ -511,15 +549,16 @@ async def download_batch_results(
             if not status:
                 continue
             content, _media_type, ext, explicit_name = _render_workflow_output(status, format, parse_structured)
-            member = explicit_name or f"{_session_base_filename(status, sid)}.{ext}"
-            # Disambiguate collisions so no member silently overwrites another.
-            if member in seen:
-                seen[member] += 1
-                stem, _, m_ext = member.rpartition(".")
-                member = f"{stem}_{seen[member]}.{m_ext}" if m_ext else f"{member}_{seen[member]}"
+            base = _session_base_filename(status, sid)
+            if explicit_name:
+                # A step-supplied filename is static config, identical for every
+                # run in the batch, so on its own it says nothing about which
+                # document produced it. Prefix the per-run base so the bundle
+                # stays readable.
+                member = f"{base}-{_safe_zip_member(explicit_name)}"
             else:
-                seen[member] = 0
-            zf.writestr(member, content)
+                member = f"{base}.{ext}"
+            zf.writestr(_unique_member(member, seen), content)
     zip_buf.seek(0)
 
     zip_name = "".join(c if c.isalnum() or c in " _-." else "_" for c in f"batch-{batch_id}").strip()

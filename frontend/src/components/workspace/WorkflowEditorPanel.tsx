@@ -4836,6 +4836,9 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
   showDownloadPopup: boolean
   setShowDownloadPopup: (v: boolean) => void
 }) {
+  // Same as the batch card: a share-link recipient authorizes with the token.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = status?.status === 'completed'
   const isError = status?.status === 'error' || status?.status === 'failed'
   const isCanceled = status?.status === 'canceled'
@@ -5168,7 +5171,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
                 ] as const).map(({ fmt, label, desc, parseStructured }) => (
                   <a
                     key={label}
-                    href={downloadResults(sessionId, fmt, { parseStructured })}
+                    href={downloadResults(sessionId, fmt, { parseStructured, shareToken })}
                     onClick={() => setShowDownloadPopup(false)}
                     style={{
                       display: 'flex', flexDirection: 'column', gap: 1,
@@ -5353,6 +5356,11 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
   running: boolean
   runElapsed: number
 }) {
+  // A recipient who reached this workflow through a share link authorizes with
+  // the token, not team membership — without it both downloads 404 on a batch
+  // they just watched run.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = batchStatus.status === 'completed'
   const isError = batchStatus.status === 'failed'
   const isCanceled = batchStatus.status === 'canceled'
@@ -5440,8 +5448,11 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
                 )}
                 {itemDone && (
                   <a
-                    href={downloadResults(item.session_id, 'json')}
+                    href={downloadResults(item.session_id, 'json', { shareToken })}
                     onClick={e => e.stopPropagation()}
+                    // The row cancels Enter/Space to toggle itself, which would
+                    // swallow the link's own activation for a keyboard user.
+                    onKeyDown={e => e.stopPropagation()}
                     title="Download this output (JSON)"
                     aria-label={`Download output for ${item.document_title || item.session_id}`}
                     style={{
@@ -5487,7 +5498,7 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
       {batchId && completedCount > 0 && (
         <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <a
-            href={downloadBatchResults(batchId, 'json')}
+            href={downloadBatchResults(batchId, 'json', { shareToken })}
             style={{
               display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
               fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
