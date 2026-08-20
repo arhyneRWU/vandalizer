@@ -1457,3 +1457,33 @@ class TestCancelClearsTheReviewMarker:
         # Only the marker is dropped; the rest of meta_summary is untouched.
         assert act.meta_summary["kept"] == "yes"
         act.save.assert_awaited_once()
+
+
+class TestBatchStatusReportsCancelled:
+    @patch("app.services.workflow_service.WorkflowResult")
+    async def test_the_stopped_count_is_returned(self, mock_wr_cls):
+        """The count was computed to decide the overall status and then dropped,
+        so the card could say "3 of 20 completed" with no way to tell which of
+        the other 17 had actually run before the stop and which never started.
+        """
+        from app.services.workflow_service import get_batch_status
+
+        results = [
+            _make_result("s1", "completed"),
+            _make_result("s2", "canceled"),
+            _make_result("s3", "canceled"),
+            _make_result("s4", "queued"),
+        ]
+        mock_find = MagicMock()
+        mock_find.to_list = AsyncMock(return_value=results)
+        mock_wr_cls.find.return_value = mock_find
+
+        status = await get_batch_status("b1")
+
+        assert status["canceled"] == 2
+        assert status["completed"] == 1
+        assert status["total"] == 4
+        # Per-item status was always carried; it is what the row renders from.
+        assert [i["status"] for i in status["items"]] == [
+            "completed", "canceled", "canceled", "queued",
+        ]

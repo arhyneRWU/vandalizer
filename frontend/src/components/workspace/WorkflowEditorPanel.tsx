@@ -6,7 +6,7 @@ import {
   Bug, Search, Zap, Download, Package, CheckCircle, XCircle,
   MousePointerClick, PenTool, ClipboardCheck, Flag,
   ChevronDown, ChevronRight, ArrowUp, ArrowDown, GripVertical,
-  Circle, Hand, Keyboard, Sparkles, ShieldCheck, Type,
+  Circle, MinusCircle, Hand, Keyboard, Sparkles, ShieldCheck, Type,
   ArrowRight, Pause, TrendingUp, RefreshCw,
   Upload, Clock, Copy, Check, FolderInput, Link2, Info, AlertTriangle,
 } from 'lucide-react'
@@ -5528,6 +5528,9 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
       <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 8 }}>
         {batchStatus.completed} of {batchStatus.total} completed
         {batchStatus.failed > 0 && <span style={{ color: '#dc2626' }}> ({batchStatus.failed} failed)</span>}
+        {(batchStatus.canceled ?? 0) > 0 && (
+          <span style={{ color: '#b45309' }}> ({batchStatus.canceled} stopped)</span>
+        )}
         {running && <span> - {runElapsed}s elapsed</span>}
       </div>
 
@@ -5552,6 +5555,11 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
           const itemDone = item.status === 'completed'
           const itemFailed = item.status === 'error' || item.status === 'failed'
           const itemRunning = item.status === 'running'
+          // Without its own state a stopped run falls through to the gray dot
+          // used for "queued", so a halted 20-document batch shows 17 identical
+          // dots and no way to tell which ones actually ran — which is the
+          // question someone asks immediately after pressing STOP.
+          const itemCanceled = item.status === 'canceled'
           const isExpanded = expandedIdx === idx
 
           return (
@@ -5567,13 +5575,14 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
                   cursor: itemDone ? 'pointer' : 'default',
-                  backgroundColor: itemDone ? '#f0fdf4' : itemFailed ? '#fef2f2' : '#fff',
+                  backgroundColor: itemDone ? '#f0fdf4' : itemFailed ? '#fef2f2' : itemCanceled ? '#fffbeb' : '#fff',
                 }}
               >
                 {itemDone && <CheckCircle style={{ width: 14, height: 14, color: '#16a34a', flexShrink: 0 }} />}
                 {itemFailed && <XCircle style={{ width: 14, height: 14, color: '#dc2626', flexShrink: 0 }} />}
                 {itemRunning && <Loader2 aria-hidden="true" style={{ width: 14, height: 14, color: '#6b7280', flexShrink: 0, animation: 'spin 1s linear infinite' }} />}
-                {!itemDone && !itemFailed && !itemRunning && <Circle style={{ width: 14, height: 14, color: '#d1d5db', flexShrink: 0 }} />}
+                {itemCanceled && <MinusCircle aria-label="Stopped" style={{ width: 14, height: 14, color: '#b45309', flexShrink: 0 }} />}
+                {!itemDone && !itemFailed && !itemRunning && !itemCanceled && <Circle style={{ width: 14, height: 14, color: '#d1d5db', flexShrink: 0 }} />}
                 <span style={{ fontSize: 13, color: '#374151', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {item.document_title || item.session_id}
                 </span>

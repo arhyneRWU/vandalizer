@@ -909,6 +909,9 @@ async def get_batch_status(
         "total": total,
         "completed": completed,
         "failed": failed,
+        # Already computed above for the overall status, and the card needs it
+        # to say how much of a stopped batch actually ran.
+        "canceled": canceled,
         "items": items,
     }
 

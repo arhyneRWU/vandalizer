@@ -187,6 +187,9 @@ export interface BatchStatus {
   total: number
   completed: number
   failed: number
+  /** Runs stopped by the user. Optional so a client polling an older backend
+   *  still typechecks; treat absent as zero. */
+  canceled?: number
   items: BatchStatusItem[]
 }
 
