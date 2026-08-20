@@ -84,6 +84,39 @@ interface Props {
   isStreaming?: boolean
 }
 
+/** The nearest ancestor that clips its contents horizontally.
+ *
+ * A container with `overflow-y: auto` computes `overflow-x` to `auto` too, per
+ * CSS — so the chat scroller clips sideways even though nothing asked it to,
+ * and `hide-scrollbar` removes the scrollbar that would otherwise let a reader
+ * reach what spilled out.
+ */
+function clippingAncestor(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null
+  while (node && node !== document.body) {
+    const { overflowX, overflowY } = getComputedStyle(node)
+    if (overflowX !== 'visible' || overflowY !== 'visible') return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/** Align the menu to the pill's right edge when left-aligning would overflow.
+ *
+ * Returns the alignment to use. Flipping is only worth it if the menu actually
+ * fits that way — otherwise it would be clipped on the other side instead, and
+ * left-aligned at least keeps the first item reachable.
+ */
+export function menuAlignmentFor(
+  pillLeft: number, pillRight: number, menuWidth: number,
+  containerLeft: number, containerRight: number,
+): 'left' | 'right' {
+  const fitsLeftAligned = pillLeft + menuWidth <= containerRight
+  if (fitsLeftAligned) return 'left'
+  const fitsRightAligned = pillRight - menuWidth >= containerLeft
+  return fitsRightAligned ? 'right' : 'left'
+}
+
 export function ChatMessage({ message, messageIndex, conversationUuid, streamingThinking, thinkingDuration, isStreaming: isStreamingProp }: Props) {
   const isUser = message.role === 'user'
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null)
@@ -95,6 +128,11 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
   const [openCitation, setOpenCitation] = useState<number | null>(null)
   // Citation whose Preview/Open chooser is showing (null = none).
   const [citationMenu, setCitationMenu] = useState<number | null>(null)
+  // The menu is absolutely positioned inside the chat scroller, which clips
+  // horizontally; in files mode the panel is ~half width, so the last pill on
+  // a row opens a menu that runs off the edge with no scrollbar to reach it.
+  const [menuAlign, setMenuAlign] = useState<'left' | 'right'>('left')
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const citationsRef = useRef<HTMLDivElement>(null)
   const certPanel = useCertificationPanel()
@@ -181,6 +219,24 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
       document.removeEventListener('mousedown', onPointerDown)
       document.removeEventListener('keydown', onKeyDown)
     }
+  }, [citationMenu])
+
+  useEffect(() => {
+    if (citationMenu === null) {
+      setMenuAlign('left')
+      return
+    }
+    const menu = menuRef.current
+    const pill = menu?.parentElement
+    if (!menu || !pill) return
+    const container = clippingAncestor(menu)
+    const bounds = container?.getBoundingClientRect()
+    const left = bounds?.left ?? 0
+    const right = bounds?.right ?? document.documentElement.clientWidth
+    const pillRect = pill.getBoundingClientRect()
+    setMenuAlign(menuAlignmentFor(
+      pillRect.left, pillRect.right, menu.offsetWidth, left, right,
+    ))
   }, [citationMenu])
 
   const toggleCitationPreview = (index: number) => {
@@ -356,9 +412,11 @@ export function ChatMessage({ message, messageIndex, conversationUuid, streaming
                         {menuOpen && (
                           <div
                             role="menu"
+                            ref={menuRef}
                             aria-label={`Source: ${label}`}
                             style={{
-                              position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+                              position: 'absolute', top: 'calc(100% + 4px)',
+                              ...(menuAlign === 'right' ? { right: 0 } : { left: 0 }),
                               zIndex: 30, minWidth: 150, padding: 4,
                               backgroundColor: '#fff', border: '1px solid #e5e7eb',
                               borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
