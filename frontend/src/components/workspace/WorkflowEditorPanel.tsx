@@ -5468,9 +5468,13 @@ export function planTestResultDownload(
 // Decode a base64 payload to bytes. File-producing steps hand back their
 // artifact as data_b64, and writing that string into a Blob would save the
 // base64 text rather than the file it encodes.
-function base64ToBytes(b64: string): Uint8Array {
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
+  // Back the view with a concrete ArrayBuffer: since TS 5.7 Uint8Array is
+  // generic over its buffer, and only Uint8Array<ArrayBuffer> satisfies
+  // BlobPart — a bare `new Uint8Array(n)` widens to ArrayBufferLike.
+  const buffer = new ArrayBuffer(binary.length)
+  const bytes = new Uint8Array(buffer)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
   return bytes
 }
