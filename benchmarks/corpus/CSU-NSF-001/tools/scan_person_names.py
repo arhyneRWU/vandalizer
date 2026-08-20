@@ -114,8 +114,17 @@ NON_PERSON_TOKENS = {
 HONORIFIC = re.compile(r"\b(?:Dr|Prof|Professor|Mr|Ms|Mrs|Mx)\.?\s+")
 
 # First Last, or First M. Last, or First Middle Last.
+#
+# The separators are `[ \t]+`, not `\s+`, because a name must not be allowed to
+# span a line break. `docx_lines()` yields a whole table cell as one string,
+# newlines and all, so with `\s+` a signature block reading
+# "<name>\nVice President for Research" matched First-Middle-Last *across* the
+# break, landed the third group on "Vice", and was then discarded as a
+# non-person token — the name went unreported. That is exactly the v0.3.2
+# signature-block shape this scanner exists to catch, and the failure got
+# quieter as NON_PERSON_TOKENS grew.
 NAME = re.compile(
-    r"\b([A-Z][a-z]{2,})\s+(?:([A-Z]\.|[A-Z][a-z]{2,})\s+)?([A-Z][a-z]{2,}(?:-[A-Z][a-z]{2,})?)\b"
+    r"\b([A-Z][a-z]{2,})[ \t]+(?:([A-Z]\.|[A-Z][a-z]{2,})[ \t]+)?([A-Z][a-z]{2,}(?:-[A-Z][a-z]{2,})?)\b"
 )
 
 
@@ -225,8 +234,15 @@ def collect(package: Path, show_permitted: bool):
             meta = []
 
         for value in meta:
-            for hit in candidates(value):
-                findings.append((str(relative), "metadata", hit, value[:100]))
+            # One line at a time. `office_metadata()` reads with `re.S`, so a
+            # wrapped `dc:description` comes back multi-line, and the honorific
+            # pass's 40-character tail would run straight across the break into
+            # a hit no reviewer can read. No metadata value in the corpus is
+            # multi-line today, so this leaves every current finding alone; the
+            # recorded context is still the whole value.
+            for line in value.splitlines():
+                for hit in candidates(line):
+                    findings.append((str(relative), "metadata", hit, value[:100]))
 
         for where, line in lines:
             if any(marker in line for marker in CREDIT_MARKERS):
