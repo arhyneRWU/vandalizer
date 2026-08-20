@@ -202,3 +202,82 @@ class TestSuggestingAModel:
         assert suggest_document_model(
             current_name="small", current_config=SMALL, models=[], input_tokens=41213,
         ) is None
+
+
+class TestSizingAgainstTheCandidate:
+    """The request is measured once, with the model the user is on.
+
+    That number carries *that* model's safety margin — 1.0 where the count is
+    exact (a local vocabulary, or OpenAI), 1.20 where it is an estimate.
+    Comparing it against another model's budget mixes rulers: a request
+    measured exactly looks like it fits a model whose own count comes out 20%
+    higher, the router switches, and the model rejects the request. That is the
+    "estimate reads low, so we hard-fail" failure the margin exists to prevent,
+    relocated to the routing boundary.
+    """
+
+    def test_an_exact_count_is_inflated_before_it_is_offered_to_an_estimated_model(self):
+        # gpt-4o counts exactly (margin 1.0). The candidate has no local
+        # vocabulary, so its own count would run ~20% higher.
+        current = _model("gpt-4o", 32768)
+        candidate = _model("some-hosted-model", 100_000)
+
+        # Sized on the current model's ruler this sits just inside the
+        # candidate's budget; on the candidate's own ruler it does not.
+        tokens = 88_000
+
+        d = choose_document_model(
+            current_name="gpt-4o",
+            current_config=current,
+            candidate_name="some-hosted-model",
+            candidate_config=candidate,
+            input_tokens=tokens,
+        )
+        assert d.switched is False, (
+            "routed to a model that would have rejected the request"
+        )
+        assert "does not fit" in d.reason
+
+    def test_a_request_that_genuinely_fits_still_routes(self):
+        current = _model("gpt-4o", 32768)
+        candidate = _model("some-hosted-model", 262_144)
+        d = choose_document_model(
+            current_name="gpt-4o",
+            current_config=current,
+            candidate_name="some-hosted-model",
+            candidate_config=candidate,
+            input_tokens=41_213,
+        )
+        assert d.switched is True
+        assert d.model_name == "some-hosted-model"
+
+    def test_a_stricter_candidate_ruler_never_shrinks_the_estimate(self):
+        # Reverse direction: current is estimated (1.20), candidate exact (1.0).
+        # Rescaling down would make the request look smaller than measured, so
+        # the number is left alone — over-stating costs a bigger model, while
+        # under-stating hard-fails.
+        current = _model("some-hosted-model", 32768)
+        candidate = _model("gpt-4o", 50_000)
+        d = choose_document_model(
+            current_name="some-hosted-model",
+            current_config=current,
+            candidate_name="gpt-4o",
+            candidate_config=candidate,
+            input_tokens=45_000,
+        )
+        # 45k already exceeds gpt-4o's usable budget; it must not be scaled down
+        # into fitting.
+        assert d.switched is False
+
+    def test_the_suggestion_list_uses_each_candidate_ruler(self):
+        current = _model("gpt-4o", 32768)
+        estimated = _model("hosted-a", 100_000)
+        suggestion = suggest_document_model(
+            current_name="gpt-4o",
+            current_config=current,
+            models=[estimated],
+            input_tokens=88_000,
+        )
+        assert suggestion is None, (
+            "offered a model whose own count would not fit the request"
+        )
