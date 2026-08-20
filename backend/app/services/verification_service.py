@@ -1599,7 +1599,7 @@ async def _notify_examiners(req: VerificationRequest) -> None:
                 kind="verification_submitted",
                 title=f'New submission: "{item_name}"',
                 body=f"{submitter_display} submitted a {req.item_kind.replace('_', ' ')} for verification.",
-                link="/verification",
+                link=f"/verification?request={req.uuid}",
                 item_kind=req.item_kind,
                 item_id=str(req.item_id),
                 item_name=item_name,
@@ -1619,6 +1619,7 @@ async def _notify_examiners(req: VerificationRequest) -> None:
                 item_name=item_name,
                 summary=req.summary,
                 frontend_url=settings.frontend_url,
+                request_uuid=req.uuid,
             )
             await send_email(reviewer.email, subject, html, settings, email_type="verification_submitted")
     except Exception:
