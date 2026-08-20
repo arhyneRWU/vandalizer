@@ -18,7 +18,7 @@ import { useConfirm } from '../shared/useConfirm'
 import { getProjectDocuments } from '../../api/projects'
 import {
   getWorkflow, addStep, deleteStep, addTask, deleteTask, updateTask,
-  updateWorkflow, updateStep, downloadResults, testStep, getTestStepStatus,
+  updateWorkflow, updateStep, downloadResults, downloadBatchResults, testStep, getTestStepStatus,
   reorderSteps, validateWorkflow, runWorkflow, streamWorkflowStatus, createTempDocuments,
   getWorkflowQualityHistory, getWorkflowImprovementSuggestions, getWorkflowQualityStatus,
   getValidationPlan, updateValidationPlan, generateValidationPlan, validationReportUrl,
@@ -48,6 +48,7 @@ import { useWorkflowRunner } from '../../hooks/useWorkflowRunner'
 import { ApiError } from '../../api/client'
 import { MAX_NAME_LENGTH, normalizeName } from '../../utils/nameValidation'
 import { computeReorderedIds } from '../../utils/reorder'
+import { formatPageLocator } from '../../utils/pageLocator'
 import type { Workflow, WorkflowStep, WorkflowTask, WorkflowStatus, WorkflowCitation, ModelInfo, SearchSetItem } from '../../types/workflow'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import DOMPurify from 'dompurify'
@@ -889,6 +890,7 @@ export function WorkflowEditorPanel() {
               runnerStatus={runner.status}
               runnerRunning={runner.running}
               runnerSessionId={runner.sessionId}
+              runnerBatchId={runner.batchId}
               batchStatus={runner.batchStatus}
               runElapsed={runElapsed}
               showDownloadPopup={showDownloadPopup}
@@ -1103,9 +1105,10 @@ export function WorkflowEditorPanel() {
             No input required — runs directly
           </div>
         )}
-        {runner.running && !runner.batchId ? (
-          // Single run in progress — offer an active STOP (red, matches the
-          // app's destructive-action convention; same geometry as RUN).
+        {runner.running && (runner.batchId || runner.sessionId) ? (
+          // Run in progress (single or batch) — offer an active STOP (red,
+          // matches the app's destructive-action convention; same geometry as
+          // RUN). For a batch this cancels every per-document run.
           <button
             onClick={runner.stop}
             disabled={runner.cancelling}
@@ -1135,13 +1138,7 @@ export function WorkflowEditorPanel() {
           <button
             onClick={handleRun}
             disabled={runner.running || missingInput || !hasSteps}
-            title={
-              !hasSteps
-                ? 'Add at least one step before running this workflow'
-                : runner.running && runner.batchId
-                  ? 'Stop is not yet available for batch runs'
-                  : undefined
-            }
+            title={!hasSteps ? 'Add at least one step before running this workflow' : undefined}
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
@@ -1337,6 +1334,7 @@ function DesignCanvas({
   runnerStatus,
   runnerRunning,
   runnerSessionId,
+  runnerBatchId,
   batchStatus,
   runElapsed,
   showDownloadPopup,
@@ -1352,6 +1350,7 @@ function DesignCanvas({
   runnerStatus: WorkflowStatus | null
   runnerRunning: boolean
   runnerSessionId: string | null
+  runnerBatchId: string | null
   batchStatus: BatchStatus | null
   runElapsed: number
   showDownloadPopup: boolean
@@ -1525,6 +1524,7 @@ function DesignCanvas({
         <>
           <ConnectionLine />
           <BatchOutputCard
+            batchId={runnerBatchId}
             batchStatus={batchStatus}
             running={runnerRunning}
             runElapsed={runElapsed}
@@ -4897,6 +4897,9 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
   showDownloadPopup: boolean
   setShowDownloadPopup: (v: boolean) => void
 }) {
+  // Same as the batch card: a share-link recipient authorizes with the token.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = status?.status === 'completed'
   const isError = status?.status === 'error' || status?.status === 'failed'
   const isCanceled = status?.status === 'canceled'
@@ -5229,7 +5232,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
                 ] as const).map(({ fmt, label, desc, parseStructured }) => (
                   <a
                     key={label}
-                    href={downloadResults(sessionId, fmt, { parseStructured })}
+                    href={downloadResults(sessionId, fmt, { parseStructured, shareToken })}
                     onClick={() => setShowDownloadPopup(false)}
                     style={{
                       display: 'flex', flexDirection: 'column', gap: 1,
@@ -5323,7 +5326,7 @@ function WorkflowSourcesPanel({ sources }: { sources: WorkflowCitation[] }) {
       {expanded && (
         <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {sources.map((c, i) => {
-            const locator = typeof c.page === 'number' ? `p. ${c.page}` : (c.sheet || null)
+            const locator = formatPageLocator(c.page, c.page_approximate) ?? (c.sheet || null)
             const label = locator ? `${c.document_title} · ${locator}` : c.document_title
             const relevance = typeof c.similarity === 'number' ? `${Math.round(c.similarity * 100)}% match` : null
             const tooltip = [relevance, c.content_preview || null].filter(Boolean).join(' — ')
@@ -5472,15 +5475,22 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes
 }
 
-function BatchOutputCard({ batchStatus, running, runElapsed }: {
+function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
+  batchId: string | null
   batchStatus: BatchStatus
   running: boolean
   runElapsed: number
 }) {
+  // A recipient who reached this workflow through a share link authorizes with
+  // the token, not team membership — without it both downloads 404 on a batch
+  // they just watched run.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = batchStatus.status === 'completed'
   const isError = batchStatus.status === 'failed'
-  const isDone = isCompleted || isError
+  const isCanceled = batchStatus.status === 'canceled'
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const completedCount = batchStatus.items.filter(it => it.status === 'completed').length
 
   const renderOutput = (data: unknown): string => {
     if (data === null || data === undefined) return ''
@@ -5497,12 +5507,12 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
     <div style={{
       backgroundColor: '#fff', borderRadius: 'var(--ui-radius, 8px)',
       boxShadow: '0 6px 18px rgba(0,0,0,0.05)', padding: 20,
-      border: isDone
-        ? (isError ? '2px solid #fca5a5' : '2px solid #86efac')
+      border: isError ? '2px solid #fca5a5'
+        : isCompleted ? '2px solid #86efac'
         : '2px solid #e5e7eb',
     }}>
       <div style={{ fontWeight: 600, fontSize: 14, color: '#202124', marginBottom: 8 }}>
-        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : 'Batch Output'}
+        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : isCanceled ? 'Batch Stopped' : 'Batch Output'}
       </div>
 
       {/* Progress summary */}
@@ -5562,6 +5572,25 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
                   <span style={{ fontSize: 11, color: '#6b7280', flexShrink: 0 }}>{item.current_step_name}</span>
                 )}
                 {itemDone && (
+                  <a
+                    href={downloadResults(item.session_id, 'json', { shareToken })}
+                    onClick={e => e.stopPropagation()}
+                    // The row cancels Enter/Space to toggle itself, which would
+                    // swallow the link's own activation for a keyboard user.
+                    onKeyDown={e => e.stopPropagation()}
+                    title="Download this output (JSON)"
+                    aria-label={`Download output for ${item.document_title || item.session_id}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', flexShrink: 0,
+                      color: '#6b7280', textDecoration: 'none',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.color = '#111827' }}
+                    onMouseLeave={e => { e.currentTarget.style.color = '#6b7280' }}
+                  >
+                    <Download style={{ width: 14, height: 14 }} />
+                  </a>
+                )}
+                {itemDone && (
                   <ChevronDown style={{
                     width: 14, height: 14, color: '#6b7280', flexShrink: 0,
                     transition: 'transform 0.15s',
@@ -5588,6 +5617,26 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
           )
         })}
       </div>
+
+      {/* Download all completed outputs as a ZIP of JSON files. Shown as soon as
+          any run finishes, so completed outputs are grabbable mid-batch. */}
+      {batchId && completedCount > 0 && (
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <a
+            href={downloadBatchResults(batchId, 'json', { shareToken })}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
+              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+              border: '1px solid #d1d5db', borderRadius: 6,
+              backgroundColor: '#fff', cursor: 'pointer', color: '#374151', textDecoration: 'none',
+            }}
+          >
+            <Package style={{ width: 14, height: 14 }} />
+            Download all (.zip)
+            {completedCount < batchStatus.total && <span style={{ fontWeight: 400, color: '#6b7280' }}>({completedCount})</span>}
+          </a>
+        </div>
+      )}
     </div>
   )
 }
