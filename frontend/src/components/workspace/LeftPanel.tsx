@@ -14,7 +14,7 @@ import { addDocumentsToKB } from '../../api/knowledge'
 import type { Folder } from '../../types/document'
 
 export function LeftPanel() {
-  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId, workspaceMode, setOpenDocumentUuid } = useWorkspace()
+  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, highlightPageApproximate, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId, workspaceMode, setOpenDocumentUuid } = useWorkspace()
   const { toast } = useToast()
   // Folder targeted by the workflow / KB picker modals (null = closed).
   const [workflowPickerFolder, setWorkflowPickerFolder] = useState<Folder | null>(null)
@@ -115,7 +115,11 @@ export function LeftPanel() {
       setSelectedDocUuids([viewDocumentRequest.uuid])
       setSelectedDocNames({ [viewDocumentRequest.uuid]: viewDocumentRequest.title })
       if (viewDocumentRequest.highlight) {
-        setHighlightTerms(viewDocumentRequest.highlight.terms, viewDocumentRequest.highlight.page)
+        setHighlightTerms(
+          viewDocumentRequest.highlight.terms,
+          viewDocumentRequest.highlight.page,
+          viewDocumentRequest.highlight.pageApproximate,
+        )
       } else {
         setHighlightTerms([])
       }
@@ -327,6 +331,7 @@ export function LeftPanel() {
             docUuid={viewingDoc.uuid}
             highlightTerms={highlightTerms}
             highlightPage={highlightPage}
+            highlightPageApproximate={highlightPageApproximate}
             onClearHighlights={() => setHighlightTerms([])}
             processing={viewingDoc.processing}
             taskStatus={viewingDoc.taskStatus}
