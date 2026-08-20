@@ -18,7 +18,7 @@ import { useConfirm } from '../shared/useConfirm'
 import { getProjectDocuments } from '../../api/projects'
 import {
   getWorkflow, addStep, deleteStep, addTask, deleteTask, updateTask,
-  updateWorkflow, updateStep, downloadResults, testStep, getTestStepStatus,
+  updateWorkflow, updateStep, downloadResults, downloadBatchResults, testStep, getTestStepStatus,
   reorderSteps, validateWorkflow, runWorkflow, streamWorkflowStatus, createTempDocuments,
   getWorkflowQualityHistory, getWorkflowImprovementSuggestions, getWorkflowQualityStatus,
   getValidationPlan, updateValidationPlan, generateValidationPlan, validationReportUrl,
@@ -48,6 +48,7 @@ import { useWorkflowRunner } from '../../hooks/useWorkflowRunner'
 import { ApiError } from '../../api/client'
 import { MAX_NAME_LENGTH, normalizeName } from '../../utils/nameValidation'
 import { computeReorderedIds } from '../../utils/reorder'
+import { formatPageLocator } from '../../utils/pageLocator'
 import type { Workflow, WorkflowStep, WorkflowTask, WorkflowStatus, WorkflowCitation, ModelInfo, SearchSetItem } from '../../types/workflow'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import DOMPurify from 'dompurify'
@@ -890,6 +891,7 @@ export function WorkflowEditorPanel() {
               runnerStatus={runner.status}
               runnerRunning={runner.running}
               runnerSessionId={runner.sessionId}
+              runnerBatchId={runner.batchId}
               batchStatus={runner.batchStatus}
               runElapsed={runElapsed}
               showDownloadPopup={showDownloadPopup}
@@ -1104,9 +1106,10 @@ export function WorkflowEditorPanel() {
             No input required — runs directly
           </div>
         )}
-        {runner.running && !runner.batchId ? (
-          // Single run in progress — offer an active STOP (red, matches the
-          // app's destructive-action convention; same geometry as RUN).
+        {runner.running && (runner.batchId || runner.sessionId) ? (
+          // Run in progress (single or batch) — offer an active STOP (red,
+          // matches the app's destructive-action convention; same geometry as
+          // RUN). For a batch this cancels every per-document run.
           <button
             onClick={runner.stop}
             disabled={runner.cancelling}
@@ -1136,13 +1139,7 @@ export function WorkflowEditorPanel() {
           <button
             onClick={handleRun}
             disabled={runner.running || missingInput || !hasSteps}
-            title={
-              !hasSteps
-                ? 'Add at least one step before running this workflow'
-                : runner.running && runner.batchId
-                  ? 'Stop is not yet available for batch runs'
-                  : undefined
-            }
+            title={!hasSteps ? 'Add at least one step before running this workflow' : undefined}
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
@@ -1338,6 +1335,7 @@ function DesignCanvas({
   runnerStatus,
   runnerRunning,
   runnerSessionId,
+  runnerBatchId,
   batchStatus,
   runElapsed,
   showDownloadPopup,
@@ -1353,6 +1351,7 @@ function DesignCanvas({
   runnerStatus: WorkflowStatus | null
   runnerRunning: boolean
   runnerSessionId: string | null
+  runnerBatchId: string | null
   batchStatus: BatchStatus | null
   runElapsed: number
   showDownloadPopup: boolean
@@ -1526,6 +1525,7 @@ function DesignCanvas({
         <>
           <ConnectionLine />
           <BatchOutputCard
+            batchId={runnerBatchId}
             batchStatus={batchStatus}
             running={runnerRunning}
             runElapsed={runElapsed}
@@ -2783,6 +2783,41 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
       setTestError(err instanceof Error ? err.message : 'Failed to start test')
       if (testMsgRef.current) { clearInterval(testMsgRef.current); testMsgRef.current = null }
     }
+  }
+
+  // Download the in-memory Test Step output. Test runs have no WorkflowResult /
+  // session, so there's no server download endpoint — build the file
+  // client-side from the result already in state.
+  //
+  // What arrives here is the return of _format_final_output, which stringifies
+  // everything *except* a {type: "file_download"} payload, which it passes
+  // through as a dict. So a "is it a string?" split gets both cases backwards:
+  // a genuinely structured result has already been json.dumps'd server-side and
+  // is a string, while the only non-string is the one payload that must not be
+  // written as JSON. DocumentRenderer, DataExport and PackageBuilder steps are
+  // all testable and all produce it — saving a rendered .docx as a JSON blob of
+  // base64 is not a download of anything the user asked for. The server's own
+  // multi-output path (_zip_member_for_step) decodes it, and so does this.
+  const handleDownloadTestResult = () => {
+    // The label shown in the editor, which is what the user is looking at.
+    // task.name is the node *type*, so three differently-named Prompt steps
+    // would all download as "Prompt-test.txt".
+    const label = (taskData.name as string) || task.name || 'step'
+    const plan = planTestResultDownload(testResult, label)
+    if (!plan) return
+
+    const blob = plan.kind === 'file'
+      ? new Blob([base64ToBytes(plan.content)], { type: plan.mime })
+      : new Blob([plan.content], { type: plan.mime })
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = plan.filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
   }
 
   const getTextValue = (key: string): string => {
@@ -4280,6 +4315,31 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 }}>
                   <CheckCircle style={{ width: 14, height: 14 }} />
                   Test Completed
+                  <button
+                    type="button"
+                    onClick={handleDownloadTestResult}
+                    // A step can complete having produced nothing —
+                    // _format_final_output(None) is "" — and the block above
+                    // still renders. Offering a button that writes a 0-byte
+                    // file is worse than saying there is nothing to save.
+                    disabled={testResult === '' || testResult === undefined}
+                    title={
+                      testResult === '' || testResult === undefined
+                        ? 'This step produced no output'
+                        : 'Download this output'
+                    }
+                    style={{
+                      marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
+                      padding: '4px 10px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                      border: '1px solid #d1d5db', borderRadius: 6,
+                      backgroundColor: '#fff', color: '#374151',
+                      cursor: testResult === '' || testResult === undefined ? 'not-allowed' : 'pointer',
+                      opacity: testResult === '' || testResult === undefined ? 0.5 : 1,
+                    }}
+                  >
+                    <Download style={{ width: 13, height: 13 }} />
+                    Download
+                  </button>
                 </div>
                 <div style={{
                   backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
@@ -4838,6 +4898,9 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
   showDownloadPopup: boolean
   setShowDownloadPopup: (v: boolean) => void
 }) {
+  // Same as the batch card: a share-link recipient authorizes with the token.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = status?.status === 'completed'
   const isError = status?.status === 'error' || status?.status === 'failed'
   const isCanceled = status?.status === 'canceled'
@@ -5174,7 +5237,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
                 ] as const).map(({ fmt, label, desc, parseStructured }) => (
                   <a
                     key={label}
-                    href={downloadResults(sessionId, fmt, { parseStructured })}
+                    href={downloadResults(sessionId, fmt, { parseStructured, shareToken })}
                     onClick={() => setShowDownloadPopup(false)}
                     style={{
                       display: 'flex', flexDirection: 'column', gap: 1,
@@ -5268,7 +5331,7 @@ function WorkflowSourcesPanel({ sources }: { sources: WorkflowCitation[] }) {
       {expanded && (
         <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {sources.map((c, i) => {
-            const locator = typeof c.page === 'number' ? `p. ${c.page}` : (c.sheet || null)
+            const locator = formatPageLocator(c.page, c.page_approximate) ?? (c.sheet || null)
             const label = locator ? `${c.document_title} · ${locator}` : c.document_title
             const relevance = typeof c.similarity === 'number' ? `${Math.round(c.similarity * 100)}% match` : null
             const tooltip = [relevance, c.content_preview || null].filter(Boolean).join(' — ')
@@ -5353,15 +5416,90 @@ function ConvertWorkflowDocsButton({
 // Batch output card
 // ---------------------------------------------------------------------------
 
-function BatchOutputCard({ batchStatus, running, runElapsed }: {
+export type TestDownloadPlan = {
+  kind: 'file' | 'json' | 'text'
+  filename: string
+  /** Base64 payload for kind 'file'; the text to write otherwise. */
+  content: string
+  mime: string
+}
+
+/** Decide what a Test Step result should be saved as.
+ *
+ * The result is the return of the engine's _format_final_output, which
+ * stringifies everything *except* a {type: "file_download"} payload — that one
+ * comes through as an object. So "is it a string?" gets both cases backwards:
+ * a genuinely structured result is already JSON text, while the sole non-string
+ * is the payload that must not be written as JSON.
+ */
+export function planTestResultDownload(
+  result: unknown, label: string,
+): TestDownloadPlan | null {
+  if (result === null || result === undefined || result === '') return null
+
+  const safeName =
+    (label || 'step').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'step'
+
+  if (typeof result === 'object') {
+    const payload = result as Record<string, unknown>
+    if (payload.type === 'file_download') {
+      return {
+        kind: 'file',
+        filename: (payload.filename as string) || `${safeName}-test.bin`,
+        content: String(payload.data_b64 ?? ''),
+        mime: 'application/octet-stream',
+      }
+    }
+    return {
+      kind: 'json',
+      filename: `${safeName}-test.json`,
+      content: JSON.stringify(payload, null, 2),
+      mime: 'application/json',
+    }
+  }
+
+  const text = String(result)
+  const looksJson = /^[[{]/.test(text.trimStart()) && (() => {
+    try { JSON.parse(text); return true } catch { return false }
+  })()
+  return {
+    kind: looksJson ? 'json' : 'text',
+    filename: `${safeName}-test.${looksJson ? 'json' : 'txt'}`,
+    content: text,
+    mime: looksJson ? 'application/json' : 'text/plain',
+  }
+}
+
+// Decode a base64 payload to bytes. File-producing steps hand back their
+// artifact as data_b64, and writing that string into a Blob would save the
+// base64 text rather than the file it encodes.
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(b64)
+  // Back the view with a concrete ArrayBuffer: since TS 5.7 Uint8Array is
+  // generic over its buffer, and only Uint8Array<ArrayBuffer> satisfies
+  // BlobPart — a bare `new Uint8Array(n)` widens to ArrayBufferLike.
+  const buffer = new ArrayBuffer(binary.length)
+  const bytes = new Uint8Array(buffer)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
+  batchId: string | null
   batchStatus: BatchStatus
   running: boolean
   runElapsed: number
 }) {
+  // A recipient who reached this workflow through a share link authorizes with
+  // the token, not team membership — without it both downloads 404 on a batch
+  // they just watched run.
+  const { openWorkflowShareToken } = useWorkspace()
+  const shareToken = openWorkflowShareToken ?? undefined
   const isCompleted = batchStatus.status === 'completed'
   const isError = batchStatus.status === 'failed'
-  const isDone = isCompleted || isError
+  const isCanceled = batchStatus.status === 'canceled'
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const completedCount = batchStatus.items.filter(it => it.status === 'completed').length
 
   const renderOutput = (data: unknown): string => {
     if (data === null || data === undefined) return ''
@@ -5378,12 +5516,12 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
     <div style={{
       backgroundColor: '#fff', borderRadius: 'var(--ui-radius, 8px)',
       boxShadow: '0 6px 18px rgba(0,0,0,0.05)', padding: 20,
-      border: isDone
-        ? (isError ? '2px solid #fca5a5' : '2px solid #86efac')
+      border: isError ? '2px solid #fca5a5'
+        : isCompleted ? '2px solid #86efac'
         : '2px solid #e5e7eb',
     }}>
       <div style={{ fontWeight: 600, fontSize: 14, color: '#202124', marginBottom: 8 }}>
-        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : 'Batch Output'}
+        {running ? 'Batch Running' : isCompleted ? 'Batch Complete' : isError ? 'Batch Failed' : isCanceled ? 'Batch Stopped' : 'Batch Output'}
       </div>
 
       {/* Progress summary */}
@@ -5443,6 +5581,25 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
                   <span style={{ fontSize: 11, color: '#6b7280', flexShrink: 0 }}>{item.current_step_name}</span>
                 )}
                 {itemDone && (
+                  <a
+                    href={downloadResults(item.session_id, 'json', { shareToken })}
+                    onClick={e => e.stopPropagation()}
+                    // The row cancels Enter/Space to toggle itself, which would
+                    // swallow the link's own activation for a keyboard user.
+                    onKeyDown={e => e.stopPropagation()}
+                    title="Download this output (JSON)"
+                    aria-label={`Download output for ${item.document_title || item.session_id}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', flexShrink: 0,
+                      color: '#6b7280', textDecoration: 'none',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.color = '#111827' }}
+                    onMouseLeave={e => { e.currentTarget.style.color = '#6b7280' }}
+                  >
+                    <Download style={{ width: 14, height: 14 }} />
+                  </a>
+                )}
+                {itemDone && (
                   <ChevronDown style={{
                     width: 14, height: 14, color: '#6b7280', flexShrink: 0,
                     transition: 'transform 0.15s',
@@ -5469,6 +5626,26 @@ function BatchOutputCard({ batchStatus, running, runElapsed }: {
           )
         })}
       </div>
+
+      {/* Download all completed outputs as a ZIP of JSON files. Shown as soon as
+          any run finishes, so completed outputs are grabbable mid-batch. */}
+      {batchId && completedCount > 0 && (
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <a
+            href={downloadBatchResults(batchId, 'json', { shareToken })}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
+              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+              border: '1px solid #d1d5db', borderRadius: 6,
+              backgroundColor: '#fff', cursor: 'pointer', color: '#374151', textDecoration: 'none',
+            }}
+          >
+            <Package style={{ width: 14, height: 14 }} />
+            Download all (.zip)
+            {completedCount < batchStatus.total && <span style={{ fontWeight: 400, color: '#6b7280' }}>({completedCount})</span>}
+          </a>
+        </div>
+      )}
     </div>
   )
 }

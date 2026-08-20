@@ -1005,9 +1005,13 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         if isinstance(sources, list):
             retrieved_sources.extend(sources)
 
-    # Save final result
+    # Save final result. The status guard matters: cancellation flips the row to
+    # "canceled" out-of-band, and a step already in flight keeps running until
+    # the Celery revoke lands (or finishes first). Writing "completed"
+    # unconditionally would undo the user's stop and leave a batch they halted
+    # reporting success.
     db.workflow_result.update_one(
-        {"_id": ObjectId(workflow_result_id)},
+        {"_id": ObjectId(workflow_result_id), "status": {"$ne": "canceled"}},
         {"$set": {
             "status": "completed",
             "final_output": {"output": final_output, "data": data},
@@ -1255,11 +1259,20 @@ def resume_workflow_after_approval(self, approval_uuid):
     saved_output = edited if edited not in (None, {}) else approval_doc.get("data_for_review")
     initial_output = {"output": saved_output, "step_name": "Approval"} if saved_output else None
 
-    # Update result to running
-    db.workflow_result.update_one(
-        {"_id": ObjectId(workflow_result_id)},
+    # Update result to running. Refuse if the run was canceled while it sat at
+    # the gate: cancel_batch expires the pending approvals it cancels, but a
+    # reviewer holding a stale page can still approve one, and resuming would
+    # restart a run the user explicitly stopped — spending tokens hours later.
+    resumed = db.workflow_result.update_one(
+        {"_id": ObjectId(workflow_result_id), "status": {"$ne": "canceled"}},
         {"$set": {"status": "running", "current_step_detail": "Resuming after approval"}},
     )
+    if resumed.matched_count == 0:
+        logger.info(
+            "Not resuming workflow_result %s after approval — it was canceled",
+            workflow_result_id,
+        )
+        return {"status": "canceled", "result_id": workflow_result_id}
 
     update_progress = _make_progress_updater(db, workflow_result_id)
 

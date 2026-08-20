@@ -139,6 +139,16 @@ export function cancelWorkflow(sessionId: string, shareToken?: string) {
   )
 }
 
+// Stop every in-flight run in a batch. The backend flips each unfinished run to
+// "canceled" and revokes its Celery task; already-finished runs are left as-is.
+export function cancelBatch(batchId: string, shareToken?: string) {
+  const qs = shareToken ? `?share_token=${encodeURIComponent(shareToken)}` : ''
+  return apiFetch<{ batch_id: string; status: string; canceled: number }>(
+    `/api/workflows/batches/${encodeURIComponent(batchId)}/cancel${qs}`,
+    { method: 'POST' },
+  )
+}
+
 export interface BatchStatusItem {
   session_id: string
   document_title: string | null
@@ -244,10 +254,31 @@ export function getTestStepStatus(taskId: string) {
   return apiFetch<{ status: string; result?: unknown; error?: string }>(`/api/workflows/steps/test/${taskId}`)
 }
 
-export function downloadResults(sessionId: string, format: string = 'json', opts?: { parseStructured?: boolean }) {
+export function downloadResults(
+  sessionId: string,
+  format: string = 'json',
+  opts?: { parseStructured?: boolean; shareToken?: string },
+) {
   const params = new URLSearchParams({ session_id: sessionId, format })
   if (opts?.parseStructured) params.set('parse_structured', 'true')
+  // The route authorizes with the share token when there is one; without it a
+  // share-link recipient who is not on the owner's team 404s on their own run.
+  if (opts?.shareToken) params.set('share_token', opts.shareToken)
   return `/api/workflows/download?${params.toString()}`
+}
+
+// URL for a ZIP bundling every completed run in a batch, one file per document
+// in the given format. Individual batch runs download via downloadResults with
+// their own session_id.
+export function downloadBatchResults(
+  batchId: string,
+  format: string = 'json',
+  opts?: { parseStructured?: boolean; shareToken?: string },
+) {
+  const params = new URLSearchParams({ batch_id: batchId, format })
+  if (opts?.parseStructured) params.set('parse_structured', 'true')
+  if (opts?.shareToken) params.set('share_token', opts.shareToken)
+  return `/api/workflows/batch-download?${params.toString()}`
 }
 
 export type SaveOutputFormat = 'pdf' | 'docx' | 'markdown' | 'csv' | 'json' | 'text'
