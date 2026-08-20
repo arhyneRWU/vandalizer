@@ -7,10 +7,12 @@ import io
 import json
 import logging
 import re
+import tempfile
 import zipfile
 
 from beanie import PydanticObjectId
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -357,6 +359,16 @@ def _unique_member(member: str, seen: dict[str, int]) -> str:
             return candidate
 
 
+# Past this the request is refused with a clear message rather than quietly
+# spending minutes and gigabytes. Nothing caps batch size — a folder can expand
+# one arbitrarily — so an unbounded bundle is a worker-wide stall, not a slow
+# response.
+MAX_BATCH_DOWNLOAD_RUNS = 250
+
+# Below this the archive stays in memory; above it, it spills to a temp file.
+_ZIP_SPOOL_BYTES = 32 * 1024 * 1024
+
+
 def _session_base_filename(status: dict, session_id: str) -> str:
     """Build a filesystem-safe base name (no extension) unique per session.
 
@@ -545,34 +557,55 @@ async def download_batch_results(
     if format not in VALID_EXPORT_FORMATS:
         raise HTTPException(status_code=400, detail=f"Invalid format. Use one of: {sorted(VALID_EXPORT_FORMATS)}")
 
-    batch = await svc.get_batch_status(batch_id, user=user, share_token=share_token)
-    if not batch:
+    # One pair of queries for the whole batch. get_workflow_status costs a
+    # find_one plus a Workflow.get *per run*, so a 300-document batch was ~600
+    # sequential round trips inside one request.
+    completed = await svc.get_batch_completed_outputs(
+        batch_id, user=user, share_token=share_token,
+    )
+    if completed is None:
         raise HTTPException(status_code=404, detail="Batch not found")
-
-    completed = [it for it in batch["items"] if it["status"] == "completed"]
     if not completed:
         raise HTTPException(status_code=409, detail="No completed runs to download yet")
+    if len(completed) > MAX_BATCH_DOWNLOAD_RUNS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This batch has {len(completed)} completed runs; "
+                f"downloads are limited to {MAX_BATCH_DOWNLOAD_RUNS} at a time."
+            ),
+        )
 
-    zip_buf = io.BytesIO()
-    seen: dict[str, int] = {}
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for item in completed:
-            sid = item["session_id"]
-            status = await svc.get_workflow_status(sid, user=user, share_token=share_token)
-            if not status:
-                continue
-            content, _media_type, ext, explicit_name = _render_workflow_output(status, format, parse_structured)
-            base = _session_base_filename(status, sid)
-            if explicit_name:
-                # A step-supplied filename is static config, identical for every
-                # run in the batch, so on its own it says nothing about which
-                # document produced it. Prefix the per-run base so the bundle
-                # stays readable.
-                member = f"{base}-{_safe_zip_member(explicit_name)}"
-            else:
-                member = f"{base}.{ext}"
-            zf.writestr(_unique_member(member, seen), content)
-    zip_buf.seek(0)
+    def _build_zip():
+        """Render and compress every run.
+
+        Off the event loop: rendering to pdf/docx is CPU-bound, and doing it
+        inline stalled every other request the worker was serving for the
+        duration. Spooled so a large bundle spills to disk instead of being held
+        in memory in full.
+        """
+        buf = tempfile.SpooledTemporaryFile(max_size=_ZIP_SPOOL_BYTES)
+        seen: dict[str, int] = {}
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for status in completed:
+                sid = status["session_id"]
+                content, _media_type, ext, explicit_name = _render_workflow_output(
+                    status, format, parse_structured,
+                )
+                base = _session_base_filename(status, sid)
+                if explicit_name:
+                    # A step-supplied filename is static config, identical for
+                    # every run in the batch, so on its own it says nothing about
+                    # which document produced it. Prefix the per-run base so the
+                    # bundle stays readable.
+                    member = f"{base}-{_safe_zip_member(explicit_name)}"
+                else:
+                    member = f"{base}.{ext}"
+                zf.writestr(_unique_member(member, seen), content)
+        buf.seek(0)
+        return buf
+
+    zip_buf = await run_in_threadpool(_build_zip)
 
     zip_name = "".join(c if c.isalnum() or c in " _-." else "_" for c in f"batch-{batch_id}").strip()
     return StreamingResponse(
