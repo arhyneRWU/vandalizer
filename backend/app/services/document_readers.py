@@ -4,6 +4,7 @@ Ported from Flask app/utilities/document_readers.py.
 All functions are synchronous — safe for Celery workers.
 """
 
+import io
 import logging
 import re
 from datetime import date, datetime, time
@@ -479,6 +480,77 @@ def extract_sheet_json_from_xlsx(xlsx_path: str) -> dict:
         })
 
     return {"sheets": sheets}
+
+
+def extract_sheet_json_from_csv(csv_path: str) -> dict:
+    """Render a .csv as the same sheet JSON shape the viewer expects.
+
+    Parsing moved server-side so the browser stops running a spreadsheet parser
+    over untrusted uploads; a CSV needs nothing more than the stdlib to do it.
+    Delimiter sniffing covers the semicolon and tab variants Excel emits under
+    non-US locales, falling back to a comma when the sample is inconclusive.
+    """
+    import csv as _csv
+
+    raw = _read_text_with_fallback(csv_path)
+    sample = raw[:8192]
+    try:
+        dialect = _csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except _csv.Error:
+        dialect = _csv.excel
+
+    grid = [list(row) for row in _csv.reader(io.StringIO(raw), dialect)]
+    width = max((len(r) for r in grid), default=0)
+    grid = [r + [""] * (width - len(r)) for r in grid]
+
+    headers = grid[0] if grid else []
+    rows = grid[1:] if len(grid) > 1 else []
+    return {"sheets": [{
+        "name": "Sheet1", "headers": headers, "rows": rows, "hidden": False,
+    }]}
+
+
+def extract_sheet_json_from_xls(xls_path: str) -> dict:
+    """Render a legacy binary .xls as the same sheet JSON shape.
+
+    xlrd reads .xls only — it dropped .xlsx years ago — which is why it is a
+    much smaller thing to depend on than a general spreadsheet library, and why
+    it runs here rather than in a reader's browser.
+
+    .xls has no cached-vs-formula split to reconcile: the format stores
+    computed values, so what is read is what Excel last calculated.
+    """
+    import xlrd
+
+    book = xlrd.open_workbook(xls_path)
+    sheets = []
+    for ws in book.sheets():
+        grid = [
+            [_stringify_cell_value(ws.cell_value(r, c)) for c in range(ws.ncols)]
+            for r in range(ws.nrows)
+        ]
+        headers = grid[0] if grid else []
+        rows = grid[1:] if len(grid) > 1 else []
+        sheets.append({
+            "name": ws.name,
+            "headers": headers,
+            "rows": rows,
+            # xlrd exposes visibility as 0 visible / 1 hidden / 2 very hidden.
+            "hidden": getattr(ws, "visibility", 0) != 0,
+        })
+    return {"sheets": sheets}
+
+
+def _read_text_with_fallback(path: str) -> str:
+    """Decode a text file, tolerating the encodings spreadsheets arrive in."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            with open(path, encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
 
 
 _DOCX_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
