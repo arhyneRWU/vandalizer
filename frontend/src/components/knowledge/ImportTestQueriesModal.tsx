@@ -12,7 +12,7 @@ interface Props {
 const TEMPLATE_CSV = [
   'Question,Expected Answer,Category,Source or Section,Notes,ID',
   '"What is the indirect cost rate for on-campus research?","52% of modified total direct costs",factual,"Rate Agreement FY26","Verify against the current rate agreement",RATE-001',
-  '"Who approves a subaward budget revision?","The Federal awarding agency, per 2 CFR 200.308",factual,"Subpart D-ii — Procurement, Property & Subawards","Source name contains commas, so the cell is quoted",SUB-002',
+  '"Who approves a subaward budget revision?","The Federal awarding agency, per 2 CFR 200.308",factual,"Subpart D-ii — Procurement; Subpart E — Cost Principles","Two sources in one cell: separate them with a semicolon",SUB-002',
 ].join('\n')
 
 function downloadTemplate() {
@@ -97,8 +97,11 @@ export function ImportTestQueriesModal({ kbUuid, onImported, onClose }: Props) {
           Expected Answer, Category, Source or Section, Notes, and ID columns are
           optional. Rows whose ID matches a previously imported question update it
           instead of creating a duplicate — re-import the same sheet as your KB evolves.
-          To list several sources in one cell, separate them with semicolons, or quote
-          any source name that itself contains a comma.
+          To list several sources in one cell, separate them with{' '}
+          <strong>semicolons</strong>. A cell with no semicolon is split on commas, so a
+          source name that itself contains one is best written with the semicolon form —
+          in a CSV, quoting the cell does not protect it, because the quotes are consumed
+          when the file is parsed.
         </div>
 
         <button

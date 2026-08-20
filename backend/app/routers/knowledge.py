@@ -1189,8 +1189,17 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
         TestQueryImportError,
         parse_test_query_import,
     )
+    # The parser needs these to tell "one source whose name has a comma in it"
+    # from "two sources". Resolving them is best-effort: a lookup failure should
+    # degrade to comma-splitting, not fail the upload.
     try:
-        rows, row_errors = parse_test_query_import(filename, data)
+        known_names = await kb_source_names(kb.uuid)
+    except Exception:
+        known_names = []
+    try:
+        rows, row_errors = parse_test_query_import(
+            filename, data, known_source_names=known_names,
+        )
     except TestQueryImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1272,6 +1281,32 @@ async def import_test_queries(uuid: str, request: Request, user: User = Depends(
     }
 
 
+async def kb_source_names(kb_uuid: str) -> list[str]:
+    """Every source name in a KB, as ingestion writes it into ChromaDB.
+
+    Mirrors ``get_kb_manifest``'s resolution, and that matters: resolving a
+    name as ``custom_name or url_title or url`` leaves a *document*-backed
+    source with an empty name, because those two fields are only set for URL
+    sources. Ingestion writes the document's title (``knowledge_base_tasks``),
+    and that title is what a validation run matches against — so dropping them
+    made every correct label in a document KB look unmatched.
+    """
+    sources = await svc.get_kb_sources(kb_uuid)
+    titles = await svc.resolve_document_titles(sources)
+
+    names: list[str] = []
+    for s in sources:
+        name = s.custom_name
+        if not name:
+            if s.source_type == "url":
+                name = s.url_title or s.url
+            else:
+                name = titles.get(s.document_uuid or "") or s.document_uuid
+        if name:
+            names.append(name)
+    return names
+
+
 async def _unmatched_source_labels(kb, rows: list[dict]) -> list[dict]:
     """Expected-source labels in ``rows`` that match no source name in ``kb``.
 
@@ -1279,12 +1314,7 @@ async def _unmatched_source_labels(kb, rows: list[dict]) -> list[dict]:
     (``kb_validation_service``), so a label reported clean here is one that run
     can actually credit.
     """
-    sources = await svc.get_kb_sources(kb.uuid)
-    names = [
-        (s.custom_name or s.url_title or s.url or "").lower()
-        for s in sources
-    ]
-    names = [n for n in names if n]
+    names = [n.lower() for n in await kb_source_names(kb.uuid)]
 
     counts: dict[str, int] = {}
     for row in rows:

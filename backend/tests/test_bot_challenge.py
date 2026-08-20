@@ -137,3 +137,65 @@ def test_short_real_content_passes():
 def test_empty_boilerplate_input():
     assert looks_like_boilerplate_only("") is False
     assert looks_like_boilerplate_only(None) is False
+
+
+# ---------------------------------------------------------------------------
+# Marker families: a real page carrying the .gov banner must survive
+# ---------------------------------------------------------------------------
+
+# The standard USWDS banner, verbatim. Every .gov page has it — real or shell.
+GOV_BANNER = (
+    "An official website of the United States government Here's how you know "
+    "Official websites use .gov A lock ( Lock Locked padlock icon ) or https:// "
+    "means you've safely connected to the .gov website. Share sensitive "
+    "information only on official, secure websites."
+)
+
+
+def test_a_short_real_page_carrying_the_full_banner_is_kept():
+    """Counting phrases rather than families rejected real content.
+
+    The banner alone supplies five of the marker phrases, so any threshold
+    counting phrases is met before the page's own text is considered. A policy
+    notice of a few hundred words is short *and* carries the banner, and
+    rejecting it means `_ingest_url_source` marks the source an error and its
+    content is never indexed — worse than the padlock trivia the gate exists
+    to exclude.
+    """
+    page = GOV_BANNER + " " + (
+        "The de minimis indirect cost rate is 15 percent of modified total "
+        "direct costs. Recipients must retain records for three years after "
+        "submission of the final expenditure report. " * 6
+    )
+    assert len(page) < 4000, "fixture must stay inside the length gate to be meaningful"
+    assert looks_like_boilerplate_only(page) is False
+
+
+def test_one_lock_sentence_does_not_count_twice():
+    """"locked padlock icon" is a substring of "a lock ( lock locked padlock
+    icon )", so a single sentence used to satisfy a two-marker threshold on its
+    own."""
+    assert looks_like_boilerplate_only(
+        "A lock ( Lock Locked padlock icon ) means you are secure. "
+        "The de minimis rate is 15 percent."
+    ) is False
+
+
+def test_the_whole_banner_alone_is_still_only_one_signal():
+    assert looks_like_boilerplate_only(GOV_BANNER) is False
+
+
+def test_banner_plus_a_session_dialog_is_a_shell():
+    """Two families is the signal: a timeout dialog rendered before any content
+    only co-occurs with the banner on an empty shell."""
+    assert looks_like_boilerplate_only(
+        GOV_BANNER + " Your session will expire in 5 minutes. "
+        "To continue working, click on the button below."
+    ) is True
+
+
+def test_banner_plus_a_javascript_notice_is_a_shell():
+    assert looks_like_boilerplate_only(
+        GOV_BANNER + " This site requires JavaScript. "
+        "Please enable JavaScript to use this site."
+    ) is True

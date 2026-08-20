@@ -198,10 +198,33 @@ async def _split_chapter_source(
     return True
 
 
+async def _refetch_usable_text(url: str) -> str | None:
+    """Fetch ``url`` and return its text, or None when it is not worth storing.
+
+    Applies the same three gates ``_ingest_url_source`` does — empty, bot
+    challenge, chrome-only — but without writing anything, so the caller can
+    decide whether to replace a source's chunks *before* it destroys them.
+    """
+    from app.services.web_fetcher import fetch_url
+    from app.utils.bot_challenge import (
+        looks_like_boilerplate_only,
+        looks_like_bot_challenge,
+    )
+
+    try:
+        result = await fetch_url(url)
+    except Exception as e:  # network, DNS, TLS — all "leave it alone"
+        print(f"  refetch failed for {url}: {e}")
+        return None
+
+    text = (result.text or "").strip()
+    if not text or looks_like_bot_challenge(text) or looks_like_boilerplate_only(text):
+        return None
+    return text
+
+
 async def repair(dry_run: bool, refetch_others: bool) -> None:
-    from app.services.document_manager import get_document_manager
     from app.services.knowledge_service import (
-        _ingest_url_source,
         ingest_text_into_source,
         recalculate_stats,
     )
@@ -284,18 +307,27 @@ async def repair(dry_run: bool, refetch_others: bool) -> None:
                 else:
                     failed.append((src, src.error_message or "ingest failed"))
             elif refetch_others and src.url:
-                # _ingest_url_source is a fresh-source path — clear the old
-                # (poisoned) chunks first so none survive a smaller refetch.
-                await asyncio.to_thread(
-                    get_document_manager().delete_kb_source, kb.uuid, src.uuid,
-                )
-                result = await _ingest_url_source(src, kb)
-                if result is not None:
-                    fixed += 1
-                    touched_kbs.add(kb.uuid)
-                    print(f"  refetched [{kb.title}] {src.url}")
+                # Fetch before touching what is stored. The old path deleted the
+                # source's chunks and *then* refetched, so a URL that no longer
+                # returns usable content — or that this sweep misjudged — left a
+                # working source with nothing, and the deletion was unconditional
+                # so there was no recovery within the run. ingest_text_into_source
+                # replaces chunks itself, so fetching first loses nothing.
+                new_text = await _refetch_usable_text(src.url)
+                if new_text is None:
+                    failed.append((
+                        src,
+                        "refetch returned no usable content — existing chunks kept",
+                    ))
                 else:
-                    failed.append((src, src.error_message or "refetch failed"))
+                    _warn_if_near_cap(new_text, src.url)
+                    ok = await ingest_text_into_source(src, kb, new_text, label=label)
+                    if ok:
+                        fixed += 1
+                        touched_kbs.add(kb.uuid)
+                        print(f"  refetched [{kb.title}] {src.url} ({ok} chunks)")
+                    else:
+                        failed.append((src, src.error_message or "refetch failed"))
             else:
                 skipped.append((src, "no bundled/API text and refetch disabled"))
 
