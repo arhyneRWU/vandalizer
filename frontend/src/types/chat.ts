@@ -4,6 +4,19 @@ export interface ChatMessage {
   thinking?: string
   thinking_duration?: number
   citations?: Citation[]
+  /** Documents in scope when this turn was asked — `{uuid, title}` each, with
+   *  a final `{truncated: n}` when the selection was larger than is recorded.
+   *  Present on user turns; assistant turns carry `citations` instead. */
+  source_documents?: SourceDocument[]
+}
+
+/** A document that was attached when a question was asked. The title is stored
+ *  with the uuid so the record stays readable after the document is deleted. */
+export interface SourceDocument {
+  uuid?: string
+  title?: string
+  /** How many further documents were in scope but not recorded. */
+  truncated?: number
 }
 
 export interface FileAttachment {
