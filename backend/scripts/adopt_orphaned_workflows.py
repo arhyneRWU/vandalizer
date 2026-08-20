@@ -160,9 +160,15 @@ async def adopt(dry_run: bool = False, only_user: str | None = None) -> dict[str
     skipped_referenced = 0
     by_owner: dict[str, int] = defaultdict(int)
     lib_cache: dict[str, Library] = {}
-    # Batch the appends so each owner's library is written once, not once per
-    # orphan — some accounts have hundreds.
-    pending: dict[str, list[PydanticObjectId]] = defaultdict(list)
+
+    # Phase 1 — scan only, writing nothing.
+    #
+    # Writing inside the cursor loop held it open across every insert, so a
+    # ten-minute cursor expiry, a crash or a Ctrl-C left behind LibraryItem rows
+    # that no library referenced: invisible, and re-running inserted a second
+    # set rather than reusing them, so each attempt added more. Collecting the
+    # orphans first closes the cursor before anything is written.
+    orphans_by_owner: dict[str, list[Workflow]] = defaultdict(list)
 
     query = {"user_id": only_user} if only_user else {}
     async for wf in Workflow.find(query):
@@ -177,27 +183,36 @@ async def adopt(dry_run: bool = False, only_user: str | None = None) -> dict[str
         by_owner[owner] += 1
         adopted += 1
         print(f"  orphan: {wf.name!r}  id={wf.id}  owner={owner}")
-        if dry_run:
-            continue
+        orphans_by_owner[owner].append(wf)
 
-        lib = await _personal_library(owner, lib_cache)
-        li = LibraryItem(
-            item_id=wf.id,
-            kind=LibraryItemKind.WORKFLOW,
-            added_by_user_id=owner,
-            verified=bool(wf.verified),
-            created_at=wf.created_at,
-        )
-        await li.insert()
-        pending[owner].append(li.id)
-
+    # Phase 2 — write, one owner at a time.
     if not dry_run:
         now = datetime.datetime.now(datetime.timezone.utc)
-        for owner, item_ids in pending.items():
-            lib = lib_cache[owner]
-            lib.items.extend(item_ids)
-            lib.updated_at = now
-            await lib.save()
+        for owner, workflows in orphans_by_owner.items():
+            lib = await _personal_library(owner, lib_cache)
+            item_ids: list[PydanticObjectId] = []
+            for wf in workflows:
+                li = LibraryItem(
+                    item_id=wf.id,
+                    kind=LibraryItemKind.WORKFLOW,
+                    added_by_user_id=owner,
+                    verified=bool(wf.verified),
+                    created_at=wf.created_at,
+                )
+                await li.insert()
+                item_ids.append(li.id)
+
+            # $push rather than save(). save() writes the whole items array from
+            # the snapshot read when the library was first fetched, so anything
+            # the owner bookmarked while the script ran would be overwritten
+            # away — creating a fresh orphan of exactly the kind this repairs.
+            await Library.get_motor_collection().update_one(
+                {"_id": lib.id},
+                {
+                    "$push": {"items": {"$each": item_ids}},
+                    "$set": {"updated_at": now},
+                },
+            )
 
     return {
         "scanned": scanned,

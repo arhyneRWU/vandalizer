@@ -7,7 +7,9 @@ workflows that were reachable all along, too strict and the names stay blocked.
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from beanie import PydanticObjectId
 
 from scripts.adopt_orphaned_workflows import (
@@ -97,3 +99,122 @@ class TestIsOrphan:
 
         assert is_orphan(wf, set(), {wf.id}) is True
         assert is_orphan(wf, set(), {str(wf.id)}) is False
+
+
+# ---------------------------------------------------------------------------
+# adopt(): the run must be safe to interrupt, and safe to run concurrently
+# ---------------------------------------------------------------------------
+
+class _Cursor:
+    """An async cursor that records whether it has been fully consumed."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.exhausted = False
+
+    def __aiter__(self):
+        async def gen():
+            for it in self._items:
+                yield it
+            self.exhausted = True
+        return gen()
+
+
+def _wf(name, wid, owner="alice"):
+    return SimpleNamespace(
+        id=PydanticObjectId(),
+        name=name,
+        user_id=owner,
+        created_by_user_id=owner,
+        verified=False,
+        created_at=None,
+    )
+
+
+async def _run_adopt(monkeypatch, workflows, *, dry_run=False):
+    """Drive adopt() against stand-in models, returning what it wrote."""
+    import scripts.adopt_orphaned_workflows as mod
+
+    cursor = _Cursor(workflows)
+    inserted_during_scan: list[bool] = []
+    updates: list[tuple] = []
+
+    monkeypatch.setattr(mod, "AsyncIOMotorClient", lambda *a, **k: {"db": MagicMock()})
+    monkeypatch.setattr(mod, "init_beanie", AsyncMock())
+    monkeypatch.setattr(mod, "Settings", lambda: SimpleNamespace(mongo_host="", mongo_db="db"))
+    monkeypatch.setattr(mod, "_fetch_bookmarked", AsyncMock(return_value=set()))
+    monkeypatch.setattr(mod, "_fetch_referenced", AsyncMock(return_value=set()))
+
+    workflow_cls = MagicMock()
+    workflow_cls.find = MagicMock(return_value=cursor)
+    monkeypatch.setattr(mod, "Workflow", workflow_cls)
+
+    class _LibraryItem:
+        def __init__(self, **kw):
+            self.id = PydanticObjectId()
+            self.__dict__.update(kw)
+
+        async def insert(self):
+            # Records whether the scan cursor was still open at write time.
+            inserted_during_scan.append(not cursor.exhausted)
+
+    monkeypatch.setattr(mod, "LibraryItem", _LibraryItem)
+
+    coll = MagicMock()
+    coll.update_one = AsyncMock(side_effect=lambda q, u: updates.append((q, u)))
+    library_cls = MagicMock()
+    library_cls.get_motor_collection = MagicMock(return_value=coll)
+    monkeypatch.setattr(mod, "Library", library_cls)
+    monkeypatch.setattr(
+        mod, "_personal_library",
+        AsyncMock(side_effect=lambda owner, cache: SimpleNamespace(id=f"lib-{owner}")),
+    )
+
+    stats = await mod.adopt(dry_run=dry_run)
+    return stats, inserted_during_scan, updates
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_written_while_the_scan_cursor_is_open(monkeypatch):
+    """Writing inside the cursor loop held it open across every insert.
+
+    A ten-minute cursor expiry, a crash, or a Ctrl-C then left LibraryItem rows
+    that no library referenced — invisible, and re-running inserted a second set
+    rather than reusing them, so every attempt added more garbage. That is
+    precisely the state this script exists to repair.
+    """
+    stats, inserted_during_scan, _updates = await _run_adopt(
+        monkeypatch, [_wf("A", 1), _wf("B", 2)],
+    )
+
+    assert stats["adopted"] == 2
+    assert inserted_during_scan and not any(inserted_during_scan), (
+        "a LibraryItem was inserted while the scan cursor was still open"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_library_is_appended_to_rather_than_overwritten(monkeypatch):
+    """lib.items.extend(...) + save() writes the whole array from a snapshot
+    read when the library was first fetched, so a bookmark the owner made while
+    the script ran was silently overwritten away — creating a fresh orphan of
+    exactly the kind being repaired."""
+    _stats, _during, updates = await _run_adopt(monkeypatch, [_wf("A", 1)])
+
+    assert len(updates) == 1
+    _query, update = updates[0]
+    assert "$push" in update, "the whole items array was rewritten"
+    assert "$each" in update["$push"]["items"]
+    assert "items" not in update.get("$set", {}), (
+        "items was $set, which clobbers concurrent bookmarks"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_writes_nothing_at_all(monkeypatch):
+    stats, inserted, updates = await _run_adopt(
+        monkeypatch, [_wf("A", 1)], dry_run=True,
+    )
+    assert stats["adopted"] == 1
+    assert inserted == []
+    assert updates == []
