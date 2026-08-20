@@ -2785,21 +2785,34 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   // Download the in-memory Test Step output. Test runs have no WorkflowResult /
-  // session, so there's no server download endpoint — build the file client-side
-  // from the result already in state. Strings download as .txt (raw prompt
-  // output reads cleanly); structured results download as pretty JSON.
+  // session, so there's no server download endpoint — build the file
+  // client-side from the result already in state.
+  //
+  // What arrives here is the return of _format_final_output, which stringifies
+  // everything *except* a {type: "file_download"} payload, which it passes
+  // through as a dict. So a "is it a string?" split gets both cases backwards:
+  // a genuinely structured result has already been json.dumps'd server-side and
+  // is a string, while the only non-string is the one payload that must not be
+  // written as JSON. DocumentRenderer, DataExport and PackageBuilder steps are
+  // all testable and all produce it — saving a rendered .docx as a JSON blob of
+  // base64 is not a download of anything the user asked for. The server's own
+  // multi-output path (_zip_member_for_step) decodes it, and so does this.
   const handleDownloadTestResult = () => {
-    if (testResult === null) return
-    const isStr = typeof testResult === 'string'
-    const content = isStr ? testResult : JSON.stringify(testResult, null, 2)
-    const ext = isStr ? 'txt' : 'json'
-    const mime = isStr ? 'text/plain' : 'application/json'
-    const safeName = (task.name || 'step').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'step'
-    const blob = new Blob([content], { type: mime })
+    // The label shown in the editor, which is what the user is looking at.
+    // task.name is the node *type*, so three differently-named Prompt steps
+    // would all download as "Prompt-test.txt".
+    const label = (taskData.name as string) || task.name || 'step'
+    const plan = planTestResultDownload(testResult, label)
+    if (!plan) return
+
+    const blob = plan.kind === 'file'
+      ? new Blob([base64ToBytes(plan.content)], { type: plan.mime })
+      : new Blob([plan.content], { type: plan.mime })
+
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${safeName}-test.${ext}`
+    a.download = plan.filename
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -4304,12 +4317,23 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                   <button
                     type="button"
                     onClick={handleDownloadTestResult}
-                    title={`Download this output (${typeof testResult === 'string' ? '.txt' : '.json'})`}
+                    // A step can complete having produced nothing —
+                    // _format_final_output(None) is "" — and the block above
+                    // still renders. Offering a button that writes a 0-byte
+                    // file is worse than saying there is nothing to save.
+                    disabled={testResult === '' || testResult === undefined}
+                    title={
+                      testResult === '' || testResult === undefined
+                        ? 'This step produced no output'
+                        : 'Download this output'
+                    }
                     style={{
                       marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
                       padding: '4px 10px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
                       border: '1px solid #d1d5db', borderRadius: 6,
-                      backgroundColor: '#fff', cursor: 'pointer', color: '#374151',
+                      backgroundColor: '#fff', color: '#374151',
+                      cursor: testResult === '' || testResult === undefined ? 'not-allowed' : 'pointer',
+                      opacity: testResult === '' || testResult === undefined ? 0.5 : 1,
                     }}
                   >
                     <Download style={{ width: 13, height: 13 }} />
@@ -5383,6 +5407,70 @@ function ConvertWorkflowDocsButton({
 // ---------------------------------------------------------------------------
 // Batch output card
 // ---------------------------------------------------------------------------
+
+export type TestDownloadPlan = {
+  kind: 'file' | 'json' | 'text'
+  filename: string
+  /** Base64 payload for kind 'file'; the text to write otherwise. */
+  content: string
+  mime: string
+}
+
+/** Decide what a Test Step result should be saved as.
+ *
+ * The result is the return of the engine's _format_final_output, which
+ * stringifies everything *except* a {type: "file_download"} payload — that one
+ * comes through as an object. So "is it a string?" gets both cases backwards:
+ * a genuinely structured result is already JSON text, while the sole non-string
+ * is the payload that must not be written as JSON.
+ */
+export function planTestResultDownload(
+  result: unknown, label: string,
+): TestDownloadPlan | null {
+  if (result === null || result === undefined || result === '') return null
+
+  const safeName =
+    (label || 'step').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'step'
+
+  if (typeof result === 'object') {
+    const payload = result as Record<string, unknown>
+    if (payload.type === 'file_download') {
+      return {
+        kind: 'file',
+        filename: (payload.filename as string) || `${safeName}-test.bin`,
+        content: String(payload.data_b64 ?? ''),
+        mime: 'application/octet-stream',
+      }
+    }
+    return {
+      kind: 'json',
+      filename: `${safeName}-test.json`,
+      content: JSON.stringify(payload, null, 2),
+      mime: 'application/json',
+    }
+  }
+
+  const text = String(result)
+  const looksJson = /^[[{]/.test(text.trimStart()) && (() => {
+    try { JSON.parse(text); return true } catch { return false }
+  })()
+  return {
+    kind: looksJson ? 'json' : 'text',
+    filename: `${safeName}-test.${looksJson ? 'json' : 'txt'}`,
+    content: text,
+    mime: looksJson ? 'application/json' : 'text/plain',
+  }
+}
+
+// Decode a base64 payload to bytes. File-producing steps hand back their
+// artifact as data_b64, and writing that string into a Blob would save the
+// base64 text rather than the file it encodes.
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
 
 function BatchOutputCard({ batchStatus, running, runElapsed }: {
   batchStatus: BatchStatus
