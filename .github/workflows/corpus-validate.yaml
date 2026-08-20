@@ -1,12 +1,24 @@
 name: Corpus Validation
 
 on:
+  # The two backend modules are listed because validate_keys.py imports five
+  # symbols out of them; test_backend_contract.py is the check that a rename
+  # there breaks here, and it is only useful if a backend-only pull request
+  # runs it.
   push:
     branches: [main]
-    paths: ["benchmarks/corpus/**", ".github/workflows/corpus-validate.yaml"]
+    paths:
+      - "benchmarks/corpus/**"
+      - ".github/workflows/corpus-validate.yaml"
+      - "backend/app/services/document_readers.py"
+      - "backend/app/services/extraction_sources.py"
   pull_request:
     branches: [main]
-    paths: ["benchmarks/corpus/**", ".github/workflows/corpus-validate.yaml"]
+    paths:
+      - "benchmarks/corpus/**"
+      - ".github/workflows/corpus-validate.yaml"
+      - "backend/app/services/document_readers.py"
+      - "backend/app/services/extraction_sources.py"
   # No paths filter here: GitHub ignores paths on release events. The
   # tag-prefix guard on asset-validate does the scoping instead, and the
   # tree-validate guard keeps release/dispatch events from running the
@@ -46,8 +58,11 @@ jobs:
       - name: Install backend dependencies
         run: make backend-install
 
-      - name: Citation-scorer unit tests
-        run: cd backend && uv run --with pytest pytest ../benchmarks/corpus/CSU-NSF-001/tools/test_citation_accuracy.py -q
+      # The whole tools directory, not one file: it also holds the backend
+      # contract test and the planted-defect failure-path suite, which run the
+      # validators as subprocesses over fixtures generated in tmp_path.
+      - name: Corpus tool unit tests
+        run: cd backend && uv run --with pytest pytest ../benchmarks/corpus/CSU-NSF-001/tools/ -q
 
       - name: Structural key checks (no binaries)
         run: uv run --with pypdf --with python-docx python benchmarks/corpus/CSU-NSF-001/tools/validate_release.py --keys benchmarks/corpus/CSU-NSF-001
@@ -103,29 +118,14 @@ jobs:
             curl -fsSL "$URL_SCANNED" -o /tmp/corpus-assets/CSU-NSF-001-v0.4.0-scanned.tar.gz
           fi
 
+      # verify_assets.py is stdlib-only and covered by
+      # test_validator_failure_paths.py, which plants a corrupted byte, a
+      # missing file and an unlisted tarball against it.
       - name: Verify sha256 against manifest (fails before anything is scanned)
         run: |
-          python3 - <<'EOF'
-          import hashlib, json, pathlib, sys
-          assets_dir = pathlib.Path("/tmp/corpus-assets")
-          manifest = json.loads(pathlib.Path("benchmarks/corpus/CSU-NSF-001/manifest.json").read_text())
-          ok = True
-          for asset in manifest["release_assets"]["assets"]:
-              path = assets_dir / asset["name"]
-              if not path.exists():
-                  print(f"MISSING: {asset['name']}"); ok = False; continue
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              status = "OK" if digest == asset["sha256"] else f"MISMATCH (got {digest})"
-              print(f"{asset['name']}: {status}")
-              ok = ok and digest == asset["sha256"]
-          # The download pattern and the unpack glob are both wider than the
-          # manifest, so anything else attached to the release would be parsed
-          # unhashed. The manifest is the authority on what the release *is*.
-          expected = {asset["name"] for asset in manifest["release_assets"]["assets"]}
-          for extra in sorted(p.name for p in assets_dir.glob("*.tar.gz") if p.name not in expected):
-              print(f"UNEXPECTED (not listed in manifest release_assets): {extra}"); ok = False
-          sys.exit(0 if ok else 1)
-          EOF
+          python3 benchmarks/corpus/CSU-NSF-001/tools/verify_assets.py \
+            --manifest benchmarks/corpus/CSU-NSF-001/manifest.json \
+            --assets-dir /tmp/corpus-assets
 
       # The scans walk this directory whole, so it must hold the release and
       # nothing else: pdf/, source/, scanned/.
