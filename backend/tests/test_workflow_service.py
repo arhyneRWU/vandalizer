@@ -98,9 +98,10 @@ def _make_result(session_id="abc123", status="completed", final_output=None, wor
 # ---------------------------------------------------------------------------
 
 class TestCreateWorkflow:
+    @patch("app.services.library_service.ensure_bookmark", new_callable=AsyncMock)
     @patch("app.services.name_conflicts.ensure_workflow_name_available", new_callable=AsyncMock)
     @patch("app.services.workflow_service.Workflow")
-    async def test_creates_workflow(self, mock_wf_cls, mock_ensure):
+    async def test_creates_workflow(self, mock_wf_cls, mock_ensure, mock_bookmark):
         from app.services.workflow_service import create_workflow
 
         mock_wf = MagicMock()
@@ -115,6 +116,36 @@ class TestCreateWorkflow:
         )
         assert result is mock_wf
         mock_wf.insert.assert_awaited_once()
+
+    @patch("app.services.library_service.ensure_bookmark", new_callable=AsyncMock)
+    @patch("app.services.name_conflicts.ensure_workflow_name_available", new_callable=AsyncMock)
+    @patch("app.services.workflow_service.Workflow")
+    async def test_a_new_workflow_is_bookmarked_so_it_is_visible(
+        self, mock_wf_cls, mock_ensure, mock_bookmark,
+    ):
+        """Workflows are listed *only* through library bookmarks, so one created
+        without a bookmark renders in no listing, no picker and no search while
+        still holding its name against name_conflicts — invisible, undeletable,
+        and its name unusable.
+
+        This path was the last one leaving the bookmark to a second request from
+        the client: LibraryTab makes it only when a personal library happens to
+        be loaded, and useWorkflows.create never made it at all.
+        """
+        from app.models.library import LibraryItemKind
+        from app.services.workflow_service import create_workflow
+
+        mock_wf = MagicMock()
+        mock_wf.insert = AsyncMock()
+        mock_wf_cls.return_value = mock_wf
+
+        await create_workflow(name="My Workflow", user_id="user1")
+
+        mock_bookmark.assert_awaited_once()
+        args = mock_bookmark.await_args.args
+        assert args[0] is mock_wf.id
+        assert args[1] == LibraryItemKind.WORKFLOW
+        assert args[2] == "user1"
 
 
 class TestDuplicateWorkflowBookmarks:

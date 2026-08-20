@@ -66,6 +66,18 @@ async def create_workflow(name: str, user_id: str, description: str | None = Non
         created_by_user_id=user_id,
     )
     await wf.insert()
+
+    # Bookmark here, not in the caller. This is the path that produces the most
+    # workflows and it was the last one still leaving the bookmark to a second
+    # request from the client: LibraryTab makes it only when a personal library
+    # happens to be loaded, and useWorkflows.create never made it at all — so a
+    # workflow created through that hook was born invisible while still holding
+    # its name against name_conflicts, which is the whole defect.
+    from app.services import library_service
+
+    await library_service.ensure_bookmark(
+        wf.id, LibraryItemKind.WORKFLOW, user_id,
+    )
     return wf
 
 

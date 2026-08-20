@@ -526,7 +526,12 @@ async def import_search_set(
         )
         await tc.insert()
 
-    await _bookmark(result.id, LibraryItemKind.SEARCH_SET, user_id)
+    # Only a set this import *created* needs a bookmark. On the append branch
+    # `result` is the caller's existing target, which may be a team set they
+    # manage but do not own — filing it into their personal library on an
+    # import of fields is not something they asked for.
+    if target is None:
+        await _bookmark(result.id, LibraryItemKind.SEARCH_SET, user_id)
     return result
 
 
