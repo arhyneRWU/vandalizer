@@ -71,6 +71,10 @@ async def chat(
     team_access = await access_control.get_team_access_context(user)
 
     authorized_document_uuids: list[str] = []
+    # Captured as we authorize, so recording the turn's scope costs no extra
+    # lookups. Titles go in alongside the uuids because a uuid stops resolving
+    # once the document is deleted, which is when the record matters most.
+    source_documents: list[dict] = []
     for doc_uuid in document_uuids:
         doc = await access_control.get_authorized_document(
             doc_uuid,
@@ -81,6 +85,7 @@ async def chat(
         if not doc:
             raise HTTPException(status_code=404, detail=f"Document not found: {doc_uuid}")
         authorized_document_uuids.append(doc.uuid)
+        source_documents.append({"uuid": doc.uuid, "title": doc.title or doc.uuid})
     document_uuids = authorized_document_uuids
 
     # The KB scope passed to retrieval. A project scope overrides it with the
@@ -144,6 +149,9 @@ async def chat(
                 ):
                     document_uuids.append(doc.uuid)
                     existing.add(doc.uuid)
+                    source_documents.append(
+                        {"uuid": doc.uuid, "title": doc.title or doc.uuid},
+                    )
 
     activity: Optional[ActivityEvent] = None
     conversation: Optional[ChatConversation] = None
@@ -204,8 +212,17 @@ async def chat(
     if not conversation:
         raise HTTPException(status_code=500, detail="Failed to create conversation")
 
-    # Save user message
-    await conversation.add_message(ChatRole.USER, message)
+    # Save user message, with the scope it was asked against.
+    #
+    # A KB-grounded answer already recorded what it drew on (``citations`` on
+    # the assistant turn), while a direct-document answer recorded nothing —
+    # even though the fully resolved, authorized set is right here. Without it
+    # a saved conversation cannot say which documents produced which answer,
+    # and continuing a conversation across a changed selection (which is
+    # deliberate and useful) leaves no trace of the change.
+    await conversation.add_message(
+        ChatRole.USER, message, source_documents=source_documents or None,
+    )
 
     async def generate():
         try:
