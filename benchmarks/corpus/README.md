@@ -52,8 +52,12 @@ clean corpus, in `tools/test_validator_failure_paths.py` — a corrupted byte, a
 missing and an unlisted release asset, a corroborating page past the end of a
 document, a corroborating source duplicating a canonical one, an unanswerable
 question carrying corroboration, a deleted `corroborating_sources` key, a
-retired identity, a new name-shaped string against a baseline, and a citation
-no pass can verify that is not pinned. Both identity scanners are exercised on
+retired identity, a new name-shaped string against a baseline, a citation
+no pass can verify that is not pinned, and one violation of each sponsor-policy
+invariant CSU-NSF-001 v0.5.0 turns on: a dollar amount in Facilities, Equipment
+and Other Resources, a subaward threshold that disagrees between the documents
+or with the workbook, and a "recently completed" category in a Current and
+Pending document. Both identity scanners are exercised on
 generated `.docx` and `.xlsx` files as well as text, in each of the four shapes
 the corpus itself once shipped: a name in a body paragraph, a name in a
 signature-block table cell, a name in a section header, and a name present only
@@ -124,8 +128,7 @@ uv run python ../$KEYS/tools/check_scans.py --binaries $BIN
 uv run python ../$KEYS/tools/scan_person_names.py $BIN \
   --baseline ../$KEYS/tools/name_scan_baseline_assets.json
 uv run python ../$KEYS/tools/validate_keys.py --keys ../$KEYS --binaries $BIN
-uv run python ../$KEYS/tools/validate_keys2.py --keys ../$KEYS --binaries $BIN \
-  --allow Q021:04_Project_Description.pdf:11
+uv run python ../$KEYS/tools/validate_keys2.py --keys ../$KEYS --binaries $BIN
 ```
 
 Scoring a harness run — `raw.json` is a list of `{"id": ..., "got": ...}` rows:
@@ -134,15 +137,16 @@ Scoring a harness run — `raw.json` is a list of `{"id": ..., "got": ...}` rows
 python $KEYS/tools/citation_accuracy.py --keys $KEYS raw.json
 ```
 
-Every tool exits non-zero on failure. Three carry a reviewed exception set, so
+Every tool exits non-zero on failure. Three take a reviewed exception set, so
 that a *new* exception is the thing that fails rather than the standing ones:
 `scan_person_names.py --baseline` (name-shaped strings already read and cleared
 — invented place names, mostly), `validate_keys2.py --allow QID:FILE:PAGE`
-(citations already adjudicated), and `validate_keys.py --allow-unverifiable
+(citations already adjudicated — empty as of v0.5.0, since the one pinned
+citation no longer flags), and `validate_keys.py --allow-unverifiable
 QID:FILE`, which extends a set pinned in the tool itself. Widening any of the
 three is a visible diff.
 
-The tools carry 69 unit tests in three files — `test_citation_accuracy.py`
+The tools carry 93 unit tests in three files — `test_citation_accuracy.py`
 (the scorer's document attribution and outcome ladder),
 `test_backend_contract.py` (the five backend symbols `validate_keys.py`
 depends on), and `test_validator_failure_paths.py` (each validator against a
