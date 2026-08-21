@@ -13,13 +13,16 @@ script builds exactly that missing edge and nothing else:
                   method — parsed from the apiFetch/rawFetch wrapper calls)
 
 joined by URL shape (`{param}` and `${expr}` both normalize to `*`), plus the
-two orphan lists that make it a review tool rather than an inventory:
+orphan lists that make it a review tool rather than an inventory:
 
   * frontend calls matching no route  → almost always a real bug
   * routes with no frontend caller    → dead surface, or external-API-only
                                         (cross-tagged against docs/api.md and
                                         docs/mgmt-api.md so those read as
                                         intentional)
+  * calls whose URL is built at runtime → cannot be joined by URL shape, so
+                                        they are listed separately: they are
+                                        the error bar on the uncalled list
 
 Anything above the api layer (which components call which api function) and
 below the route (what a handler touches) is the call graph's job; compose the
@@ -63,7 +66,18 @@ def scan_backend():
     os.environ.setdefault("TELEMETRY_COLLECTOR_ENABLED", "true")
     sys.path.insert(0, str(REPO / "backend"))
     from fastapi.routing import APIRoute
-    from app.main import app
+    from app.main import app, get_settings
+
+    # setdefault loses to a shell or .env that already sets these false; the
+    # map is then missing those routers, so say so instead of walking quietly.
+    settings = get_settings()
+    for flag, value in (
+        ("ENABLE_TRIAL_SYSTEM", settings.enable_trial_system),
+        ("TELEMETRY_COLLECTOR_ENABLED", settings.telemetry_collector_enabled),
+    ):
+        if not value:
+            print(f"warning: {flag} resolved false (set in your shell or .env) "
+                  f"— its routes are missing from this map", file=sys.stderr)
 
     routes = []
     for route in app.routes:
@@ -182,6 +196,8 @@ def _call_span(text: str, i: int) -> int:
 def _calls_in(text: str, wrappers=WRAPPERS):
     """Yield (offset, url, method) for every wrapper call with a literal URL."""
     for m in re.finditer(r"\b(%s)\s*" % "|".join(wrappers), text):
+        if re.search(r"function\s+$", text[max(0, m.start() - 12):m.start()]):
+            continue  # the wrapper's own definition, not a call
         i = _skip_generic(text, m.end())
         while i < len(text) and text[i] in " \t\r\n":
             i += 1
@@ -192,7 +208,13 @@ def _calls_in(text: str, wrappers=WRAPPERS):
         while i < len(text) and text[i] in " \t\r\n":
             i += 1
         if i >= len(text) or text[i] not in "'\"`":
-            continue  # URL built dynamically; reported via --check as unparsed
+            # URL built at runtime (e.g. `let url = ...; url += ...`) — no
+            # literal to join on. Yield it with url=None so callers can list
+            # it as the error bar on the uncalled-routes section.
+            close = _call_span(text, i)
+            m2 = METHOD.search(text[i:close])
+            yield m.start(), None, (m2.group(1).upper() if m2 else "GET")
+            continue
         url, end = _read_string(text, i)
         if url is None:
             continue
@@ -203,7 +225,7 @@ def _calls_in(text: str, wrappers=WRAPPERS):
 
 
 def scan_frontend():
-    calls = []
+    calls, dynamic = [], []
     for ts in sorted(API_DIR.glob("*.ts")):
         if ts.name.endswith(".test.ts"):
             continue
@@ -218,6 +240,16 @@ def scan_frontend():
                     fn = name
                 else:
                     break
+            if url is None:
+                dynamic.append(
+                    {
+                        "function": fn,
+                        "method": method,
+                        "file": str(ts.relative_to(REPO)),
+                        "line": text.count("\n", 0, offset) + 1,
+                    }
+                )
+                continue
             if not url.startswith("/"):
                 continue  # absolute/external URL — not a backend route
             calls.append(
@@ -229,7 +261,7 @@ def scan_frontend():
                     "line": text.count("\n", 0, offset) + 1,
                 }
             )
-    return calls
+    return calls, dynamic
 
 
 def scan_out_of_layer():
@@ -240,7 +272,7 @@ def scan_out_of_layer():
             continue
         text = ts.read_text(errors="replace")
         for offset, url, method in _calls_in(text, WRAPPERS + ("fetch",)):
-            if url.startswith("/api"):
+            if url is not None and url.startswith("/api"):
                 hits.append(
                     {
                         "url": url,
@@ -307,7 +339,7 @@ def join(routes, calls):
 
 # ── output ───────────────────────────────────────────────────────────────────
 
-def render_md(routes, calls, out_of_layer, uncalled, unmatched):
+def render_md(routes, calls, dynamic, out_of_layer, uncalled, unmatched):
     L = []
     L.append("# UI ↔ Endpoint Map")
     L.append("")
@@ -321,6 +353,7 @@ def render_md(routes, calls, out_of_layer, uncalled, unmatched):
     L.append(f"| Frontend api-layer calls | {len(calls)} |")
     L.append(f"| Routes with no frontend caller | {len(uncalled)} |")
     L.append(f"| Frontend calls matching no route | {len(unmatched)} |")
+    L.append(f"| Calls with runtime-built URLs (not mapped) | {len(dynamic)} |")
     L.append(f"| Calls outside the api layer | {len(out_of_layer)} |")
     L.append("")
 
@@ -345,10 +378,25 @@ def render_md(routes, calls, out_of_layer, uncalled, unmatched):
         L.append(f"| {r['method']} | `{r['path']}` | `{r['handler']}` | {auth} | {who} |")
     L.append("")
 
+    if dynamic:
+        L.append(f"## Calls with runtime-built URLs ({len(dynamic)}) — not mapped")
+        L.append("")
+        L.append("These build their URL at runtime (e.g. `url += ...`), so they "
+                 "cannot be joined by URL shape. Any route they call shows up "
+                 "under \"Routes with no frontend caller\" — this list is that "
+                 "section's error bar.")
+        L.append("")
+        L.append("| Method | Function | File:Line |")
+        L.append("|---|---|---|")
+        for c in sorted(dynamic, key=lambda c: (c["file"], c["line"])):
+            L.append(f"| {c['method']} | `{c['function']}` | `{c['file']}:{c['line']}` |")
+        L.append("")
+
     L.append(f"## Routes with no frontend caller ({len(uncalled)})")
     L.append("")
     L.append("Documented-external routes are expected here; anything else is "
-             "server-to-server, webhook, or dead surface.")
+             "server-to-server, webhook, or dead surface — modulo the "
+             "runtime-built-URL calls above, which may cover some of these.")
     L.append("")
     L.append("| Method | Path | Handler | File | External-API doc? |")
     L.append("|---|---|---|---|---|")
@@ -376,11 +424,11 @@ def main():
     args = ap.parse_args()
 
     routes = scan_backend()
-    calls = scan_frontend()
+    calls, dynamic = scan_frontend()
     out_of_layer = scan_out_of_layer()
     uncalled, unmatched = join(routes, calls)
 
-    md = render_md(routes, calls, out_of_layer, uncalled, unmatched)
+    md = render_md(routes, calls, dynamic, out_of_layer, uncalled, unmatched)
     data = {
         "generated": datetime.now(timezone.utc).isoformat(),
         "routes": [{k: v for k, v in r.items() if k != "callers"}
@@ -388,6 +436,7 @@ def main():
                                   for c in r["callers"]]}
                    for r in routes],
         "frontend_calls": calls,
+        "dynamic_url_calls": dynamic,
         "out_of_layer_calls": out_of_layer,
         "uncalled_routes": [r["method"] + " " + r["path"] for r in uncalled],
         "unmatched_calls": [c["method"] + " " + c["url"] for c in unmatched],
@@ -400,7 +449,7 @@ def main():
         (REPO / "scripts" / "ui_endpoint_map.json").write_text(json.dumps(data, indent=1))
         print(f"routes={len(routes)} calls={len(calls)} "
               f"uncalled={len(uncalled)} unmatched={len(unmatched)} "
-              f"out_of_layer={len(out_of_layer)}")
+              f"dynamic={len(dynamic)} out_of_layer={len(out_of_layer)}")
         print("wrote scripts/ui_endpoint_map.md and scripts/ui_endpoint_map.json")
 
     if args.check and unmatched:
