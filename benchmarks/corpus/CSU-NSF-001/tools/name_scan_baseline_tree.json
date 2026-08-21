@@ -94,5 +94,17 @@
     "text",
     "First Middle Last",
     "# First Last, or First M. Last, or First Middle Last."
+  ],
+  [
+    "tools/score.py",
+    "text",
+    "Social Security",
+    "# \"there is no Social Security number associated with the PI\""
+  ],
+  [
+    "tools/test_score.py",
+    "text",
+    "Social Security",
+    "\"person. Therefore, there is no Social Security number associated \""
   ]
 ]
