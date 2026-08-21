@@ -54,7 +54,7 @@ async def create_search_set(
     from app.services import library_service
 
     await library_service.ensure_bookmark(
-        ss.id, LibraryItemKind.SEARCH_SET, user_id,
+        ss.id, LibraryItemKind.SEARCH_SET, user_id, team_id=team_id,
     )
     return ss
 
