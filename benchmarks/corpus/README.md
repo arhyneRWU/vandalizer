@@ -91,15 +91,15 @@ tarballs were unpacked into (holding `pdf/`, `source/`, `scanned/`). `BIN` must
 be an **absolute** path: the examples below `cd backend` partway through, so a
 relative `BIN` would resolve against the wrong directory.
 
-Two of the nine need only pypdf and python-docx, so they run from the
+Two of the ten need only pypdf and python-docx, so they run from the
 repository root against an ephemeral environment. Five need PyMuPDF —
 `scan_person_names.py`, `check_references.py`, `check_scans.py`,
 `validate_keys.py`, and `validate_keys2.py` — and `validate_keys.py`
 additionally imports the product's own extraction helpers, so all five run from
-`backend/` against its environment. The remaining two, `citation_accuracy.py`
-and `verify_assets.py`, import only the standard library and run anywhere —
-`verify_assets.py` by design, since it is what stands between a downloaded
-tarball and anything that parses it.
+`backend/` against its environment. The remaining three, `citation_accuracy.py`,
+`score.py` and `verify_assets.py`, import only the standard library and run
+anywhere — `verify_assets.py` by design, since it is what stands between a
+downloaded tarball and anything that parses it.
 
 Keys only — everything a pull request can check without the assets:
 
@@ -131,11 +131,20 @@ uv run python ../$KEYS/tools/validate_keys.py --keys ../$KEYS --binaries $BIN
 uv run python ../$KEYS/tools/validate_keys2.py --keys ../$KEYS --binaries $BIN
 ```
 
-Scoring a harness run — `raw.json` is a list of `{"id": ..., "got": ...}` rows:
+Scoring a harness run — `raw.json` is a list of one row per answer. Both
+scorers read `id` and `got`; `score.py` also reads `expected`, `answerable`,
+`question` and `type`, which `run_benchmark_http.py` copies out of the key:
 
 ```bash
+python $KEYS/tools/score.py raw.json --json verdicts.json
 python $KEYS/tools/citation_accuracy.py --keys $KEYS raw.json
 ```
+
+`score.py` is deliberately conservative and defers every row it cannot decide
+mechanically to a REVIEW bucket for a human to read. **A REVIEW count is not a
+failure count**; the adjudication rubric it defers under is stated in the
+corpus README under *Reproducing the measured results*, and in the tool's own
+docstring.
 
 Every tool exits non-zero on failure. Three take a reviewed exception set, so
 that a *new* exception is the thing that fails rather than the standing ones:
@@ -146,12 +155,14 @@ citation no longer flags), and `validate_keys.py --allow-unverifiable
 QID:FILE`, which extends a set pinned in the tool itself. Widening any of the
 three is a visible diff.
 
-The tools carry 93 unit tests in three files — `test_citation_accuracy.py`
-(the scorer's document attribution and outcome ladder),
-`test_backend_contract.py` (the five backend symbols `validate_keys.py`
-depends on), and `test_validator_failure_paths.py` (each validator against a
-planted defect). CI runs the directory, so a new `test_*.py` here needs no
-workflow change; the tool scripts themselves are never imported by collection.
+The tools carry 124 unit tests in four files — `test_citation_accuracy.py`
+(the citation scorer's document attribution and outcome ladder),
+`test_score.py` (the answer scorer, against the wrong-verdict patterns a real
+run produced), `test_backend_contract.py` (the five backend symbols
+`validate_keys.py` depends on), and `test_validator_failure_paths.py` (each
+validator against a planted defect). CI runs the directory, so a new
+`test_*.py` here needs no workflow change; the tool scripts themselves are
+never imported by collection.
 
 ```bash
 cd backend && uv run --with pytest pytest ../benchmarks/corpus/CSU-NSF-001/tools/ -q
@@ -164,7 +175,20 @@ environment the workflow uses for the pypdf-only tools, so `uv` must be on
 
 ## Running a corpus against a deployment
 
-The benchmark harness (upload → ingest → chat → score) is deliberately not
-in-tree — it is deployment-specific. The keys are the contribution: any
-harness that produces `{id, got}` rows per question can be scored with
-`tools/citation_accuracy.py`.
+`CSU-NSF-001/tools/run_benchmark_http.py` is the harness that produced the
+*Measured results* tables in that corpus's README. It logs in, uploads the
+packet, waits for ingestion, asks the corpus's own questions over
+`POST /api/chat`, and records what the server said it did while answering —
+the `context_notice` and `context_budget` chunks, and so which model actually
+served each request — not just the answer text.
+
+It is a **manual** tool. It needs a running deployment with a registered model,
+it uploads documents and builds a knowledge base there, and a full pass costs
+real GPU minutes, so it is out of CI for the same reason the backend's tier-3
+`INTEGRATION_LLM` tests are: nothing under `.github/workflows/` invokes it, and
+the corpus job above runs only the validators and the unit tests. The corpus
+README's *Reproducing the measured results* has the full sequence, the
+credentials it reads from the environment, and what a run costs.
+
+The keys remain the contribution: any harness that produces rows per question
+can be scored with `tools/score.py` and `tools/citation_accuracy.py` instead.

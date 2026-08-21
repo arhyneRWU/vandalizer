@@ -46,8 +46,11 @@ The DOCX and XLSX sources edited for this release keep the zip member timestamps
 Every number in this section comes from one run: 30 questions × 3 repeats ×
 5 models × 2 modes = **900 answers**, all obtained over the application's real
 chat API — the same path a person uses in the UI — with 0 transport errors.
-The scoring key is the v0.5.0 key that ships in this package. Read
-*How to read these numbers* at the end of this section before quoting any of it.
+The scoring key is the v0.5.0 key that ships in this package. The harness that
+produced every table below, and the scorers that graded it, are in the
+vandalizer repository under `benchmarks/corpus/CSU-NSF-001/tools/` — see
+*Reproducing the measured results*. Read *How to read these numbers* at the end
+of this section before quoting any of it.
 
 ### Answer accuracy, knowledge-base retrieval
 
@@ -283,6 +286,119 @@ of magnitude of the 900-second timeout.
    different standard deliberately rather than by accident.
 9. **The corpus is fully synthetic.** No real people, institutions, awards, or
    dollar figures appear in it; the identifiers are role labels, not names.
+
+## Reproducing the measured results
+
+The tables above are reproducible from what the repository ships. Three tools
+do it, all under `benchmarks/corpus/CSU-NSF-001/tools/`:
+
+| tool | what it does |
+|---|---|
+| `run_benchmark_http.py` | asks the 30 questions over the deployment's own chat API and writes one row per answer, carrying the server's `context_notice` and `context_budget` chunks alongside the text |
+| `score.py` | triages answer correctness against the key and defers anything it cannot decide mechanically |
+| `citation_accuracy.py` | scores page citations per document, separating a wrong page from a wrong document from a correct citation to a corroborating page |
+
+They are **not** part of the release package and **not** run by CI. The package
+ships only the two release validators, because those are what a person checks a
+download with; the harness needs a running deployment, uploads documents into
+it, and spends real GPU time, which is the same reason the repository's tier-3
+`INTEGRATION_LLM` tests are not in CI either. Nothing under
+`.github/workflows/` invokes any of the three.
+
+### What you need
+
+A running Vandalizer instance with at least one registered model, an account on
+it that is not your own (the harness uploads 16 documents and creates a
+knowledge base), and the release tarball named in `manifest.json`. The harness
+reads the documents straight out of that tarball after verifying its sha256
+against the manifest — it never uploads from a loose directory, because a PDF
+left over from an earlier release carries the retired $1,169,898.51 total and
+would fail a third of the questions in a way that reads exactly like a model
+error.
+
+### Running it
+
+```bash
+export VANDALIZER_URL=https://your-instance.example
+export VANDALIZER_USER=... VANDALIZER_PASS=...     # or --env-file, kept outside the repo
+
+KEYS=benchmarks/corpus/CSU-NSF-001
+ASSETS=/tmp/corpus-assets                          # holds the downloaded tarballs
+RUN=$(date -u +%Y%m%dT%H%M%SZ)
+
+# ingest and verify first; this asks nothing and spends no GPU time
+uv run --with requests python $KEYS/tools/run_benchmark_http.py \
+  --assets-dir $ASSETS --mode attach --preflight-only --run-id $RUN
+uv run --with requests python $KEYS/tools/run_benchmark_http.py \
+  --assets-dir $ASSETS --mode kb --preflight-only --run-id $RUN
+
+# one scored pass per model per mode; --run-id shares one evidence directory
+for mode in attach kb; do
+  for model in <tag> <tag> …; do
+    uv run --with requests python $KEYS/tools/run_benchmark_http.py \
+      --assets-dir $ASSETS --mode "$mode" --model "$model" \
+      --repeat 3 --pace 2.5 --timeout 900 --warmup --run-id $RUN
+  done
+done
+```
+
+`--warmup` is not optional if you intend to quote a latency number: it asks one
+unscored throwaway at the full timeout and records its wall time as
+`cold_start`, which keeps model ignition out of scored item 1. `--repeat 3` is
+what the published tables used. Pass `--admin-config` from an administrator
+account to record the routing configuration in each run's metadata; without it
+the run still records which model actually served every request, which is the
+part that matters.
+
+Then score each `raw_*.json`:
+
+```bash
+python $KEYS/tools/score.py raw_attach_<tag>.json --json verdicts_attach_<tag>.json
+python $KEYS/tools/citation_accuracy.py --keys $KEYS raw_attach_<tag>.json
+```
+
+### The scoring is adjudicated, and that is deliberate
+
+`score.py` triages; it does not adjudicate. It auto-marks a row PASS only when
+the decisive content is unambiguously present by a mechanical test, and defers
+everything else to a human — 327 of 900 rows on the published run, every one of
+which was read before any number here was published. **A REVIEW count is not a
+failure count.** The rubric the human pass applies:
+
+> **Decisive content** is the minimal set of assertions that answers the
+> question *as asked*. Supporting breakdowns that appear in the key but that the
+> question did not request are **not** required. A row **PASSes** iff every
+> decisive element is present and correct and nothing in the answer contradicts
+> it. A row **FAILs** otherwise. For the unanswerable questions a row PASSes iff
+> it states that the information is absent **and** invents no specific;
+> inventing a specific is a hard fail regardless of the rest of the answer.
+
+Two halves of that are not mechanically checkable and are left to the human
+rather than guessed at: whether a prose claim beside a correct figure is wrong,
+and whether an answer declined and fabricated in the same breath. The published
+run contains exactly one row of the second kind, and the human pass is what
+caught it.
+
+Scoring that run also exposed three mechanical defects in `score.py` itself —
+matching against raw model output so that bolded figures went unfound, a
+refusal vocabulary too narrow for the ways models phrase an absence, and
+treating every figure in a key answer as required when the question had asked
+for one of them. All three are fixed in the version that ships here, and
+`tools/test_score.py` pins each fix against the pattern that produced it.
+Caveat 8 above describes the published run, which was scored before the fixes
+and adjudicated by hand; the numbers in this README are those adjudicated
+verdicts and are unchanged by the repair.
+
+### What it costs
+
+On the hardware that produced the published tables — one shared GPU host —
+a pass was about **ten minutes**, and ten passes (five models × two modes)
+took about 90 minutes end to end plus ingestion. The dominant cost is model
+loading, not answering: cold starts ran 55–101 s while the slowest single
+scored answer in 900 was 8.8 s. Budget for one cold load per model switch.
+Ingesting the packet and building the knowledge base happens once and is
+re-used across passes through the harness's state file, so a second run against
+the same instance skips it.
 
 ## What changed in v0.4.0
 
