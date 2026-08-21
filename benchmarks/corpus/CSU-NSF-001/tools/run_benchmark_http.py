@@ -56,6 +56,56 @@ Usage
       --assets-dir /tmp/corpus-assets --mode attach --model <tag> \\
       --repeat 3 --warmup --run-id 20260101T000000Z
 
+`--mode merged` and citation scoring
+------------------------------------
+`merged` attaches one composite PDF of the same packet, to separate "many
+documents" from "much text". Answer scoring works on those rows. **Citation
+scoring does not**: the composite paginates 1..N continuously, so a cited page
+does not correspond to any page the key lists per document, and there is no
+ground truth in the shipped key for that mapping. `citation_accuracy.py`
+refuses rows stamped `"mode": "merged"` with a non-zero exit rather than
+producing numbers that look fine and are not. `merged` was never used for a
+published table.
+
+What differs from the harness that produced the published evidence
+------------------------------------------------------------------
+This is a port, and a run of it will not diff clean against
+`evidence/corpus-v050-*`. Every difference, so nobody has to work them out:
+
+* **Machine-specific paths and secrets removed.** Hardcoded home directories,
+  a fixed Mongo container name, a credentials file at a fixed path, and a
+  16-entry per-file digest table all became flags, environment variables, and
+  a single verified tarball. Nothing else about what is asked changed.
+* **Model inventory and routing come over HTTP** (`/api/config/models`, and
+  `/api/admin/config` behind `--admin-config`) instead of reading the
+  deployment's database directly. Consequence: `meta.model_config` has no
+  `temperature` — that endpoint does not expose one. The per-model temperature
+  is still recorded as the row's `temperature_config` when `--admin-config` is
+  passed.
+* **Page truth is gone.** `page_texts()`, `resolve_page_truth()` and the row's
+  `truth_pages` column needed `SmartDocument.text_markers`, which is on no HTTP
+  response. Neither scorer reads them; `citation_accuracy.py` scores against
+  the key's own `sources` / `corroborating_sources`. It is why `merged` cannot
+  be citation-scored — see above.
+* **Renamed keys.** `diag.expected_figures` → `diag.key_figures`, and
+  `meta.digital_tarball_sha256` → `meta.digital_asset_sha256`. `key_figures`
+  also changed meaning: it now normalises the key answer and applies
+  `score.py`'s identifier lookbehind, so `CSU-RSP-204` no longer contributes a
+  required figure `204`.
+* **`routed` has three states, not two.** `null` means "not derivable" — see
+  the derivation at the row build for why that is not the same as `false`. The
+  published evidence has only `true`/`false`, because a Mongo read always
+  supplied a default model to compare against.
+* **`meta.started_utc` is now populated.** The original always wrote `null`
+  there.
+* **Text chunks of kind `content` and `delta` are no longer accepted.**
+  `chat_service` emits only `text`; the other two were dead branches.
+* **A 15 s pause before a 401 re-login**, which the original did not have.
+  Login is rate-limited per address, and an immediate retry earns a 429 on top
+  of the expiry.
+* **`_ABSTAIN` is byte-identical to the original** and is meant to stay that
+  way — see the comment on it.
+
 See the corpus README, *Reproducing the measured results*, for the full
 sequence and for what the run costs.
 """
@@ -155,11 +205,25 @@ def sync_csrf(session: requests.Session) -> str | None:
 
 
 def login(session: requests.Session, creds: dict) -> dict:
-    response = session.post(
-        f"{creds['VANDALIZER_URL']}/api/auth/login",
-        json={"user_id": creds["VANDALIZER_USER"],
-              "password": creds["VANDALIZER_PASS"]},
-        timeout=30)
+    try:
+        response = session.post(
+            f"{creds['VANDALIZER_URL']}/api/auth/login",
+            json={"user_id": creds["VANDALIZER_USER"],
+                  "password": creds["VANDALIZER_PASS"]},
+            timeout=30)
+    except requests.RequestException as error:
+        # The first failure a reader following the README hits is a URL that
+        # points at nothing. A fourteen-line urllib3 traceback reads like a bug
+        # in the tool; every other pre-flight failure here exits with one line,
+        # and so does this one. The password is never in the message.
+        sys.exit(f"cannot reach {creds['VANDALIZER_URL']} — "
+                 f"{type(error).__name__}: {error}\n"
+                 f"  check VANDALIZER_URL (or --url) and that the instance is "
+                 f"up and reachable from here.")
+    if response.status_code in (401, 403):
+        sys.exit(f"login rejected by {creds['VANDALIZER_URL']} "
+                 f"(HTTP {response.status_code}) — check VANDALIZER_USER and "
+                 f"VANDALIZER_PASS")
     response.raise_for_status()
     relax_secure_cookies(session, creds["VANDALIZER_URL"])
     if not sync_csrf(session):
@@ -187,15 +251,24 @@ def routing_config(session: requests.Session, url: str) -> dict | None:
     Only an administrator can read this, so it is opt-in (`--admin-config`).
     Without it the run still records what the server *did* — `plan.model` names
     the model that actually answered — it just cannot print the configuration
-    that explains why. Four fields are taken from the response; the rest of it,
+    that explains why. Three keys are taken from the response; the rest of it,
     which includes masked credential fields, is never stored or printed.
+
+    Every failure here degrades to `None`. This is an optional diagnostic, and
+    an instance that answers 401, 404 or 500 on an admin endpoint must not kill
+    a run that has already paid for ingestion.
     """
-    response = session.get(f"{url}/api/admin/config", timeout=60)
-    if response.status_code == 403:
-        print("  --admin-config: this account is not an administrator; "
-              "routing configuration not recorded")
+    try:
+        response = session.get(f"{url}/api/admin/config", timeout=60)
+    except requests.RequestException as error:
+        print(f"  --admin-config: {type(error).__name__} reading "
+              f"/api/admin/config; routing configuration not recorded")
         return None
-    response.raise_for_status()
+    if response.status_code != 200:
+        print(f"  --admin-config: HTTP {response.status_code} from "
+              f"/api/admin/config (403 means this account is not an "
+              f"administrator); routing configuration not recorded")
+        return None
     body = response.json()
     return {"default_model": body.get("default_model"),
             "long_document_model": body.get("long_document_model"),
@@ -358,16 +431,40 @@ def pages_in(text: str) -> list[int]:
     return sorted(n for n in out if n <= 200)
 
 
+#: Ways an answer says "this is not in the documents", for the `abstained`
+#: diagnostic column. **Verbatim from the harness that produced the published
+#: evidence** — every branch below is one the audit read, and the column is only
+#: comparable across runs if the vocabulary does not move under it. Replayed
+#: over all 900 published rows this agrees with `score.py`'s `REFUSAL` on
+#: 830/900; a narrower copy of it agreed on 819, which is how the fidelity of
+#: this constant is checked (`test_run_benchmark_http.py`).
+#:
+#: It is deliberately *not* `score.py`'s `REFUSAL`, and the two are not
+#: interchangeable: `REFUSAL` decides verdicts and may widen whenever the audit
+#: finds a phrasing it missed, while this one is a diagnostic pinned to the
+#: published run. `score.py` is the authority on whether a row declined; this
+#: column is a sorting aid for the human pass. Where they disagree, `score.py`
+#: wins by construction — nothing reads `abstained` to produce a verdict.
 _ABSTAIN = re.compile(
     r"(do(es)? ?n[o']?t (contain|specify|state|provide|include|mention|list"
-    r"|define|give|reveal|appear)"
+    r"|define|give|appear)"
     r"|(is|are|was|were) ?n[o']?t (specified|stated|provided|mentioned|included"
     r"|listed|given|defined|applied|present|available|discussed|found)"
-    r"|not (found|present|available|defined|applied|discussed|addressed) in"
+    r"|^\s*[-*\s]*not (applied|applicable|specified|stated|provided|included"
+    r"|listed|given)"
+    r"|:\s*not (applied|applicable|specified|stated|provided|included|listed"
+    r"|given)"
+    r"|not (found|present|available|defined|applied|discussed|addressed"
+    r"|included) in"
+    r"|no \w+(\s+\w+)? (is|are|was|were) (included|listed|provided|given"
+    r"|mentioned|specified)"
+    r"|no (mention|reference|information|indication|record|data|entry|entries"
+    r"|line items?|subaward|off.campus|orcid|budget|figure|value|such)"
     r"|there (is|are|was|were) no|isn'?t (any|listed)"
     r"|cannot (find|locate|determine|be determined)"
     r"|unable to (find|locate|determine)"
-    r"|none of the (snippets|excerpts|documents|sources))",
+    r"|(could|can|do|did)( ?n[o']?t| not) (find|locate|determine|see|identify)"
+    r"|does not exist|do not exist|no such|nothing in the (document|text))",
     re.I | re.M)
 
 #: Reasoning emitted as the answer body — every fact right, the output
@@ -384,7 +481,17 @@ _FIGURE = re.compile(r"(?<![A-Za-z0-9-])\$?\d[\d,]*\.?\d*%?")
 
 
 def key_figures(expected: str) -> list[str]:
-    """Figure tokens in the key answer, by `score.py`'s rule."""
+    """Figure tokens in the key answer, by `score.py`'s token rule.
+
+    The token pattern, the identifier lookbehind and the three-character
+    minimum are `score.py`'s `figures()` verbatim. Two things are *not* the
+    same and must not be read as such: this folds Unicode punctuation but does
+    not strip markdown (no key answer contains `*`, `_` or a backtick, so it
+    makes no difference on the shipped key), and it runs over the whole key
+    answer rather than `score.py`'s decisive clause. This is a diagnostic —
+    "which of the key's numbers appear anywhere in the answer" — not the
+    required set. `score.py` decides what is required.
+    """
     text = normalize(expected or "")
     out = []
     for match in _FIGURE.finditer(text):
@@ -395,6 +502,29 @@ def key_figures(expected: str) -> list[str]:
         if len(token.strip("$%.,")) >= 3:
             out.append(token)
     return out
+
+
+def derive_routed(served: str | None, requested: str | None,
+                  actions: list[str]) -> bool | None:
+    """Did the request end up on a different model than the one asked for?
+
+    Three states, and `None` is not `False`. `None` means *unknown*: with
+    neither `--model` nor `--admin-config` there is no `requested` value to
+    compare `served` against, and a diagnostic that degrades to the reassuring
+    answer is worse than one that says it cannot tell. `model_served` — the
+    field the published routing finding was actually derived from — is
+    recorded either way.
+
+    `model_routed` settles it upward whatever else is known. Its absence
+    settles nothing: `model_not_routed` is not emitted for the long-document
+    model itself, so the plan's model is the authority and the notice only ever
+    confirms it.
+    """
+    if "model_routed" in actions:
+        return True
+    if served and requested:
+        return served != requested
+    return None
 
 
 def diagnostics(answer: str, expected: str) -> dict:
@@ -767,7 +897,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=tuple(DOCSET_FOR_MODE), default="attach",
                         help="attach: every packet document on document_uuids. "
                              "kb: the same packet as a knowledge base (vector "
-                             "retrieval). merged: a single composite PDF.")
+                             "retrieval). merged: a single composite PDF — "
+                             "answer scoring works, but merged rows must NOT "
+                             "be citation-scored (its pages run 1..N across "
+                             "the whole composite and do not map to the key's "
+                             "per-document pages; citation_accuracy.py refuses "
+                             "them).")
     parser.add_argument("--keys", type=Path, default=KEYS_DEFAULT,
                         help="corpus directory holding manifest.json and "
                              "ground_truth.json (default: this tool's own)")
@@ -868,6 +1003,16 @@ def main(argv: list[str] | None = None) -> int:
     if routing:
         print(f"routing : default={routing['default_model']} "
               f"long_document={routing['long_document_model']}")
+    if not model and not (routing or {}).get("default_model"):
+        # There is nothing to compare the served model against, so `routed`
+        # will be null on every row unless the server volunteers a
+        # `model_routed` notice. Said once here rather than discovered in the
+        # rows afterwards.
+        print("routing : cannot be derived — no --model and no readable "
+              "default_model; rows will record routed=null unless the server "
+              "emits a model_routed notice. model_served is recorded either "
+              "way. Pass --admin-config from an administrator account to "
+              "resolve it.")
     if model:
         print(f"asking  : {model['tag']} -> {model['name']} "
               f"(context window {model['context_window']})")
@@ -908,6 +1053,11 @@ def main(argv: list[str] | None = None) -> int:
     attached = ({"knowledge_base_uuid": kb_uuid} if args.mode == "kb"
                 else {"document_uuids": list(uploads.values())})
     model_name = model["name"] if model else None
+    #: What was asked for, as opposed to what answered. Loop-invariant,
+    #: and the row column and the meta block must not disagree about it:
+    #: on a default-model run the rows named the model while the meta
+    #: said null, which is a diff nobody can interpret.
+    requested = model_name or (routing or {}).get("default_model")
 
     def relogin():
         login(session, creds)
@@ -935,8 +1085,10 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     out_path = root / f"raw_{stem}.json"
-    counts = {"answered": 0, "errors": 0, "routed": 0, "leaks": 0}
+    counts = {"answered": 0, "errors": 0, "routed": 0,
+              "routed_unknown": 0, "leaks": 0}
     run_started = time.perf_counter()
+    started_utc = utc_iso()
 
     for index, (question, repeat) in enumerate(plan_items, 1):
         if index > 1:
@@ -948,12 +1100,8 @@ def main(argv: list[str] | None = None) -> int:
         elapsed = round(time.perf_counter() - started, 2)
         plan = result["plan"] or {}
         served = plan.get("model")
-        requested = model_name or (routing or {}).get("default_model")
         actions = [n["action"] for n in result["notices"]]
-        # `model_not_routed` is not emitted for the long-document model itself,
-        # so the plan's model is the authority and the notice only confirms it.
-        routed = bool(served and requested and served != requested) \
-            or "model_routed" in actions
+        routed = derive_routed(served, requested, actions)
 
         answer = result["answer"]
         if result["error"] and not answer:
@@ -965,6 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
             counts["answered"] += 1
         if routed:
             counts["routed"] += 1
+        elif routed is None:
+            counts["routed_unknown"] += 1
 
         diag = diagnostics(result["answer"], question.get("answer") or "")
         if diag["thinking_leak"]:
@@ -1019,7 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
         (root / "streams"
          / f"{stem}_{question['id']}_r{repeat}.ndjson").write_text(result["raw"])
 
-        flags = "".join(["R" if routed else " ",
+        flags = "".join(["R" if routed else ("?" if routed is None else " "),
                          "T" if diag["thinking_leak"] else " ",
                          "E" if result["error"] else " ",
                          "C" if rows[-1]["compaction"] else " "])
@@ -1038,7 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
                                  else digital_asset(manifest)["sha256"]),
         "merged_sha256": merged_digest,
         "model_requested": model["tag"] if model else "(instance default)",
-        "model_requested_name": model_name,
+        "model_requested_name": requested,
         "model_config": model,
         "routing_config": routing,
         "repeat": args.repeat, "pace_s": args.pace, "timeout_s": args.timeout,
@@ -1047,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
         "counts": counts,
         "wall_seconds": round(time.perf_counter() - run_started, 1),
         "uploads": uploads, "knowledge_base_uuid": kb_uuid,
+        "started_utc": started_utc,
         "finished_utc": utc_iso(),
         "harness": Path(__file__).name,
     }
@@ -1056,12 +1207,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{'=' * 66}")
     print(f"rows {len(rows)}  answered {counts['answered']}  "
           f"errors {counts['errors']}  routed {counts['routed']}  "
+          f"routing-unknown {counts['routed_unknown']}  "
           f"thinking-leaks {counts['leaks']}")
     print(f"wall {meta['wall_seconds']}s")
     print(f"raw  : {out_path}")
     print(f"meta : {root / f'meta_{stem}.json'}")
-    print("legend: R routed  T thinking leaked into the answer  "
-          "E request error  C context compaction")
+    print("legend: R routed  ? routing not derivable (see --admin-config)  "
+          "T thinking leaked into the answer  E request error  "
+          "C context compaction")
     return 0
 
 
