@@ -35,11 +35,254 @@ The authoritative total is 1,184,398.51428; $1,184,398.51 is the displayed value
 
 ### Keys and comparability
 
-The 30 question IDs and the question count are unchanged. Q021 is rewritten for the combined mentoring-plan requirement, and every answer, source page, and corroborating page was re-derived against the v0.5.0 renders rather than carried forward. **Published model-benchmark tables for this corpus were measured against the v0.3.3 answer key and predate this recomputation**, so they are not comparable on the budget questions or on the questions that cited the retired senior-personnel documents.
+The 30 question IDs and the question count are unchanged. Q021 is rewritten for the combined mentoring-plan requirement, and every answer, source page, and corroborating page was re-derived against the v0.5.0 renders rather than carried forward. **Published model-benchmark tables for this corpus were measured against the v0.3.3 answer key and predate this recomputation**, so they are not comparable on the budget questions or on the questions that cited the retired senior-personnel documents. That caveat still stands and is not retired by anything below: the *Measured results* section is a new run against the v0.5.0 key over a different code path, and its numbers must not be diffed against the older tables in either direction — see caveat 5 in *How to read these numbers*.
 
 ### Packaging note
 
 The DOCX and XLSX sources edited for this release keep the zip member timestamps they were written with. They were deliberately not re-saved to normalize those timestamps, because re-saving risks content and hash drift against renders that are already verified. One exception is metadata only: the budget workbook's `docProps` members were rewritten in place so that all three workbooks carry the same fixed document properties — a generic synthetic-generator creator and a fixed created and modified date of 2026-08-20 — in place of the build-time values a library had written. Only those two members changed; every other member of that file is byte-identical to the one the verified renders were made from, and no workbook was re-saved. The sha256 of every release asset is pinned in `manifest.json`.
+
+## Measured results (v0.5.0, end-to-end)
+
+Every number in this section comes from one run: 30 questions × 3 repeats ×
+5 models × 2 modes = **900 answers**, all obtained over the application's real
+chat API — the same path a person uses in the UI — with 0 transport errors.
+The scoring key is the v0.5.0 key that ships in this package. Read
+*How to read these numbers* at the end of this section before quoting any of it.
+
+### Answer accuracy, knowledge-base retrieval
+
+Each model answered its own requests; requested and served model matched on all
+450 rows. 27 answerable questions, majority of 3 repeats.
+
+| model | served model (verified) | answers correct (majority of 3) | per-repeat | refusals correct | negative controls |
+|---|---|---|---|---|---|
+| Qwen3-VL-8B | `Qwen/Qwen3-VL-8B-Instruct` | 24/27 (88.9 %) | 72/81 (88.9 %) | 9/9 | 12/12 |
+| Qwen3.5-9B | `Qwen/Qwen3.5-9B` | 25/27 (92.6 %) | 74/81 (91.4 %) | 9/9 | 12/12 |
+| Qwen3-VL-30B-A3B | `Qwen/Qwen3-VL-30B-A3B-Instruct` | 25/27 (92.6 %) | 75/81 (92.6 %) | 9/9 | 12/12 |
+| gpt-oss-20b | `openai/gpt-oss-20b` | 25/27 (92.6 %) | 75/81 (92.6 %) | 9/9 | 12/12 |
+| gpt-oss-120b | `openai/gpt-oss-120b` | 25/27 (92.6 %) | 75/81 (92.6 %) | 9/9 | 12/12 |
+
+Five models, one question set, one retrieval configuration. The spread is one
+question. Two of the three failures every model shares are not model failures at
+all: retrieval returns the same eight chunks to every model, and for two
+questions those chunks do not contain the answer (*Where knowledge-base mode
+loses*, below). With those two removed the practical ceiling for this retrieval
+configuration is 25/27, and four of five models reach it.
+
+### Attached-document mode: the model you ask for is not the model you get
+
+All 16 documents attached to a single chat turn.
+
+| model requested | **model that actually answered** | rows routed away | notice shown to the user |
+|---|---|---|---|
+| Qwen3-VL-8B | **Qwen3.5-9B** | 90/90 | yes — `model_routed` |
+| Qwen3.5-9B | **Qwen3.5-9B** | 0/90 | n/a — it is the long-document model |
+| Qwen3-VL-30B-A3B | **Qwen3.5-9B** | 90/90 | yes — `model_routed` |
+| gpt-oss-20b | **Qwen3.5-9B** | 90/90 | yes — `model_routed` |
+| gpt-oss-120b | **Qwen3.5-9B** | 90/90 | yes — `model_routed` |
+
+The measurement behind it:
+
+| quantity | value |
+|---|---|
+| assembled packet | **31,881 – 31,900 tokens** (31,144 of them document text) |
+| input budget of the four non-9B models | **24,576 tokens** |
+| overage | **+30 %** |
+| input budget of the model that answered | 253,952 tokens |
+| context compaction / truncation events | **0** |
+
+At v0.5.0 the 16-document packet is about 31.9k tokens and does not fit the
+24.6k input budget of four of the five registered models. The long-document
+router redirects those requests to the one model that can hold the packet, tells
+the user it did so, and keeps the whole document in view — nothing was truncated
+or compacted in 450 rows. The correct engineering behaviour also means
+**attached-document mode cannot compare models on this corpus**: all five
+columns are the same model. Any five-model table over a packet this size is five
+samples of one model. Accuracy in this mode was 26–27 of 27 answerable questions
+(majority of 3) for every requested model — that is one model's score, sampled
+five times, and the 1-question spread is its run-to-run variance.
+
+This measurement is what retires the context-limit caveat earlier releases of
+this README carried; see *Limits*, below.
+
+### Refusal behaviour on unanswerable questions
+
+Three questions have no answer in the documents: the PI's Social Security
+number, the specific make and model of the imaging flow cytometer, and the name
+of the postdoctoral researcher. A row passes only if it states the information
+is absent **and** invents no specific.
+
+| mode | model | correct refusals /9 | fabricated a specific |
+|---|---|---|---|
+| knowledge base | Qwen3-VL-8B | 9/9 | 0 |
+| knowledge base | Qwen3.5-9B | 9/9 | 0 |
+| knowledge base | Qwen3-VL-30B-A3B | 9/9 | 0 |
+| knowledge base | gpt-oss-20b | 9/9 | 0 |
+| knowledge base | gpt-oss-120b | 9/9 | 0 |
+| attached docs | Qwen3-VL-8B | 8/9 | 0 |
+| attached docs | Qwen3.5-9B | 6/9 | **1** |
+| attached docs | Qwen3-VL-30B-A3B | 8/9 | 0 |
+| attached docs | gpt-oss-20b | 9/9 | 0 |
+| attached docs | gpt-oss-120b | 8/9 | 0 |
+
+84 of 90 unanswerable rows refused correctly. The Social Security number
+question was refused 30/30 — no model ever produced a digit string. Five of the
+six failures are the same shape and are worth separating from hallucination:
+asked which model of imaging flow cytometer will be purchased, the answer
+describes the instrument, the $62,000 cost and the Year-1 timing, and never says
+that no manufacturer or model is named. Nothing is invented; the absence is
+simply not flagged. **One row in 900 fabricated a specific**: it answered "what
+is the name of the postdoctoral researcher" by presenting the PI's role
+identifier as the postdoc's identity.
+
+A related behaviour worth knowing about: four knowledge-base rows correctly
+declined on the instrument question and then, under an explicit "beyond the
+retrieved sources" heading, listed real instrument brands as examples of the
+kind of name the documents do **not** contain. One of those examples appears to
+be invented outright. None asserts that any of them will be purchased, so all
+four count as correct refusals — but a careless reader could carry a brand name
+out of the answer.
+
+### Negative controls
+
+Four questions plant a plausible wrong figure or a superseded fact and ask the
+system to reject it: a $1.25M regional-loss figure offered as the request
+amount, a closed $20,000 internal seed award, absent committed cost sharing, and
+a $2.4M institutional facility investment.
+
+| model | knowledge base | attached docs |
+|---|---|---|
+| Qwen3-VL-8B | 12/12 | 12/12 |
+| Qwen3.5-9B | 12/12 | 12/12 |
+| Qwen3-VL-30B-A3B | 12/12 | 12/12 |
+| gpt-oss-20b | 12/12 | 12/12 |
+| gpt-oss-120b | 12/12 | 12/12 |
+
+**120 of 120.** Every model, both modes, all three repeats. On this question set
+and this path the negative controls no longer separate the models.
+
+### Page-citation accuracy
+
+Scored by document-aware citation matching against the answer key.
+**Defensible** = document and page both canonical, or a corroborating source, or
+a page number with no document named. **Strict** = document named and both
+document and page correct.
+
+Attached-document mode (all five columns are the same served model):
+
+| model requested | rows naming a page | citations emitted | defensible | strict |
+|---|---|---|---|---|
+| Qwen3-VL-8B | 81/90 (90 %) | 285 | 66 % | 29 % |
+| Qwen3.5-9B | 83/90 (92 %) | 308 | 70 % | 27 % |
+| Qwen3-VL-30B-A3B | 84/90 (93 %) | 276 | 61 % | 20 % |
+| gpt-oss-20b | 81/90 (90 %) | 289 | 61 % | 22 % |
+| gpt-oss-120b | 83/90 (92 %) | 302 | 63 % | 20 % |
+
+Knowledge-base mode:
+
+| model | rows naming a page | citations emitted | defensible | strict |
+|---|---|---|---|---|
+| Qwen3-VL-8B | 33/90 (37 %) | 78 | 73 % | 63 % |
+| Qwen3.5-9B | 10/90 (11 %) | 26 | 85 % | 77 % |
+| Qwen3-VL-30B-A3B | 19/90 (21 %) | 39 | 72 % | 64 % |
+| gpt-oss-20b | 35/90 (39 %) | 62 | 89 % | 77 % |
+| gpt-oss-120b | 7/90 (8 %) | **6** | *(n too small)* | *(n too small)* |
+
+Two different regimes. With the whole packet attached, models cite a page for
+roughly nine of every ten answers but are right about which document that page
+belongs to only 20–29 % of the time — the dominant error is a correct page
+number attached to the wrong document. With knowledge-base retrieval, citations
+are much more often exactly right (63–77 % strict) but appear far less often.
+The gpt-oss-120b knowledge-base row rests on six citations and must not be
+quoted as a percentage.
+
+Because all five attached-document columns are the same served model, the
+9-point defensible spread across them is that model's run-to-run variance at
+production temperature — a useful calibration figure when reading any
+single-run citation number.
+
+**The knowledge-base citation gap is a presentation gap, not a retrieval gap.**
+Every retrieved chunk carried a page number (3,600 of 3,600), and the response
+payload exposes the document and page for each one. The models simply do not
+surface that page in the answer text for most questions.
+
+### Where knowledge-base mode loses, and why
+
+| question | every model's result | cause |
+|---|---|---|
+| "Where did the PI earn the Ph.D., and in what field?" | 0/15 | the retriever returned the **Co-PI's** biographical sketch and never the PI's |
+| "What are the three field sites?" | 0/15 | the retriever returned the project-description page describing the field schedule, never the page naming the sites |
+
+Retrieval in knowledge-base mode is deterministic and model-independent: for all
+30 questions the same eight chunks were returned to every model on every repeat.
+These two questions therefore carry no model signal — the models are answering a
+question whose evidence was never handed to them, and most of them say so
+plainly rather than guessing. Both questions do far better in attached-document
+mode, where the whole packet is in view: the field-sites question is answered
+correctly 15 times out of 15, and the Ph.D. question 13 times out of 15 if a
+truncated form of the institution's name is accepted (4 of 15 if it is not — see
+caveat 8). That contrast is the strongest single argument in this run for
+attaching documents when completeness matters more than speed.
+
+Retrieval coverage overall was good: for 26 of 27 answerable questions the top-8
+chunks contained a canonical or corroborating page from the answer key.
+
+### Latency — reported, not benchmarked
+
+| mode | cold start (first question after model load) | warm question, median | warm question, p90 |
+|---|---|---|---|
+| knowledge base | 55 – 101 s | 1.1 – 2.6 s | 1.7 – 4.0 s |
+| attached docs (16 PDFs, ~31.9k tokens) | 91 s for the first pass only | 3.9 – 4.0 s | 5.2 – 5.8 s |
+
+The distribution is sharply bimodal: a model load, then everything else.
+**These numbers characterise one run on one shared host and should not be read
+as a latency benchmark** — the box also runs an OCR stack and the GPU sampler
+showed sustained 100 % utilisation throughout. This is the corpus's own
+shared-host latency caveat (see *Limits*) applying to its own results. The
+attached-document cold start looks low for four of the five models for the
+reason given above: their requests were routed, so their models were never
+loaded. Slowest single answer in 900: 8.8 s. No question came within two orders
+of magnitude of the 900-second timeout.
+
+### How to read these numbers
+
+1. **Temperature was left unset**, matching production configuration rather than
+   pinned to 0. These are the numbers the deployed system produces, not a
+   determinism-controlled experiment. Run-to-run variation is real and visible:
+   see the 9-point citation spread across five columns that are the same model.
+2. **3 repeats per question.** Enough to see variance, not enough to rank models
+   whose scores differ by one question. Nothing here supports a ranking claim.
+3. **Single host, single run.** All 900 answers come from one box on one
+   evening. Nothing has been replicated on independent hardware.
+4. **Shared GPU.** Latency figures are indicative only, for the reason above.
+5. **Not comparable to the earlier published tables.** The previously published
+   accuracy and citation tables for this corpus used a **different answer key
+   (v0.3.3, since revised — 12 of 30 answers changed)**, a **different code
+   path** (a harness posting directly to the model gateway, bypassing the
+   application), a **different document scope** (one document per question, or a
+   smaller packet), a **different question set**, and **different repeat
+   counts**. Deltas against them are indicative of direction at best and should
+   never be quoted as a regression or an improvement.
+6. **Attached-document mode is not a model comparison on this corpus.** All five
+   columns are the same served model. Do not read them as five models.
+7. **Two knowledge-base questions carry no model signal** because retrieval
+   never supplied the evidence.
+8. **Scoring was adjudicated, not purely automatic.** The automatic scorer is
+   deliberately conservative and deferred 327 of 900 rows for human review; all
+   327 were adjudicated against the key, and so were the 573 it did not defer.
+   That second pass overturned 76 automatic verdicts — 68 correct answers the
+   scorer had failed and 8 wrong answers it had passed. The published numbers
+   are the adjudicated verdicts. The rubric was: *the decisive content is what
+   answers the question as asked; supporting detail the question did not request
+   is not required; for unanswerable questions the answer must state the absence
+   and invent nothing.* The strictest single call in that rubric: a question
+   asking where a degree was earned requires the institution's **exact** name.
+   Nine attached-document rows named a recognisable but truncated form of it and
+   were failed; accepting the truncation would raise every attached-document
+   column by roughly two questions. It is flagged here so a reader can apply a
+   different standard deliberately rather than by accident.
+9. **The corpus is fully synthetic.** No real people, institutions, awards, or
+   dollar figures appear in it; the identifiers are role labels, not names.
 
 ## What changed in v0.4.0
 
@@ -144,13 +387,20 @@ Sixteen PDFs, 42 pages, plus three workbooks. Editable DOCX versions are include
 ## Recommended test modes
 
 1. Clean digital PDF and XLSX files
-2. PDFs printed and scanned at 300 dpi
-3. Moderately degraded scans at 200 dpi with slight skew and contrast loss
-4. Severe but readable scans at 150 dpi
+2. Light degradation at 200 dpi with slight skew and contrast loss (`scanned/light/`)
+3. Moderate degradation at 150 dpi (`scanned/medium/`)
+4. Severe but readable degradation at 100 dpi (`scanned/heavy/`)
 5. Full-document chat
 6. Knowledge-base retrieval
 7. Current Vandalizer context truncation
 8. Experimental Headroom compression
+
+Earlier releases of this README listed modes 2–4 as 300 / 200 / 150 dpi. The
+three severities the generator produces are and always were **200 / 150 / 100
+dpi**, as each `scanned/*/degradation_manifest.json` records in its `config`
+block. The README figures were wrong, not the files; nothing about the shipped
+renders changed. There is no 300 dpi variant, and none is planned — see the
+first bullet under *Limits* for what these files are and are not.
 
 ## Scoring dimensions
 
@@ -176,26 +426,57 @@ Every institution, address, agreement, preliminary result, proposed experiment, 
   through a physical scanner: no real sensor noise, feed distortion, staples,
   or toner artifacts. Do not cite OCR results from these files as real-scan
   performance.
-- **Context-limit behaviour is not exercised.** The whole packet is ~26k
-  tokens and fits a 32k window, so long-document routing, compaction, and
-  silent-truncation failures cannot reproduce against it. A result on this
-  corpus says nothing about behaviour past the context limit.
+- **Long-document routing is exercised; compaction and silent truncation are
+  not.** Earlier releases of this README said the packet was "~26k tokens", fit
+  a 32k window, and therefore could not reproduce long-document routing,
+  compaction, or silent-truncation failures. At v0.5.0 that is measured and
+  wrong on the first two counts. Two different figures matter and they are not
+  interchangeable. The **extracted document text** of the 16 shipped PDFs is
+  **28,272 tokens** (cl100k, 124,519 characters) — that is what the old "~26k"
+  was reaching for, and it was about 8 % low. The **packet the application
+  actually assembles** when all 16 are attached to one chat turn is **31,881 –
+  31,900 tokens**, 31,144 of them document text; the difference is the
+  per-document markers and prompt scaffolding the product adds, and it is the
+  assembled figure, not the extracted one, that a model has to hold. That packet
+  is 30 % over the 24,576-token input budget of four of the five models
+  measured, and long-document routing fired on 90 of 90 rows for each of them
+  (see *Measured results*). What still cannot reproduce against this corpus is
+  compaction and silent truncation — 0 events in 450 rows, precisely because
+  routing moved every oversize request to a model that holds the packet whole.
+  Reproducing those needs a packet larger than *every* configured model.
 - **Latency must not be measured on a shared or single-GPU host.** Timings
   there are bimodal — warm inference is sub-2s while a cold model load is
   minutes — so any speed number includes the scheduler, not the model.
   Measured during the #628 benchmark: 139 of 350 timings were model-load.
-- **Answer accuracy has no headroom.** Strong models answer 30/30; the corpus
-  detects breakage but cannot rank good configurations. Citation accuracy and
-  refusal on unanswerable questions are the discriminating columns.
+- **The corpus detects breakage; it does not rank good configurations.** That
+  much survives the v0.5.0 end-to-end run, but the earlier form of this
+  bullet — "strong models answer 30/30; citation accuracy and refusal on
+  unanswerable questions are the discriminating columns" — overstates both
+  halves. Measured over the real chat API, knowledge-base accuracy is 24–25 of
+  27 answerable questions with a one-question spread across five models, and two
+  of the three shared failures are retrieval failures rather than model
+  failures. Nor did the columns that were supposed to discriminate do so: the
+  negative controls came back 120/120 for every model in both modes, refusals
+  84 of 90 overall, and the citation spread across the five attached-document
+  columns is one model's run-to-run variance, because all five were served by
+  the same model. Treat any single-run difference of one question as noise.
 
 ## Planned for the next release
 
-- A question set weighted toward absence: measured across five models,
-  recall-style questions were at ceiling (2-point spread) while negative
-  controls spread 25 points — absence is the only question type that ranked
-  anything.
-- One oversize document per packet, so context-limit behaviour becomes
-  testable.
+- A question set weighted toward absence. The earlier justification for this —
+  recall-style questions at ceiling with a 2-point spread while negative
+  controls spread 25 points — came from the older key and the older harness and
+  **did not reproduce** end-to-end at v0.5.0, where every model scored 120/120
+  on the negative controls in both modes. The item stands for a different
+  reason: with recall near ceiling and absence no longer separating anything
+  either, this corpus needs harder unanswerable and superseded-fact items before
+  it can rank configurations at all.
+- One oversize *single* document per packet. The 16-document packet already
+  exceeds the input budget of a 32k-context model and does exercise
+  long-document routing, so that half of the item is discharged. What is left is
+  compaction and silent truncation, which need a document larger than every
+  configured model — including the long-document model — and nothing in the
+  corpus is that big.
 - Additional packets in distinct sponsor styles (federal-vs-match budget
   columns, modular budgets, cost-share commitments, multi-institution
   subawards).
