@@ -91,15 +91,20 @@ tarballs were unpacked into (holding `pdf/`, `source/`, `scanned/`). `BIN` must
 be an **absolute** path: the examples below `cd backend` partway through, so a
 relative `BIN` would resolve against the wrong directory.
 
-Two of the ten need only pypdf and python-docx, so they run from the
-repository root against an ephemeral environment. Five need PyMuPDF —
-`scan_person_names.py`, `check_references.py`, `check_scans.py`,
-`validate_keys.py`, and `validate_keys2.py` — and `validate_keys.py`
-additionally imports the product's own extraction helpers, so all five run from
-`backend/` against its environment. The remaining three, `citation_accuracy.py`,
-`score.py` and `verify_assets.py`, import only the standard library and run
-anywhere — `verify_assets.py` by design, since it is what stands between a
-downloaded tarball and anything that parses it.
+Eleven non-test tools live there. Two of them —
+`validate_release.py` and `validate_identity_safety.py` — need only pypdf and
+python-docx, so they run from the repository root against an ephemeral
+environment. Five need PyMuPDF — `scan_person_names.py`,
+`check_references.py`, `check_scans.py`, `validate_keys.py`, and
+`validate_keys2.py` — and `validate_keys.py` additionally imports the product's
+own extraction helpers, so all five run from `backend/` against its
+environment. Three more, `citation_accuracy.py`, `score.py` and
+`verify_assets.py`, import only the standard library and run anywhere —
+`verify_assets.py` by design, since it is what stands between a downloaded
+tarball and anything that parses it. The eleventh, `run_benchmark_http.py`,
+is the benchmark harness and is the only one needing a third-party package none
+of the others do (`requests`); it also needs a running deployment, so it has
+its own section below rather than a place in this list.
 
 Keys only — everything a pull request can check without the assets:
 
@@ -140,13 +145,25 @@ python $KEYS/tools/score.py raw.json --json verdicts.json
 python $KEYS/tools/citation_accuracy.py --keys $KEYS raw.json
 ```
 
+`run_benchmark_http.py` writes its `raw_<mode>_<tag>.json` under
+`<out-dir>/run-<run-id>/`, so give the commands that path rather than a bare
+filename. Citation scoring is only meaningful for per-document runs: rows
+stamped `"mode": "merged"` are refused, because a composite PDF paginates
+1..N across the whole packet and the key's pages are per document.
+
 `score.py` is deliberately conservative and defers every row it cannot decide
 mechanically to a REVIEW bucket for a human to read. **A REVIEW count is not a
 failure count**; the adjudication rubric it defers under is stated in the
 corpus README under *Reproducing the measured results*, and in the tool's own
 docstring.
 
-Every tool exits non-zero on failure. Three take a reviewed exception set, so
+Every *validator* exits non-zero on failure. The two scorers are not gates and
+do not behave that way: `score.py` reports its buckets and always exits 0,
+because a REVIEW is a request for a human and not a failure, and
+`citation_accuracy.py` prints its ladder and exits 0 whatever the numbers are —
+it exits non-zero only when it refuses to score at all, which today means a raw
+file containing `--mode merged` rows. Three of the validators take a reviewed
+exception set, so
 that a *new* exception is the thing that fails rather than the standing ones:
 `scan_person_names.py --baseline` (name-shaped strings already read and cleared
 — invented place names, mostly), `validate_keys2.py --allow QID:FILE:PAGE`
@@ -155,14 +172,19 @@ citation no longer flags), and `validate_keys.py --allow-unverifiable
 QID:FILE`, which extends a set pinned in the tool itself. Widening any of the
 three is a visible diff.
 
-The tools carry 124 unit tests in four files — `test_citation_accuracy.py`
-(the citation scorer's document attribution and outcome ladder),
-`test_score.py` (the answer scorer, against the wrong-verdict patterns a real
-run produced), `test_backend_contract.py` (the five backend symbols
-`validate_keys.py` depends on), and `test_validator_failure_paths.py` (each
-validator against a planted defect). CI runs the directory, so a new
-`test_*.py` here needs no workflow change; the tool scripts themselves are
-never imported by collection.
+The tools carry 185 unit tests in five files — `test_citation_accuracy.py`
+(the citation scorer's document attribution, outcome ladder, and its refusal to
+score composite-document rows), `test_score.py` (the answer scorer, against the
+wrong-verdict patterns a real run produced, plus the fabrication gap it does
+*not* close), `test_run_benchmark_http.py` (the harness's pure functions:
+argument defaults, question selection, the abstention vocabulary, the routing
+derivation, and the row shape the scorers read), `test_backend_contract.py`
+(the five backend symbols `validate_keys.py` depends on), and
+`test_validator_failure_paths.py` (each validator against a planted defect). CI
+runs the directory, so a new `test_*.py` here needs no workflow change. Only
+`test_*.py` files are collected *as test modules*; the tools themselves are
+imported by those tests, which is how the two scorers and the harness are
+covered without any of them being run by CI.
 
 ```bash
 cd backend && uv run --with pytest pytest ../benchmarks/corpus/CSU-NSF-001/tools/ -q
@@ -184,11 +206,14 @@ served each request — not just the answer text.
 
 It is a **manual** tool. It needs a running deployment with a registered model,
 it uploads documents and builds a knowledge base there, and a full pass costs
-real GPU minutes, so it is out of CI for the same reason the backend's tier-3
-`INTEGRATION_LLM` tests are: nothing under `.github/workflows/` invokes it, and
-the corpus job above runs only the validators and the unit tests. The corpus
-README's *Reproducing the measured results* has the full sequence, the
-credentials it reads from the environment, and what a run costs.
+real GPU minutes, so nothing under `.github/workflows/` invokes it — the corpus
+job above runs the validators and the unit tests, and the unit tests include
+`test_run_benchmark_http.py`, which covers everything in the harness that does
+not need a network. That is the same shape as the backend's tier-3
+`INTEGRATION_LLM` suite, which is off the pull-request path but not out of CI:
+`.github/workflows/integration-llm.yaml` runs it on demand and on a weekly
+cron. The corpus README's *Reproducing the measured results* has the full
+sequence, the credentials it reads from the environment, and what a run costs.
 
 The keys remain the contribution: any harness that produces rows per question
 can be scored with `tools/score.py` and `tools/citation_accuracy.py` instead.

@@ -271,7 +271,10 @@ of magnitude of the 900-second timeout.
 7. **Two knowledge-base questions carry no model signal** because retrieval
    never supplied the evidence.
 8. **Scoring was adjudicated, not purely automatic.** The automatic scorer is
-   deliberately conservative and deferred 327 of 900 rows for human review; all
+   deliberately conservative and deferred 327 of 900 rows for human review;
+   68 of the 76 verdicts the human pass overturned were mechanical defects in
+   the scorer, since repaired — see *Reproducing the measured results* below
+   for what they were and what the repair does and does not cover; all
    327 were adjudicated against the key, and so were the 573 it did not defer.
    That second pass overturned 76 automatic verdicts — 68 correct answers the
    scorer had failed and 8 wrong answers it had passed. The published numbers
@@ -298,12 +301,19 @@ do it, all under `benchmarks/corpus/CSU-NSF-001/tools/`:
 | `score.py` | triages answer correctness against the key and defers anything it cannot decide mechanically |
 | `citation_accuracy.py` | scores page citations per document, separating a wrong page from a wrong document from a correct citation to a corroborating page |
 
-They are **not** part of the release package and **not** run by CI. The package
-ships only the two release validators, because those are what a person checks a
-download with; the harness needs a running deployment, uploads documents into
-it, and spends real GPU time, which is the same reason the repository's tier-3
-`INTEGRATION_LLM` tests are not in CI either. Nothing under
-`.github/workflows/` invokes any of the three.
+None of the three is **part of the release package**: it ships only the two
+release validators, because those are what a person checks a download with, and
+all three of these need a harness run's output (or a whole deployment) before
+they do anything. Nothing under `.github/workflows/` **invokes** any of the
+three either — but the two scorers are not untested. CI runs `pytest` over this
+whole `tools/` directory on every change, and `test_score.py` and
+`test_citation_accuracy.py` import and exercise both of them; `run_benchmark_http.py`
+has `test_run_benchmark_http.py` covering its pure functions the same way.
+
+Only the *asking* path is genuinely off CI, because it needs a running
+deployment and real GPU minutes. That puts it where the repository's tier-3
+`INTEGRATION_LLM` suite already is: not on the pull-request path, run on a
+schedule and on demand rather than never.
 
 ### What you need
 
@@ -350,12 +360,22 @@ account to record the routing configuration in each run's metadata; without it
 the run still records which model actually served every request, which is the
 part that matters.
 
-Then score each `raw_*.json`:
+The run writes to `<out-dir>/run-<run-id>/`, so from the same working directory
+(the repository root, where `$KEYS` resolves) score each `raw_<mode>_<tag>.json`
+in place:
 
 ```bash
-python $KEYS/tools/score.py raw_attach_<tag>.json --json verdicts_attach_<tag>.json
-python $KEYS/tools/citation_accuracy.py --keys $KEYS raw_attach_<tag>.json
+RUN_DIR=benchmark-runs/run-$RUN                    # --out-dir default
+
+python $KEYS/tools/score.py $RUN_DIR/raw_attach_<tag>.json \
+  --json $RUN_DIR/verdicts_attach_<tag>.json
+python $KEYS/tools/citation_accuracy.py --keys $KEYS $RUN_DIR/raw_attach_<tag>.json
 ```
+
+`benchmark-runs/` is gitignored. Citation scoring is valid for `attach` and `kb`
+rows only: `--mode merged` paginates the whole composite 1..N, which does not
+map to the key's per-document pages, so `citation_accuracy.py` refuses those
+rows rather than scoring them against the wrong scale.
 
 ### The scoring is adjudicated, and that is deliberate
 
@@ -374,10 +394,26 @@ failure count.** The rubric the human pass applies:
 > inventing a specific is a hard fail regardless of the rest of the answer.
 
 Two halves of that are not mechanically checkable and are left to the human
-rather than guessed at: whether a prose claim beside a correct figure is wrong,
-and whether an answer declined and fabricated in the same breath. The published
-run contains exactly one row of the second kind, and the human pass is what
-caught it.
+rather than guessed at. The first is whether a prose claim beside a correct
+figure is wrong. The second is fabrication, and it is worth being exact about
+what the tool does and does not do, because this is the paragraph a sceptic
+will weigh its honesty by.
+
+**`score.py` contains no fabrication check.** An answer that states the absence
+and then invents a specific auto-PASSes there as a correct abstention. Four
+rows in the published run have exactly that shape — the four knowledge-base
+rows described under *Refusal behaviour on unanswerable questions*, which
+decline on the instrument question and then name instrument brands as examples
+of what the packet does not contain, one of those names apparently invented.
+All four pass automatically, and the human pass passed them too, under the
+rubric, because none asserts the proposal will buy one.
+
+The run's one hard fabrication is the opposite shape: it never states that the
+name is absent, so the refusal branch FAILs it mechanically. That is a
+coincidence of shape, not a check — a fabrication that had declined first would
+have passed. The gap is stated here rather than closed, and
+`tools/test_score.py` pins both shapes so it cannot close, or widen, without a
+test saying so.
 
 Scoring that run also exposed three mechanical defects in `score.py` itself —
 matching against raw model output so that bolded figures went unfound, a
@@ -392,8 +428,9 @@ verdicts and are unchanged by the repair.
 ### What it costs
 
 On the hardware that produced the published tables — one shared GPU host —
-a pass was about **ten minutes**, and ten passes (five models × two modes)
-took about 90 minutes end to end plus ingestion. The dominant cost is model
+an `attach` pass was **9.7–10.0 minutes** and a `kb` pass **5.5–7.8 minutes**;
+ten passes (five models × two modes) took about 90 minutes end to end plus
+ingestion. The dominant cost is model
 loading, not answering: cold starts ran 55–101 s while the slowest single
 scored answer in 900 was 8.8 s. Budget for one cold load per model switch.
 Ingesting the packet and building the knowledge base happens once and is
