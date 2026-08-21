@@ -30,9 +30,26 @@ to the human pass rather than guessed at here:
 
 * *"nothing in the answer contradicts it"* — a prose claim can be wrong beside
   a correct figure. Rows whose decisive content is prose land in REVIEW.
-* *"invents no specific"* — an answer can state the absence and fabricate in
-  the same breath. The published run contains exactly one such row and this
-  tool passes it; the human pass is what failed it.
+* *"invents no specific"* — **nothing here checks for fabrication.** An answer
+  that states the absence and then invents a specific auto-PASSes as a correct
+  abstention, and that is a known limitation rather than an oversight: deciding
+  whether a named specific is invented needs the world, not the key.
+
+  Measured on the published run, so the limitation is stated with the rows that
+  demonstrate it. Four rows have exactly that shape — all Q018, all
+  knowledge-base mode: each declines ("*the specific model … is not stated in
+  the retrieved documents*") and then, under an explicit *beyond the retrieved
+  sources* heading, names real instrument brands as examples of the kind of
+  name the documents do not carry. One of those names appears to be invented
+  outright. All four PASS here, and the human adjudication passed them too,
+  because none of them asserts the proposal will buy one.
+
+  The run's one hard fabrication is the opposite shape: a Q026 row that answers
+  the question by presenting the PI's role identifier as the postdoc's identity
+  and never states that the name is absent. The refusal branch FAILs it — but
+  only because it declined nothing, which is a coincidence of shape and not a
+  fabrication check. `test_score.py` pins both shapes, so neither the guard nor
+  the gap can move without a test saying so.
 
 What was fixed after the v0.5.0 run, and why
 --------------------------------------------

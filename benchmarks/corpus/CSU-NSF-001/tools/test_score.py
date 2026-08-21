@@ -175,6 +175,50 @@ class TestRefusalVocabularyDefect:
         assert (verdict, why) == (FAIL, "did not decline")
 
 
+class TestFabricationIsNotDetected:
+    """The stated limitation, pinned so it cannot close by accident.
+
+    `score.py` has no fabrication check, so an answer that states the absence
+    and then invents a specific auto-PASSes as a correct abstention. Four rows
+    in the published run have that shape — all Q018, all knowledge-base mode:
+    they decline, then name instrument brands under a *beyond the retrieved
+    sources* heading as examples of the kind of name the packet does not carry,
+    one of them apparently invented. The human adjudication passed all four
+    under the rubric, because none asserts the proposal will buy one.
+
+    These tests assert the *current* behaviour, not the desired one. If a later
+    change adds fabrication detection, they fail — which is the point: the
+    module docstring and the corpus README both state this gap, and neither may
+    drift away from what the tool does.
+    """
+
+    def test_decline_then_name_a_brand_auto_passes(self):
+        verdict, why = score_row(row(
+            "Q018",
+            "The specific model of imaging flow cytometer is not stated in the "
+            "retrieved documents. The Budget Justification allocates $62,000 "
+            "for one imaging flow cytometer without naming a model. _Beyond "
+            "the retrieved sources:_ instruments of this kind are commonly "
+            "sold under trade names such as SYN-INSTRUMENT-4200, but no such "
+            "name appears in the provided documents.",
+        ))
+        assert (verdict, why) == (PASS, "declined")
+
+    def test_the_invented_specific_is_not_what_decides_the_verdict(self):
+        """Same answer with the invented name removed scores identically.
+
+        The name contributes nothing to the verdict either way — which is the
+        whole content of the limitation.
+        """
+        without = score_row(row(
+            "Q018",
+            "The specific model of imaging flow cytometer is not stated in the "
+            "retrieved documents. The Budget Justification allocates $62,000 "
+            "for one imaging flow cytometer without naming a model.",
+        ))
+        assert without == (PASS, "declined")
+
+
 class TestDecisiveFiguresDefect:
     """Class 3 — every figure in the key answer was treated as required.
 
