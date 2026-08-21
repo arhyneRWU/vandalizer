@@ -32,6 +32,16 @@ a zero there says so out loud.
 `raw.json` is a list of `{"id": ..., "got": ...}` rows — whatever the harness
 got back for each question.
 
+**Not valid for a composite-document run.** Page numbers here are scored
+against the key's per-document `sources` and `corroborating_sources`, so they
+only mean anything when the model was reading the packet as separate
+documents. `run_benchmark_http.py --mode merged` concatenates the same packet
+into one continuously paginated PDF, and a citation to page 30 of that PDF is
+not page 30 of any document the key names — every number would be scored
+against the wrong scale and the result would be confidently wrong rather than
+obviously broken. Rows stamped `"mode": "merged"` are therefore refused with a
+non-zero exit rather than scored.
+
 Run: cd backend && uv run python \\
        ../benchmarks/corpus/CSU-NSF-001/tools/citation_accuracy.py \\
        --keys ../benchmarks/corpus/CSU-NSF-001 raw.json
@@ -143,15 +153,39 @@ def classify(doc: str | None, page: int,
     return "wrong_doc"
 
 
-def main():
+def refuse_merged(rows: list) -> str | None:
+    """The reason this row set must not be citation-scored, or None.
+
+    A composite run paginates the whole packet 1..N continuously, so a cited
+    page cannot be resolved to a page of any document the key lists. There is
+    no ground truth for that mapping in the shipped key — the harness that
+    produced the published results derived it from the deployment's own stored
+    page markers, which are not on any HTTP response. Rather than emit numbers
+    that look fine and are not, this refuses.
+    """
+    modes = {row.get("mode") for row in rows if isinstance(row, dict)}
+    if "merged" in modes:
+        return ("this raw file contains rows from --mode merged, whose page "
+                "numbers run 1..N across the whole composite PDF and do not "
+                "correspond to the per-document pages in ground_truth.json. "
+                "Citation scoring would be confidently wrong. Score attach or "
+                "kb rows instead.")
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keys", type=Path, required=True,
                         help="directory holding ground_truth.json")
     parser.add_argument("raw", type=Path,
                         help="harness output: a JSON list of {id, got} rows")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     rows = json.loads(args.raw.read_text())
+    refusal = refuse_merged(rows)
+    if refusal:
+        print(f"refusing to score: {refusal}")
+        return 2
     gt = {q["id"]: q
           for q in json.loads((args.keys / "ground_truth.json").read_text())["questions"]}
 
@@ -203,7 +237,8 @@ def main():
         print("\nfailures:")
         for qid, kind, doc, page, pairs in failures:
             print(f"  {qid} {kind:10} cited {doc or '??'} p.{page}  truth {pairs}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

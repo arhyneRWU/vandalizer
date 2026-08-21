@@ -19,12 +19,64 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import json  # noqa: E402
+
 from citation_accuracy import (  # noqa: E402
     FAILURE_OUTCOMES,
     classify,
     doc_for,
+    main,
     page_pairs,
+    refuse_merged,
 )
+
+KEYS_DIR = Path(__file__).parent.parent
+
+
+class TestMergedRowsAreRefused:
+    """A composite run paginates 1..N across the whole packet.
+
+    The key's pages are per document, so scoring a merged row against them
+    compares two different scales and produces a plausible-looking number that
+    means nothing. The refusal is the feature: `merged` is still offered by the
+    harness, and it used to be scoreable with no warning at all.
+    """
+
+    def test_a_merged_row_is_refused(self):
+        assert refuse_merged([{"id": "Q001", "got": "p. 30",
+                               "mode": "merged"}])
+
+    def test_one_merged_row_condemns_the_file(self):
+        """A mixed file cannot be partly scored: the totals would be a blend
+        of two page scales."""
+        assert refuse_merged([{"id": "Q001", "got": "p. 1", "mode": "attach"},
+                              {"id": "Q002", "got": "p. 30", "mode": "merged"}])
+
+    def test_attach_and_kb_rows_are_not_refused(self):
+        assert refuse_merged([{"id": "Q001", "got": "p. 1", "mode": "attach"},
+                              {"id": "Q002", "got": "p. 2", "mode": "kb"}]) is None
+
+    def test_rows_with_no_mode_are_not_refused(self):
+        """Any harness can write these rows; `mode` is the port's extra
+        column, and its absence must not block scoring."""
+        assert refuse_merged([{"id": "Q001", "got": "p. 1"}]) is None
+
+    def test_the_cli_exits_non_zero_and_scores_nothing(self, tmp_path, capsys):
+        raw = tmp_path / "raw_merged_default.json"
+        raw.write_text(json.dumps([
+            {"id": "Q001", "got": "The total is on p. 30.", "mode": "merged"}]))
+        assert main(["--keys", str(KEYS_DIR), str(raw)]) == 2
+        out = capsys.readouterr().out
+        assert "refusing to score" in out
+        assert "citations" not in out
+
+    def test_the_cli_still_scores_an_attach_file(self, tmp_path, capsys):
+        raw = tmp_path / "raw_attach_default.json"
+        raw.write_text(json.dumps([
+            {"id": "Q001", "got": "05_Budget_Justification.pdf, p. 1",
+             "mode": "attach"}]))
+        assert main(["--keys", str(KEYS_DIR), str(raw)]) == 0
+        assert "citations" in capsys.readouterr().out
 
 
 class TestDocumentAttribution:
