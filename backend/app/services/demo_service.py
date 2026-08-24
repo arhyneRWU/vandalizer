@@ -1195,6 +1195,12 @@ async def bulk_resend_credentials(settings: Settings | None = None) -> dict:
             magic_link=magic_link,
         )
         success = await send_email(app.email, subject, html, settings, email_type="bulk_credentials_resend")
+        # Same contract as the public resend: the status page shows the
+        # delivery-failed alert while this flag is set, so a bulk resend after
+        # fixing deliverability must clear it (and a failed one must set it).
+        if app.activation_email_failed != (not success):
+            app.activation_email_failed = not success
+            await app.save()
         if success:
             sent += 1
         else:

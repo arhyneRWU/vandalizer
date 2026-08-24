@@ -3046,7 +3046,7 @@ async def _evaluate_checks_against_output(
 
     try:
         from app.services.metering import metered_async
-        async with metered_async("validation"):
+        async with metered_async("validation", user_id=wf_data.get("user_id")):
             result = await agent.run(user_prompt)
     except Exception:
         return [

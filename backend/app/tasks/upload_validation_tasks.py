@@ -15,6 +15,10 @@ from app.tasks import TRANSIENT_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
+BUDGET_SKIPPED_FEEDBACK = (
+    "compliance validation was skipped because the trial token budget is exhausted."
+)
+
 
 def _get_db():
     """Get sync pymongo database handle (shared per-process client)."""
@@ -91,8 +95,16 @@ def validate_chunk(
     chunk_text: str,
     index: int,
     total: int,
+    user_id: str | None = None,
 ) -> dict:
-    """Validate a single text chunk against compliance requirements."""
+    """Validate a single text chunk against compliance requirements.
+
+    ``user_id`` attributes the LLM spend to the uploader. A trial account that
+    has exhausted its token budget gets the chunk marked *skipped* rather than
+    a retry storm: a compliance check the deployment could not afford to run is
+    reported as such, the same way a disabled check is, and the chord still
+    completes so the document does not sit in ``validating`` forever.
+    """
     logger.info("Validating chunk %d/%d of %s", index, total, document_path)
     try:
         agent = _get_secure_agent()
@@ -101,9 +113,17 @@ def validate_chunk(
             f"Compliance Requirements:\n{compliance}\n"
             f"Document Text Chunk:\n{chunk_text}"
         )
+        from app.exceptions import TrialBudgetExceededError
         from app.services.metering import metered
-        with metered("upload_validation"):
-            result = agent.run_sync(prompt)
+        try:
+            with metered("upload_validation", user_id=user_id):
+                result = agent.run_sync(prompt)
+        except TrialBudgetExceededError:
+            logger.info(
+                "Trial budget exhausted for %s — skipping compliance chunk %d/%d of %s",
+                user_id, index, total, document_path,
+            )
+            return {"valid": True, "feedback": BUDGET_SKIPPED_FEEDBACK, "index": index, "skipped": True}
         output = result.output
 
         # Parse structured output or treat as text
@@ -142,25 +162,41 @@ def summarize_results(
     results: list,
     document_uuid: str,
     background: bool = False,
+    user_id: str | None = None,
 ) -> dict:
     """Aggregate validation feedback from all chunks and update SmartDocument."""
     feedback_list = []
     all_valid = True
+    skipped = 0
     for res in results:
+        if res.get("skipped"):
+            skipped += 1
+            continue
         if not res.get("valid", True):
             all_valid = False
             feedback_list.append(f"Chunk {res.get('index')}: {res.get('feedback', '')}")
 
-    if all_valid:
+    if skipped:
+        # Say what was not checked instead of reporting a clean pass over
+        # sections nobody read.
+        feedback_list.append(
+            f"{skipped} of {len(results)} sections were not checked: {BUDGET_SKIPPED_FEEDBACK}"
+        )
+    if all_valid and not skipped:
         combined = "All document sections passed validation."
     else:
         combined = "\n\n".join(feedback_list)
 
     # Summarize via LLM
+    from app.exceptions import TrialBudgetExceededError
     try:
+        if skipped:
+            # The budget that skipped the chunks is exhausted; do not spend
+            # more summarizing the fact.
+            raise TrialBudgetExceededError(BUDGET_SKIPPED_FEEDBACK)
         agent = _get_secure_agent()
         from app.services.metering import metered
-        with metered("upload_validation"):
+        with metered("upload_validation", user_id=user_id):
             summary_result = agent.run_sync(
                 f"Analyze this validation feedback and return a structured response.\n"
                 f'Validation results: {"PASSED" if all_valid else "FAILED"}\n\n'
@@ -176,6 +212,8 @@ def summarize_results(
         else:
             summary = {"valid": all_valid, "feedback": str(output)}
 
+    except TrialBudgetExceededError:
+        summary = {"valid": all_valid, "feedback": combined[:2000]}
     except Exception as e:
         logger.error("Error summarizing results: %s", e)
         summary = {"valid": all_valid, "feedback": combined[:2000]}
@@ -223,6 +261,7 @@ def perform_document_validation(
     chunk_size: int = 8000,
     chunk_overlap: int = 200,
     background: bool = False,
+    user_id: str | None = None,
 ) -> str:
     """Entry point: split document text, launch chunk validations via chord."""
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -312,10 +351,10 @@ def perform_document_validation(
 
     # Build chord: validate all chunks, then summarize
     header = [
-        validate_chunk.s(document_path, compliance, chunk_text, idx + 1, total)
+        validate_chunk.s(document_path, compliance, chunk_text, idx + 1, total, user_id=user_id)
         for idx, chunk_text in enumerate(chunks)
     ]
-    callback = summarize_results.s(document_uuid, background)
+    callback = summarize_results.s(document_uuid, background, user_id=user_id)
     chord(header)(callback)
 
     elapsed = time.perf_counter() - start

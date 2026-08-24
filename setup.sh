@@ -1558,6 +1558,7 @@ upgrade() {
     git remote set-url origin "$clean_url"
     remote_url="$clean_url"
     echo -e "  ${SYM_CHECK}  Removed embedded credential from the git remote ${DIM}(tokens are no longer stored on disk)${RESET}"
+    echo -e "     ${DIM}If scheduled auto-update relied on that token (private fork), switch the remote to SSH or configure a system git credential helper.${RESET}"
   fi
 
   if [[ "$remote_url" == https://* ]]; then
