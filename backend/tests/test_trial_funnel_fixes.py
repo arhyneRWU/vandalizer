@@ -154,3 +154,35 @@ async def test_resend_success_clears_flag():
     assert result["status"] == "sent"
     assert app.activation_email_failed is False
     app.save.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# activation_email_failed lifecycle on the admin bulk resend
+# ---------------------------------------------------------------------------
+
+
+async def _bulk_resend(app, *, send_ok: bool) -> dict:
+    user = SimpleNamespace(user_id=app.user_id, last_login_at=None, demo_expires_at=None)
+    user.save = AsyncMock()
+    with (
+        patch.object(demo_service, "DemoApplication", fake_model([app])),
+        patch.object(demo_service, "User", fake_model(find_one_result=user)),
+        patch.object(demo_service, "_create_magic_login_token",
+                     AsyncMock(return_value="https://x/magic?b")),
+        patch.object(demo_service, "send_email", AsyncMock(return_value=send_ok)),
+    ):
+        return await demo_service.bulk_resend_credentials(_settings())
+
+
+async def test_bulk_resend_success_clears_flag():
+    app = _app(activation_email_failed=True)
+    result = await _bulk_resend(app, send_ok=True)
+    assert result["sent"] == 1
+    assert app.activation_email_failed is False
+
+
+async def test_bulk_resend_failure_sets_flag():
+    app = _app(activation_email_failed=False)
+    result = await _bulk_resend(app, send_ok=False)
+    assert result["failed"] == 1
+    assert app.activation_email_failed is True
