@@ -239,10 +239,11 @@ async def forgot_password(
 
     # A locked trial can't be recovered with a password — login rejects locked
     # accounts regardless of the password. Sending a reset link is a dead end, so
-    # steer them to the renewal screen instead.
+    # steer them to the top-up screen instead. (Only clock-era accounts are ever
+    # "locked"; token-metered trials go "exhausted", which stays signed-in.)
     if user.is_demo_user and user.demo_status == "locked":
         from app.models.demo import DemoApplication
-        from app.services.email_service import send_email, trial_expired_email
+        from app.services.email_service import send_email, trial_exhausted_email
 
         demo_app = await DemoApplication.find_one(
             DemoApplication.user_id == user.user_id
@@ -255,12 +256,12 @@ async def forgot_password(
                 f"{settings.frontend_url}/demo/trial-end"
                 f"?token={demo_app.post_questionnaire_token}"
             )
-            subject, html = trial_expired_email(
+            subject, html = trial_exhausted_email(
                 user.name or user.user_id, trial_end_url
             )
             await send_email(
                 user.email or email, subject, html, settings,
-                email_type="trial_expired",
+                email_type="trial_exhausted",
             )
         logger.info("Password reset: routed locked trial %s to renewal", user.user_id)
         return {"ok": True}

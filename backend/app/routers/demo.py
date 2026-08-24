@@ -17,6 +17,7 @@ from app.schemas.demo import (
     TrialEndInfoResponse,
     TrialExtensionRequest,
     TrialExtensionResponse,
+    TrialUsageResponse,
 )
 from app.services import demo_service
 
@@ -138,18 +139,31 @@ async def extend_trial(
     body: TrialExtensionRequest,
     settings: Settings = Depends(get_settings),
 ):
-    """Self-serve trial renewal from the end-of-trial screen (+14 days)."""
-    result = await demo_service.self_extend_trial(token, body.notes, settings)
+    """Self-serve token top-up from the trial-end screen."""
+    result = await demo_service.self_topup_trial(token, body.notes, settings)
     if not result.get("ok"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Invalid trial token"
         )
     return TrialExtensionResponse(
         ok=True,
-        message="Your trial has been extended. Welcome back!",
-        expires_at=result.get("expires_at"),
+        message="Your tokens have been topped up. Welcome back!",
+        tokens_granted=result.get("tokens_granted"),
+        tokens_budget=result.get("tokens_budget"),
         login_url=result.get("login_url"),
     )
+
+
+@router.get("/trial-usage", response_model=TrialUsageResponse)
+async def trial_usage(user: User = Depends(get_current_user)):
+    """The signed-in user's trial token balance.
+
+    ``enabled`` is False for anyone who isn't a metered trial user — the caller
+    should render nothing at all in that case, not a zeroed meter.
+    """
+    from app.services import trial_budget
+
+    return TrialUsageResponse(**await trial_budget.get_trial_usage(user))
 
 
 # ---------------------------------------------------------------------------

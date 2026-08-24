@@ -51,6 +51,24 @@ class TrialEndInfoResponse(BaseModel):
     max_extensions: int
     can_self_extend: bool
     already_extended: bool
+    # Token balance when the screen was opened, and what a top-up adds.
+    tokens_used: int = 0
+    tokens_budget: int = 0
+    topup_tokens: int = 0
+
+
+class TrialUsageResponse(BaseModel):
+    """Trial token balance for the signed-in user.
+
+    ``enabled`` is False for non-trial users and cap-disabled deployments; the
+    other fields are zero then and must not be rendered.
+    """
+
+    enabled: bool
+    budget: int
+    used: int
+    remaining: int
+    percent: int
 
 
 class TrialExtensionRequest(BaseModel):
@@ -60,8 +78,10 @@ class TrialExtensionRequest(BaseModel):
 class TrialExtensionResponse(BaseModel):
     ok: bool
     message: str
-    expires_at: Optional[str] = None
-    # One-time magic sign-in URL for the renewal screen's "Enter" button —
+    # Tokens added by this top-up, and the account's new lifetime ceiling.
+    tokens_granted: Optional[int] = None
+    tokens_budget: Optional[int] = None
+    # One-time magic sign-in URL for the top-up screen's "Enter" button —
     # trial accounts have no known password, so this is their way back in.
     login_url: Optional[str] = None
 

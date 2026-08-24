@@ -1,11 +1,10 @@
-"""Unit tests for the self-serve trial lifecycle fix (demo_service).
+"""Unit tests for the token-metered trial lifecycle (demo_service).
 
-Self-registration used to set only the User demo flags; with no
-DemoApplication, check_expirations could never lock the account — a "14-day
-trial" that never ended. These tests cover the two halves of the fix:
-begin_self_serve_trial (register now mints an active application) and
-_backfill_orphan_trial_applications (existing flag-only users get one at
-sweep time).
+The trial is a budget, not a clock: registration grants tokens, the hourly
+sweep warns at ~80% and marks the account exhausted at 100%, and exhaustion is
+soft (the workspace stays browsable; only LLM spend is gated). These tests
+cover begin_self_serve_trial, sweep_trial_budgets, the clock-era migration,
+and the grant arithmetic behind top-ups.
 """
 
 import datetime
@@ -33,8 +32,14 @@ def _constructible_fake_model(docs=None, *, find_one_result=None):
     return cls
 
 
-def _settings() -> SimpleNamespace:
-    return SimpleNamespace(frontend_url="https://example.test")
+def _settings(budget: int = 2_000_000, topup: int = 2_000_000) -> SimpleNamespace:
+    return SimpleNamespace(
+        frontend_url="https://example.test",
+        redis_host="localhost",
+        trial_token_budget=budget,
+        trial_topup_tokens=topup,
+        enable_trial_system=True,
+    )
 
 
 def _user(**overrides) -> SimpleNamespace:
@@ -45,6 +50,7 @@ def _user(**overrides) -> SimpleNamespace:
         is_demo_user=False,
         demo_status=None,
         demo_expires_at=None,
+        trial_token_budget=None,
     )
     for key, value in overrides.items():
         setattr(user, key, value)
@@ -52,12 +58,35 @@ def _user(**overrides) -> SimpleNamespace:
     return user
 
 
+def _app(**overrides) -> SimpleNamespace:
+    app = SimpleNamespace(
+        uuid="app-1",
+        name="Ada",
+        email="ada@example.edu",
+        status="active",
+        user_id="u-1",
+        activated_at=None,
+        expires_at=None,
+        expired_at=None,
+        post_questionnaire_token=None,
+        budget_warning_sent=False,
+        activation_email_failed=False,
+        trial_extensions_used=0,
+        recapture_step=0,
+        recapture_next_at=None,
+    )
+    for key, value in overrides.items():
+        setattr(app, key, value)
+    app.save = AsyncMock()
+    return app
+
+
 # ---------------------------------------------------------------------------
-# begin_self_serve_trial
+# begin_self_serve_trial — budget, not clock
 # ---------------------------------------------------------------------------
 
 
-async def test_begin_trial_marks_user_and_mints_active_application():
+async def test_begin_trial_grants_budget_and_no_expiry():
     user = _user()
     apps = _constructible_fake_model(find_one_result=None)
 
@@ -66,15 +95,9 @@ async def test_begin_trial_marks_user_and_mints_active_application():
 
     assert user.is_demo_user is True
     assert user.demo_status == "active"
+    assert user.trial_token_budget == 2_000_000
+    assert user.demo_expires_at is None  # the clock is gone
     user.save.assert_awaited_once()
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    remaining = user.demo_expires_at - now
-    assert (
-        datetime.timedelta(days=demo_service.TRIAL_DAYS - 1)
-        < remaining
-        <= datetime.timedelta(days=demo_service.TRIAL_DAYS)
-    )
 
     assert len(apps.created) == 1
     app = apps.created[0]
@@ -82,17 +105,14 @@ async def test_begin_trial_marks_user_and_mints_active_application():
     assert app.user_id == "u-1"
     assert app.email == "ada@example.edu"
     assert app.organization == "example.edu"
-    assert app.expires_at == user.demo_expires_at
+    assert getattr(app, "expires_at", None) is None
     app.insert.assert_awaited_once()
 
 
-async def test_begin_trial_adopts_pending_waitlist_application():
-    """A pending waitlist applicant who registers directly keeps one record."""
+async def test_begin_trial_adopts_pending_application():
+    """A pending applicant who registers directly keeps one record."""
     user = _user()
-    pending = SimpleNamespace(
-        status="pending", user_id=None, activated_at=None, expires_at=None
-    )
-    pending.save = AsyncMock()
+    pending = _app(status="pending", user_id=None)
     apps = _constructible_fake_model(find_one_result=pending)
 
     with patch.object(demo_service, "DemoApplication", apps):
@@ -101,8 +121,204 @@ async def test_begin_trial_adopts_pending_waitlist_application():
     assert apps.created == []  # adopted, not duplicated
     assert pending.status == "active"
     assert pending.user_id == "u-1"
-    assert pending.expires_at == user.demo_expires_at
+    assert pending.expires_at is None
     pending.save.assert_awaited_once()
+
+
+async def test_begin_trial_does_not_revive_an_exhausted_application():
+    """Reviving a finished run would hand a second budget to the same person."""
+    user = _user()
+    finished = _app(status="exhausted")
+    apps = _constructible_fake_model(find_one_result=finished)
+
+    with patch.object(demo_service, "DemoApplication", apps):
+        await demo_service.begin_self_serve_trial(user, _settings())
+
+    assert finished.status == "exhausted"
+    finished.save.assert_not_awaited()
+    assert len(apps.created) == 1
+    assert apps.created[0].status == "active"
+
+
+# ---------------------------------------------------------------------------
+# grant_tokens — the arithmetic behind top-ups and admin restarts
+# ---------------------------------------------------------------------------
+
+
+async def test_grant_tokens_adds_to_the_existing_ceiling():
+    user = _user(is_demo_user=True, trial_token_budget=2_000_000)
+    with patch.object(
+        demo_service.trial_budget, "tokens_used_async", AsyncMock(return_value=500_000)
+    ):
+        new_budget = await demo_service.grant_tokens(user, 2_000_000)
+
+    assert new_budget == 4_000_000
+    assert user.trial_token_budget == 4_000_000
+    assert user.demo_status == "active"
+    assert user.demo_expires_at is None
+
+
+async def test_grant_tokens_is_worth_full_amount_after_an_overshoot():
+    """A last operation that ran past the ceiling must not eat the top-up."""
+    user = _user(is_demo_user=True, trial_token_budget=2_000_000)
+    with patch.object(
+        demo_service.trial_budget,
+        "tokens_used_async",
+        AsyncMock(return_value=2_100_000),
+    ):
+        new_budget = await demo_service.grant_tokens(user, 2_000_000)
+
+    assert new_budget == 4_100_000  # anchored on used, not the stale budget
+
+
+# ---------------------------------------------------------------------------
+# sweep_trial_budgets — warning, then soft exhaustion
+# ---------------------------------------------------------------------------
+
+
+def _usage(used: int, budget: int) -> dict:
+    return {
+        "enabled": True,
+        "budget": budget,
+        "used": used,
+        "remaining": max(0, budget - used),
+        "percent": min(100, round(used * 100 / budget)),
+    }
+
+
+async def _run_sweep(app, user, usage):
+    with (
+        patch.object(
+            demo_service, "_adopt_clock_era_trial_users", AsyncMock(return_value=0)
+        ),
+        patch.object(demo_service, "DemoApplication", fake_model([app])),
+        patch.object(demo_service, "User", fake_model(find_one_result=user)),
+        patch.object(
+            demo_service.trial_budget, "get_trial_usage", AsyncMock(return_value=usage)
+        ),
+        patch.object(demo_service, "send_email", AsyncMock(return_value=True)) as send,
+    ):
+        result = await demo_service.sweep_trial_budgets(_settings())
+    return result, send
+
+
+async def test_sweep_warns_once_at_eighty_percent():
+    app = _app()
+    user = _user(is_demo_user=True, demo_status="active")
+
+    result, send = await _run_sweep(app, user, _usage(1_600_000, 2_000_000))
+
+    assert result == {"warned": 1, "exhausted": 0}
+    assert app.budget_warning_sent is True
+    assert app.status == "active"  # still usable
+    send.assert_awaited_once()
+
+
+async def test_sweep_does_not_rewarn():
+    app = _app(budget_warning_sent=True)
+    user = _user(is_demo_user=True, demo_status="active")
+
+    result, send = await _run_sweep(app, user, _usage(1_900_000, 2_000_000))
+
+    assert result == {"warned": 0, "exhausted": 0}
+    send.assert_not_awaited()
+
+
+async def test_sweep_stays_quiet_below_threshold():
+    app = _app()
+    user = _user(is_demo_user=True, demo_status="active")
+
+    result, send = await _run_sweep(app, user, _usage(500_000, 2_000_000))
+
+    assert result == {"warned": 0, "exhausted": 0}
+    assert app.budget_warning_sent is False
+    send.assert_not_awaited()
+
+
+async def test_sweep_exhaustion_is_soft_and_mints_a_topup_token():
+    app = _app()
+    user = _user(is_demo_user=True, demo_status="active")
+
+    result, send = await _run_sweep(app, user, _usage(2_000_000, 2_000_000))
+
+    assert result == {"warned": 0, "exhausted": 1}
+    assert app.status == "exhausted"
+    # Soft: never "locked" — the workspace stays readable, only spend is gated.
+    assert user.demo_status == "exhausted"
+    assert app.post_questionnaire_token  # the top-up screen needs it
+    send.assert_awaited_once()
+
+
+async def test_sweep_skips_users_whose_cap_is_disabled():
+    app = _app()
+    user = _user(is_demo_user=True, demo_status="active")
+    disabled = {"enabled": False, "budget": 0, "used": 0, "remaining": 0, "percent": 0}
+
+    result, send = await _run_sweep(app, user, disabled)
+
+    assert result == {"warned": 0, "exhausted": 0}
+    send.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Clock-era migration
+# ---------------------------------------------------------------------------
+
+
+async def test_migration_clears_expiry_and_sets_budget():
+    past = datetime.datetime(2026, 8, 1)  # naive, as Mongo returns it
+    legacy = _user(is_demo_user=True, demo_status="active", demo_expires_at=past)
+    users = fake_model([legacy])
+    apps = _constructible_fake_model(docs=[SimpleNamespace(user_id="u-1")])
+
+    with (
+        patch.object(demo_service, "User", users),
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service.trial_budget, "_budget", lambda: 2_000_000),
+    ):
+        migrated = await demo_service._adopt_clock_era_trial_users(
+            datetime.datetime.now(datetime.timezone.utc)
+        )
+
+    assert migrated == 1
+    assert legacy.demo_expires_at is None  # a lapsed clock can never lock them
+    assert legacy.trial_token_budget == 2_000_000
+    assert apps.created == []  # already linked
+
+
+async def test_migration_mints_application_for_orphan_user():
+    orphan = _user(
+        is_demo_user=True, demo_status="active", trial_token_budget=2_000_000
+    )
+    users = fake_model([orphan])
+    apps = _constructible_fake_model(docs=[], find_one_result=None)
+
+    with (
+        patch.object(demo_service, "User", users),
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service.trial_budget, "_budget", lambda: 2_000_000),
+    ):
+        migrated = await demo_service._adopt_clock_era_trial_users(
+            datetime.datetime.now(datetime.timezone.utc)
+        )
+
+    assert migrated == 1
+    assert len(apps.created) == 1
+    assert apps.created[0].status == "active"
+    assert apps.created[0].user_id == "u-1"
+
+
+async def test_sweep_runs_migration_first():
+    """Migrated users must be visible to the same sweep that adopted them."""
+    migrate = AsyncMock(return_value=0)
+    with (
+        patch.object(demo_service, "_adopt_clock_era_trial_users", migrate),
+        patch.object(demo_service, "DemoApplication", fake_model([])),
+    ):
+        result = await demo_service.sweep_trial_budgets(_settings())
+
+    assert result == {"warned": 0, "exhausted": 0}
+    migrate.assert_awaited_once()
 
 
 def test_email_domain_buckets():
@@ -112,60 +328,41 @@ def test_email_domain_buckets():
 
 
 # ---------------------------------------------------------------------------
-# _backfill_orphan_trial_applications
+# Feedback-prompt scheduling survives the loss of the clock
 # ---------------------------------------------------------------------------
 
 
-async def test_backfill_mints_application_preserving_original_expiry():
-    """An orphan flag-only trial user gets an application carrying their real
-    expiry — an already-overdue one lands due for the same sweep."""
-    past = datetime.datetime(2026, 8, 1)  # naive, as Mongo returns it
-    orphan = _user(is_demo_user=True, demo_status="active", demo_expires_at=past)
+async def test_trial_start_comes_from_activation_when_there_is_no_clock():
+    """In-app check-in prompts are scheduled in trial days; with no expiry to
+    work backwards from, the application's activation date is the anchor."""
+    from app.services import feedback_prompt_service
 
-    users = fake_model([orphan])
-    apps = _constructible_fake_model(docs=[], find_one_result=None)
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    with (
-        patch.object(demo_service, "User", users),
-        patch.object(demo_service, "DemoApplication", apps),
+    activated = datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)
+    user = _user(is_demo_user=True, demo_expires_at=None)
+    with patch(
+        "app.models.demo.DemoApplication",
+        fake_model(find_one_result=SimpleNamespace(activated_at=activated)),
     ):
-        created = await demo_service._backfill_orphan_trial_applications(now)
+        started = await feedback_prompt_service._trial_started_at(user)
 
-    assert created == 1
-    app = apps.created[0]
-    assert app.status == "active"
-    assert app.user_id == "u-1"
-    assert app.expires_at == past.replace(tzinfo=datetime.timezone.utc)
-    assert app.expires_at <= now  # the sweep that minted it can expire it
-    app.insert.assert_awaited_once()
+    assert started == activated
 
 
-async def test_backfill_skips_users_with_linked_application():
-    orphan = _user(is_demo_user=True, demo_status="active")
-    users = fake_model([orphan])
-    apps = _constructible_fake_model(docs=[SimpleNamespace(user_id="u-1")])
+async def test_trial_start_falls_back_to_the_legacy_clock():
+    """Clock-era accounts with no application still schedule correctly."""
+    from app.services import feedback_prompt_service
 
-    with (
-        patch.object(demo_service, "User", users),
-        patch.object(demo_service, "DemoApplication", apps),
-    ):
-        created = await demo_service._backfill_orphan_trial_applications(
-            datetime.datetime.now(datetime.timezone.utc)
-        )
+    expires = datetime.datetime(2026, 8, 15, tzinfo=datetime.timezone.utc)
+    user = _user(is_demo_user=True, demo_expires_at=expires)
+    with patch("app.models.demo.DemoApplication", fake_model(find_one_result=None)):
+        started = await feedback_prompt_service._trial_started_at(user)
 
-    assert created == 0
-    assert apps.created == []
+    assert started == expires - datetime.timedelta(
+        days=feedback_prompt_service.TRIAL_DAYS
+    )
 
 
-async def test_check_expirations_runs_backfill_first():
-    """The sweep must see orphans minted in the same pass."""
-    backfill = AsyncMock(return_value=0)
-    with (
-        patch.object(demo_service, "_backfill_orphan_trial_applications", backfill),
-        patch.object(demo_service, "DemoApplication", fake_model([])),
-    ):
-        expired = await demo_service.check_expirations(_settings())
+async def test_trial_start_none_for_regular_users():
+    from app.services import feedback_prompt_service
 
-    assert expired == 0
-    backfill.assert_awaited_once()
+    assert await feedback_prompt_service._trial_started_at(_user()) is None
