@@ -61,7 +61,7 @@ def _generate_demo_password() -> str:
 
 
 async def _create_magic_login_token(user_id: str, settings: Settings) -> str:
-    """Create a one-time magic login URL (48h TTL) for the given user."""
+    """Create a one-time magic login URL (TTL = MAGIC_LINK_TTL_SECONDS)."""
     token = secrets.token_urlsafe(32)
     r = aioredis.from_url(f"redis://{settings.redis_host}:6379")
     try:
@@ -120,6 +120,59 @@ async def submit_application(
     return app
 
 
+def _email_domain(email: str) -> str:
+    """Bucket self-serve signups by email domain for per-org caps and stats."""
+    domain = (email or "").rsplit("@", 1)[-1].strip().lower()
+    return domain or "self-registered"
+
+
+async def begin_self_serve_trial(
+    user: User, settings: Settings | None = None
+) -> DemoApplication:
+    """Start the trial for a user who registered directly (no waitlist).
+
+    Marks the User as a demo account and mints — or adopts, for a pending
+    waitlist applicant who registered instead of waiting — an *active*
+    DemoApplication. The application record is what the whole trial lifecycle
+    keys on (check_expirations, send_expiry_warnings, the trial-end/renewal
+    screen, engagement scoring, the admin dashboard); without it a
+    self-registered "trial" never expires.
+    """
+    if settings is None:
+        settings = Settings()
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires = now + datetime.timedelta(days=TRIAL_DAYS)
+
+    user.is_demo_user = True
+    user.demo_status = "active"
+    user.demo_expires_at = expires
+    await user.save()
+
+    email = (user.email or user.user_id or "").strip().lower()
+    app = await DemoApplication.find_one(DemoApplication.email == email)
+    if app is None:
+        app = DemoApplication(
+            uuid=secrets.token_urlsafe(16),
+            name=user.name or email,
+            email=email,
+            organization=_email_domain(email),
+            status="active",
+            user_id=user.user_id,
+            activated_at=now,
+            expires_at=expires,
+            created_at=now,
+        )
+        await app.insert()
+    else:
+        app.status = "active"
+        app.user_id = user.user_id
+        app.activated_at = now
+        app.expires_at = expires
+        await app.save()
+    return app
+
+
 async def get_waitlist_status(uuid: str) -> Optional[DemoApplication]:
     """Return current application status."""
     app = await DemoApplication.find_one(DemoApplication.uuid == uuid)
@@ -135,6 +188,30 @@ async def get_waitlist_status(uuid: str) -> Optional[DemoApplication]:
         app.waitlist_position = ahead + 1
 
     return app
+
+
+async def estimate_wait_text(app: DemoApplication) -> Optional[str]:
+    """Honest wait estimate for a pending application.
+
+    Activation is automatic — a beat job admits pending applications FIFO
+    every few minutes while slots are free — so the only real wait is a full
+    house. (The old "position × 1 day" formula described a review queue that
+    doesn't exist.)
+    """
+    if app.status != "pending" or not app.waitlist_position:
+        return None
+    active_count = await DemoApplication.find(
+        DemoApplication.status == "active"
+    ).count()
+    if app.waitlist_position <= MAX_ACTIVE_DEMOS - active_count:
+        return (
+            "Activation is automatic — expect your sign-in email within "
+            "about 15 minutes."
+        )
+    return (
+        "All trial slots are full right now. You'll be activated automatically "
+        "as soon as one opens, and we'll email you the moment it happens."
+    )
 
 
 async def process_waitlist(settings: Settings | None = None) -> int:
@@ -206,7 +283,9 @@ async def _activate_application(app: DemoApplication, settings: Settings) -> Non
             if d not in ("Other", "I'm not in research administration"):
                 department = d
                 break
-    team = await _find_or_create_org_team(app.organization, user.user_id, department)
+    team = await _find_or_create_org_team(
+        app.organization, user.user_id, department, applicant_email=app.email
+    )
 
     # Add membership
     existing_membership = await TeamMembership.find_one(
@@ -257,22 +336,69 @@ async def _activate_application(app: DemoApplication, settings: Settings) -> Non
             "but they have no way in — needs a resend)",
             app.email,
         )
+    # Persisted so the public status page can tell the applicant the email
+    # didn't go out and offer the resend button, instead of showing "active"
+    # with no way in. Cleared by a successful resend.
+    app.activation_email_failed = not sent
+    await app.save()
+
+
+def _login_domain(identity: str) -> str:
+    """The email domain of a login identity, lowercased ('' when not an email)."""
+    identity = (identity or "").strip().lower()
+    return identity.rsplit("@", 1)[-1] if "@" in identity else ""
+
+
+async def _can_join_demo_team(team: Team, applicant_email: str) -> bool:
+    """Whether a demo applicant may be added to an existing team.
+
+    Two gates, both required. The team must be demo-created — the org name on
+    an application is self-asserted free text, and matching it against *any*
+    team let an applicant type a real team's name and read its shared
+    documents. And the applicant's email domain must match the team owner's:
+    the domain is the one piece of the org claim the applicant actually
+    demonstrated control of (they hold the magic-link inbox), so it, not the
+    typed string, is what earns cohort membership.
+    """
+    if not team.is_demo_team:
+        return False
+    applicant_domain = _login_domain(applicant_email)
+    if not applicant_domain:
+        return False
+    owner = await User.find_one(User.user_id == team.owner_user_id)
+    owner_identity = (owner.email if owner and owner.email else team.owner_user_id)
+    return _login_domain(owner_identity) == applicant_domain
 
 
 async def _find_or_create_org_team(
-    org_name: str, owner_user_id: str, department: str | None = None
+    org_name: str,
+    owner_user_id: str,
+    department: str | None = None,
+    applicant_email: str | None = None,
 ) -> Team:
-    """Find existing team for org+department or create a new one."""
+    """Find a joinable demo cohort team for org+department, or create one.
+
+    Only demo-created teams whose owner shares the applicant's email domain are
+    ever joined (see _can_join_demo_team); anything else gets a fresh team,
+    with a suffixed name if the plain one is already taken by a team the
+    applicant may not join.
+    """
     team_name = f"{org_name} - {department}" if department else org_name
     team = await Team.find_one(Team.name == team_name)
-    if team:
+    if team and await _can_join_demo_team(team, applicant_email or owner_user_id):
         return team
+    if team:
+        # The name belongs to a team this applicant may not join — a real
+        # (non-demo) team, or another domain's cohort. Keep names distinct so
+        # members can tell the two workspaces apart.
+        team_name = f"{team_name} ({secrets.token_hex(3)})"
 
     now = datetime.datetime.now(datetime.timezone.utc)
     team = Team(
         uuid=secrets.token_urlsafe(12),
         name=team_name,
         owner_user_id=owner_user_id,
+        is_demo_team=True,
         created_at=now,
     )
     await team.insert()
@@ -288,12 +414,72 @@ async def _find_or_create_org_team(
     return team
 
 
+async def _backfill_orphan_trial_applications(now: datetime.datetime) -> int:
+    """Mint applications for trial users that predate begin_self_serve_trial.
+
+    Registration used to set only the User demo flags, so those accounts have
+    no DemoApplication and the expiry sweep could never see them. Give each an
+    active application carrying the user's original expiry (already-overdue
+    ones then expire in the same sweep that minted them).
+    """
+    users = await User.find(
+        User.is_demo_user == True,  # noqa: E712 — Beanie query expression
+        User.demo_status == "active",
+    ).to_list()
+    if not users:
+        return 0
+
+    linked_user_ids = {
+        app.user_id
+        for app in await DemoApplication.find(
+            DemoApplication.user_id != None  # noqa: E711 — Beanie query expression
+        ).to_list()
+    }
+
+    created = 0
+    for user in users:
+        if user.user_id in linked_user_ids:
+            continue
+        expires = user.demo_expires_at or now
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=datetime.timezone.utc)
+        activated = expires - datetime.timedelta(days=TRIAL_DAYS)
+
+        email = (user.email or user.user_id or "").strip().lower()
+        app = await DemoApplication.find_one(DemoApplication.email == email)
+        if app is None:
+            app = DemoApplication(
+                uuid=secrets.token_urlsafe(16),
+                name=user.name or email,
+                email=email,
+                organization=_email_domain(email),
+                status="active",
+                user_id=user.user_id,
+                activated_at=activated,
+                expires_at=expires,
+                created_at=activated,
+            )
+            await app.insert()
+        else:
+            app.status = "active"
+            app.user_id = user.user_id
+            app.activated_at = app.activated_at or activated
+            app.expires_at = expires
+            await app.save()
+        created += 1
+
+    if created:
+        logger.info("Backfilled %d orphan trial applications", created)
+    return created
+
+
 async def check_expirations(settings: Settings | None = None) -> int:
     """Lock expired demo accounts and send feedback emails. Returns count expired."""
     if settings is None:
         settings = Settings()
 
     now = datetime.datetime.now(datetime.timezone.utc)
+    await _backfill_orphan_trial_applications(now)
     expired_apps = await DemoApplication.find(
         DemoApplication.status == "active",
         DemoApplication.expires_at <= now,
@@ -435,14 +621,19 @@ async def resend_credentials(uuid: str, settings: Settings | None = None) -> dic
     )
     if not sent:
         logger.error("Resend sign-in link FAILED to send for demo user %s", app.email)
+        app.activation_email_failed = True
+        await app.save()
         return {"status": "send_failed", "email": app.email}
 
     logger.info("Resent sign-in link for demo user %s", app.email)
+    if app.activation_email_failed:
+        app.activation_email_failed = False
+        await app.save()
     return {"status": "sent", "email": app.email}
 
 
 async def generate_magic_link(uuid: str, settings: Settings) -> str | None:
-    """Generate a one-time magic login link for a demo user (48h TTL)."""
+    """Generate a one-time magic login link (TTL = MAGIC_LINK_TTL_SECONDS)."""
     app = await DemoApplication.find_one(DemoApplication.uuid == uuid)
     if not app or app.status != "active" or not app.user_id:
         return None
@@ -634,9 +825,22 @@ async def self_extend_trial(
             user.demo_expires_at = new_expires
             await user.save()
 
+    # Trial accounts have a random password the user never saw — a magic link
+    # is their way back in, so the confirmation email and the renewal screen's
+    # "Enter" button both carry one instead of pointing at /login. Two separate
+    # tokens: magic-login is one-time, and either path must survive the other
+    # being used first.
+    email_link = None
+    screen_link = None
+    if app.user_id:
+        email_link = await _create_magic_login_token(app.user_id, settings)
+        screen_link = await _create_magic_login_token(app.user_id, settings)
+
     # Confirmation email
     expires_str = new_expires.strftime("%B %d, %Y")
-    subject, html = trial_extended_email(app.name, expires_str, settings.frontend_url)
+    subject, html = trial_extended_email(
+        app.name, expires_str, settings.frontend_url, magic_link=email_link
+    )
     await send_email(app.email, subject, html, settings, email_type="trial_extended")
 
     logger.info(
@@ -644,7 +848,11 @@ async def self_extend_trial(
         app.email,
         app.trial_extensions_used,
     )
-    return {"ok": True, "expires_at": new_expires.isoformat()}
+    return {
+        "ok": True,
+        "expires_at": new_expires.isoformat(),
+        "login_url": screen_link,
+    }
 
 
 async def admin_add_demo_user(
@@ -942,8 +1150,8 @@ async def send_test_email(to: str, settings: Settings | None = None) -> bool:
 
 
 async def bulk_resend_credentials(settings: Settings | None = None) -> dict:
-    """Reset passwords and resend activation emails for all active demo users
-    who have never logged in. Returns counts of successes and failures."""
+    """Resend fresh magic sign-in links to all active demo users who have
+    never logged in (no password rotation). Returns success/failure counts."""
     if settings is None:
         settings = Settings()
 
