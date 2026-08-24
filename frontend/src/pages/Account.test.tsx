@@ -29,6 +29,9 @@ vi.mock('../api/auth', () => ({
   generateApiToken: vi.fn(),
   revokeApiToken: vi.fn(),
   getApiTokenStatus: () => mockGetApiTokenStatus(),
+  getEmailPreferences: () => Promise.resolve({ onboarding: true, nudges: true }),
+  updateEmailPreferences: (prefs: Record<string, boolean>) =>
+    Promise.resolve({ onboarding: true, nudges: true, ...prefs }),
 }))
 
 beforeEach(() => {
