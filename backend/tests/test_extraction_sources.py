@@ -13,6 +13,7 @@ from app.services.extraction_sources import (
     normalize_with_map,
     page_for_offset,
     resolve_entity_sources,
+    same_value,
 )
 from app.tasks.extraction_tasks import normalize_results
 
@@ -138,10 +139,18 @@ class TestPageResolution:
             "document_uuid": "U1",
             "document_title": "T&C",
             "verified": True,
+            # "Yes" is a judgment about the passage, not a span of it, so the
+            # literal check reads it as unsupported. Declaring the field's
+            # enum_values (see TestValueSupport) is what marks such fields
+            # unassessable instead — the reason value_supported is recorded
+            # and measured before it is allowed to drive any badge.
+            "value_supported": False,
+            "value_support_method": "no_match",
         }
         missing = entities[0][SOURCE_KEY]["Award Number"]
         assert missing["verified"] is False
         assert missing["page"] is None
+        assert missing["value_supported"] is None
 
     def test_resolve_combined_doc_spans(self):
         doc = "first document text" + "\n\n---\n\n" + "second document text"
@@ -295,3 +304,177 @@ class TestExtractWithCaptureSources:
         assert results == [{"A": "1"}]
         system_prompt = mock_agent_cls.call_args.kwargs.get("system_prompt", "")
         assert "'sources'" not in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Value support: does the quote actually contain the value it is attached to?
+# ---------------------------------------------------------------------------
+
+class TestValueSupport:
+    def test_real_quote_does_not_vouch_for_a_hallucinated_value(self):
+        """The defect this check exists for.
+
+        A model invents an award amount and returns a genuine sentence from
+        the budget section as its supporting passage. The quote verifies —
+        it is real document text — and today that alone lights the source
+        badge. ``value_supported`` must say False.
+        """
+        doc_text = "The budget narrative describes personnel and travel costs in detail."
+        entities = [{
+            "Award Amount": "$500,000",
+            SOURCE_KEY: {"Award Amount": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["Award Amount"]
+        assert src["verified"] is True
+        assert src["value_supported"] is False
+        assert src["value_support_method"] == "no_match"
+
+    def test_literal_value_in_quote_is_supported(self):
+        doc_text = "Proposals are due March 1, 2026 at 5:00 PM local time."
+        entities = [{
+            "Deadline": "March 1, 2026",
+            SOURCE_KEY: {"Deadline": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["Deadline"]
+        assert (src["value_supported"], src["value_support_method"]) == (True, "literal")
+
+    def test_currency_formatting_still_counts_as_supported(self):
+        doc_text = "Equipment costs total 61,100 in year one."
+        entities = [{
+            "Equipment": "$61,100",
+            SOURCE_KEY: {"Equipment": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["Equipment"]
+        assert (src["value_supported"], src["value_support_method"]) == (True, "numeric")
+
+    def test_reformatted_date_still_counts_as_supported(self):
+        doc_text = "Applications close 3/1/2026 without exception."
+        entities = [{
+            "Deadline": "March 1, 2026",
+            SOURCE_KEY: {"Deadline": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["Deadline"]
+        assert (src["value_supported"], src["value_support_method"]) == (True, "date")
+
+    def test_wrong_number_is_not_supported(self):
+        doc_text = "Equipment costs total $61,100 in year one."
+        entities = [{
+            "Equipment": "$16,100",
+            SOURCE_KEY: {"Equipment": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        assert entities[0][SOURCE_KEY]["Equipment"]["value_supported"] is False
+
+    def test_enum_field_is_not_assessed(self):
+        """An enum value is a mapping of the prose, not a span of it —
+        flagging it would train users to ignore the signal."""
+        doc_text = "Cost sharing is required for this competition."
+        entities = [{
+            "Cost Share": "yes",
+            SOURCE_KEY: {"Cost Share": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(
+            entities, doc_text, {}, {"Cost Share": {"enum_values": ["yes", "no"]}},
+        )
+        src = entities[0][SOURCE_KEY]["Cost Share"]
+        assert src["value_supported"] is None
+        assert src["value_support_method"] == "enum_field"
+
+    def test_not_found_sentinel_is_not_assessed(self):
+        doc_text = "Nothing relevant here at all."
+        entities = [{
+            "Missing": "N/A",
+            SOURCE_KEY: {"Missing": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["Missing"]
+        assert src["value_supported"] is None
+        assert src["value_support_method"] == "empty_value"
+
+    def test_unlocated_quote_is_not_assessed(self):
+        """A fabricated passage containing the value proves nothing, so the
+        value question is not even asked until the quote itself verifies."""
+        entities = [{
+            "Amount": "$500,000",
+            SOURCE_KEY: {"Amount": {"quote": "The award totals $500,000."}},
+        }]
+        resolve_entity_sources(entities, "Unrelated document text.", {})
+        src = entities[0][SOURCE_KEY]["Amount"]
+        assert src["verified"] is False
+        assert src["value_supported"] is None
+        assert src["value_support_method"] == "quote_not_located"
+
+    def test_verified_semantics_are_unchanged(self):
+        """Phase 1 records the new signal without redefining the old one."""
+        doc_text = "The budget narrative describes personnel costs."
+        entities = [{
+            "Amount": "$500,000",
+            SOURCE_KEY: {"Amount": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        assert entities[0][SOURCE_KEY]["Amount"]["verified"] is True
+
+
+class TestBackfillGuard:
+    def test_changed_value_does_not_inherit_the_drafts_quote(self):
+        """Pass 2 moved the deadline; pass 1's quote supports the old one.
+
+        Copying it would attach a real, verifiable passage that contradicts
+        the displayed value — a source badge pointing at evidence against
+        itself.
+        """
+        final = [{"Deadline": "April 1"}]
+        draft = [{
+            "Deadline": "March 1",
+            SOURCE_KEY: {"Deadline": {"quote": "Proposals are due March 1."}},
+        }]
+        ExtractionEngine._backfill_sources(final, draft)
+        assert "Deadline" not in final[0].get(SOURCE_KEY, {})
+
+    def test_unchanged_value_still_inherits_the_quote(self):
+        final = [{"Deadline": "March 1"}]
+        draft = [{
+            "Deadline": "March 1",
+            SOURCE_KEY: {"Deadline": {"quote": "Proposals are due March 1."}},
+        }]
+        ExtractionEngine._backfill_sources(final, draft)
+        assert final[0][SOURCE_KEY]["Deadline"]["quote"] == "Proposals are due March 1."
+
+    def test_reformatted_value_still_inherits_the_quote(self):
+        """Formatting-only differences are the same value, not a new one."""
+        final = [{"Amount": "61100"}]
+        draft = [{
+            "Amount": "$61,100",
+            SOURCE_KEY: {"Amount": {"quote": "Equipment totals $61,100."}},
+        }]
+        ExtractionEngine._backfill_sources(final, draft)
+        assert final[0][SOURCE_KEY]["Amount"]["quote"] == "Equipment totals $61,100."
+
+
+class TestSameValue:
+    def test_equivalences(self):
+        assert same_value("March 1, 2026", "3/1/2026")
+        assert same_value("$61,100", "61100")
+        assert same_value(" Alice ", "alice")
+        assert same_value(None, "N/A")  # both sentinels
+
+    def test_differences(self):
+        assert not same_value("March 1", "April 1")
+        assert not same_value("$61,100", "$16,100")
+        assert not same_value("Alice", "Bob")
+        assert not same_value(None, "Alice")  # sentinel vs real value
+
+    def test_non_scalar_value_is_not_assessed(self):
+        doc_text = "Personnel include Alice and Bob."
+        entities = [{
+            "People": ["Alice", "Bob"],
+            SOURCE_KEY: {"People": {"quote": doc_text}},
+        }]
+        resolve_entity_sources(entities, doc_text, {})
+        src = entities[0][SOURCE_KEY]["People"]
+        assert src["value_supported"] is None
+        assert src["value_support_method"] == "non_scalar_value"
