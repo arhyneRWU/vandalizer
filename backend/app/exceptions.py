@@ -47,3 +47,10 @@ class TrialBudgetExceededError(AppError):
 
     def __init__(self, message: str = "Trial AI usage limit reached"):
         super().__init__(message, status_code=402)
+
+
+class TrialUnverifiedError(AppError):
+    """A trial account must confirm its email address before spending tokens."""
+
+    def __init__(self, message: str = "Confirm your email to use AI features"):
+        super().__init__(message, status_code=403)

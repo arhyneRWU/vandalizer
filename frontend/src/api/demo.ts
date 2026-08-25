@@ -68,6 +68,14 @@ export function getTrialUsage() {
   return apiFetch<TrialUsage>('/api/demo/trial-usage')
 }
 
+/** Re-send the confirm-your-email link to the signed-in trial user. */
+export function resendVerificationEmail() {
+  return apiFetch<{ ok: boolean; already_verified: boolean }>(
+    '/api/demo/resend-verification',
+    { method: 'POST' },
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Admin endpoints (require auth + is_admin)
 // ---------------------------------------------------------------------------

@@ -327,6 +327,8 @@ async def reset_password(
             detail="User not found.",
         )
 
+    # The reset link came from their inbox, so this proves the address too.
+    user.email_verified = True
     user.password_hash = hash_password(body.password)
     # Invalidate every outstanding session: a reset is the recovery path after a
     # suspected compromise, so any access/refresh token minted earlier (including
@@ -363,6 +365,12 @@ async def magic_login(
     user = await User.find_one(User.user_id == user_id_str)
     if not user:
         return RedirectResponse(url=f"{settings.frontend_url}/landing?error=invalid_link")
+
+    # Following an emailed one-time link proves control of the inbox — this is
+    # the primary way a trial account becomes verified (see trial_budget).
+    if not user.email_verified:
+        user.email_verified = True
+        await user.save()
 
     response = RedirectResponse(url=f"{settings.frontend_url}/")
     _set_tokens(response, user, settings)

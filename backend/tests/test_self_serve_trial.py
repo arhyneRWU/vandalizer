@@ -23,6 +23,9 @@ def _constructible_fake_model(docs=None, *, find_one_result=None):
     def _init(self, **kwargs):
         for key, value in kwargs.items():
             setattr(self, key, value)
+        # Defaults the model declares that a kwargs-only stand-in would miss.
+        self.activation_email_failed = getattr(self, "activation_email_failed", False)
+        self.budget_warning_sent = getattr(self, "budget_warning_sent", False)
         self.insert = AsyncMock()
         self.save = AsyncMock()
         created.append(self)
@@ -38,6 +41,7 @@ def _settings(budget: int = 2_000_000, topup: int = 2_000_000) -> SimpleNamespac
         redis_host="localhost",
         trial_token_budget=budget,
         trial_topup_tokens=topup,
+        trial_global_monthly_tokens=0,  # fleet ceiling off; covered separately
         enable_trial_system=True,
     )
 
@@ -51,6 +55,7 @@ def _user(**overrides) -> SimpleNamespace:
         demo_status=None,
         demo_expires_at=None,
         trial_token_budget=None,
+        email_verified=False,
     )
     for key, value in overrides.items():
         setattr(user, key, value)
@@ -90,7 +95,12 @@ async def test_begin_trial_grants_budget_and_no_expiry():
     user = _user()
     apps = _constructible_fake_model(find_one_result=None)
 
-    with patch.object(demo_service, "DemoApplication", apps):
+    with (
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service, "_create_magic_login_token",
+                     AsyncMock(return_value="https://x/magic?v")),
+        patch.object(demo_service, "send_email", AsyncMock(return_value=True)),
+    ):
         await demo_service.begin_self_serve_trial(user, _settings())
 
     assert user.is_demo_user is True
@@ -131,7 +141,12 @@ async def test_begin_trial_does_not_revive_an_exhausted_application():
     finished = _app(status="exhausted")
     apps = _constructible_fake_model(find_one_result=finished)
 
-    with patch.object(demo_service, "DemoApplication", apps):
+    with (
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service, "_create_magic_login_token",
+                     AsyncMock(return_value="https://x/magic?v")),
+        patch.object(demo_service, "send_email", AsyncMock(return_value=True)),
+    ):
         await demo_service.begin_self_serve_trial(user, _settings())
 
     assert finished.status == "exhausted"

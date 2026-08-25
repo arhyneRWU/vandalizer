@@ -33,6 +33,7 @@ from app.services.email_service import (
     budget_warning_email,
     trial_exhausted_email,
     trial_topup_email,
+    verify_email_email,
     recapture_email,
 )
 from app.services import trial_budget
@@ -191,7 +192,45 @@ async def begin_self_serve_trial(
         created_at=now,
     )
     await app.insert()
+    await send_verification_email(user, app, settings)
     return app
+
+
+async def send_verification_email(
+    user: User, app: DemoApplication, settings: Settings | None = None
+) -> bool:
+    """Email a new signup the link that confirms their address.
+
+    Self-registration hands out a session immediately, so this is the only
+    thing standing between "anyone can type an address" and unmetered spend on
+    the deployment's keys — clicking the link both verifies the address and
+    signs them in. SSO users never see this (the IdP asserts the address), and
+    neither does anyone on a deployment with the trial system off.
+    """
+    if settings is None:
+        settings = Settings()
+    if user.email_verified:
+        return True
+
+    magic_link = await _create_magic_login_token(user.user_id, settings)
+    subject, html = verify_email_email(
+        user.name or app.name,
+        magic_link,
+        budget_tokens=settings.trial_token_budget,
+    )
+    sent = await send_email(
+        app.email, subject, html, settings, email_type="verify_email"
+    )
+    if not sent:
+        logger.error(
+            "Verification email FAILED to send for trial user %s — they cannot "
+            "use AI features until it is resent",
+            app.email,
+        )
+    if app.activation_email_failed != (not sent):
+        app.activation_email_failed = not sent
+        await app.save()
+    return sent
 
 
 async def get_waitlist_status(uuid: str) -> Optional[DemoApplication]:
@@ -473,6 +512,14 @@ async def _adopt_clock_era_trial_users(now: datetime.datetime) -> int:
         if user.trial_token_budget is None and settings_budget:
             user.trial_token_budget = settings_budget
             touched = True
+        # Grandfather existing trials past the new verification gate. They
+        # signed up before it existed — most reached the product through an
+        # emailed magic link anyway — and retroactively cutting off AI for
+        # people mid-trial would be a far worse failure than the narrow abuse
+        # the gate exists to stop. It applies to signups from here on.
+        if not user.email_verified:
+            user.email_verified = True
+            touched = True
         if touched:
             await user.save()
 
@@ -526,6 +573,9 @@ async def sweep_trial_budgets(settings: Settings | None = None) -> dict:
 
     now = datetime.datetime.now(datetime.timezone.utc)
     await _adopt_clock_era_trial_users(now)
+    # Recompute the fleet-wide monthly ceiling; the hot path reads the cached
+    # flag this writes (per-account budgets stay exact in between).
+    await trial_budget.refresh_fleet_pause(settings)
 
     apps = await DemoApplication.find(DemoApplication.status == "active").to_list()
     warned = 0

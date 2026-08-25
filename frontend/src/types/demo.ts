@@ -65,6 +65,8 @@ export interface TrialUsage {
   used: number
   remaining: number
   percent: number
+  /** False means AI features are gated until the address is confirmed. */
+  email_verified: boolean
 }
 
 export interface TrialExtensionResult {
