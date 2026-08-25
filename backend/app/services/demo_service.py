@@ -28,7 +28,6 @@ from app.models.workflow import Workflow, WorkflowResult
 from app.services.email_service import (
     send_email,
     test_email,
-    waitlist_confirmation_email,
     activation_email,
     budget_warning_email,
     trial_exhausted_email,
@@ -41,9 +40,6 @@ from app.utils.security import hash_password
 import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
-
-MAX_ACTIVE_DEMOS = 50
-MAX_PER_ORGANIZATION = 5
 
 # Fraction of the budget that triggers the one-time "running low" email.
 BUDGET_WARNING_THRESHOLD = 0.8
@@ -87,57 +83,8 @@ async def _create_magic_login_token(user_id: str, settings: Settings) -> str:
     return f"{settings.frontend_url}/api/auth/magic-login?token={token}"
 
 
-async def submit_application(
-    name: str,
-    email: str,
-    organization: str,
-    questionnaire_responses: dict,
-    title: str = "",
-    settings: Settings | None = None,
-) -> DemoApplication:
-    """Create a new demo application and send confirmation email."""
-    if settings is None:
-        settings = Settings()
-
-    email = email.strip().lower()
-    existing = await DemoApplication.find_one(DemoApplication.email == email)
-    if existing:
-        raise ValueError("An application with this email already exists")
-
-    existing_user = await User.find_one(User.email == email)
-    if existing_user:
-        raise ValueError("An account with this email already exists")
-
-    # Calculate waitlist position
-    pending_count = await DemoApplication.find(
-        DemoApplication.status == "pending"
-    ).count()
-    position = pending_count + 1
-
-    app = DemoApplication(
-        uuid=secrets.token_urlsafe(16),
-        name=name,
-        title=title,
-        email=email,
-        organization=organization.strip(),
-        questionnaire_responses=questionnaire_responses,
-        status="pending",
-        waitlist_position=position,
-        created_at=datetime.datetime.now(datetime.timezone.utc),
-    )
-    await app.insert()
-
-    # Send confirmation email
-    subject, html = waitlist_confirmation_email(
-        name, position, settings.frontend_url, app.uuid
-    )
-    await send_email(email, subject, html, settings, email_type="waitlist_confirmation")
-
-    return app
-
-
 def _email_domain(email: str) -> str:
-    """Bucket self-serve signups by email domain for per-org caps and stats."""
+    """Bucket signups by email domain, so per-institution uptake is visible."""
     domain = (email or "").rsplit("@", 1)[-1].strip().lower()
     return domain or "self-registered"
 
@@ -148,8 +95,8 @@ async def begin_self_serve_trial(
     """Start the token-metered trial for a user who registered directly.
 
     Marks the User as a trial account with the deployment's default token
-    budget and mints — or adopts, for a *pending* applicant who registered
-    instead of waiting — an active DemoApplication. The application record is
+    budget and mints — or adopts, for a *pending* application an admin created
+    but never sent — an active DemoApplication. The application record is
     what the rest of the lifecycle keys on (the budget sweep, the trial-end
     screen, engagement scoring, the admin dashboard).
 
@@ -231,85 +178,6 @@ async def send_verification_email(
         app.activation_email_failed = not sent
         await app.save()
     return sent
-
-
-async def get_waitlist_status(uuid: str) -> Optional[DemoApplication]:
-    """Return current application status."""
-    app = await DemoApplication.find_one(DemoApplication.uuid == uuid)
-    if not app:
-        return None
-
-    # Recalculate position for pending apps
-    if app.status == "pending":
-        ahead = await DemoApplication.find(
-            DemoApplication.status == "pending",
-            DemoApplication.created_at < app.created_at,
-        ).count()
-        app.waitlist_position = ahead + 1
-
-    return app
-
-
-async def estimate_wait_text(app: DemoApplication) -> Optional[str]:
-    """Honest wait estimate for a pending application.
-
-    Activation is automatic — a beat job admits pending applications FIFO
-    every few minutes while slots are free — so the only real wait is a full
-    house. (The old "position × 1 day" formula described a review queue that
-    doesn't exist.)
-    """
-    if app.status != "pending" or not app.waitlist_position:
-        return None
-    active_count = await DemoApplication.find(
-        DemoApplication.status == "active"
-    ).count()
-    if app.waitlist_position <= MAX_ACTIVE_DEMOS - active_count:
-        return (
-            "Activation is automatic — expect your sign-in email within "
-            "about 15 minutes."
-        )
-    return (
-        "All trial slots are full right now. You'll be activated automatically "
-        "as soon as one opens, and we'll email you the moment it happens."
-    )
-
-
-async def process_waitlist(settings: Settings | None = None) -> int:
-    """Activate eligible waitlisted applications. Returns count activated."""
-    if settings is None:
-        settings = Settings()
-
-    active_count = await DemoApplication.find(
-        DemoApplication.status == "active"
-    ).count()
-
-    activated = 0
-    while active_count < MAX_ACTIVE_DEMOS:
-        # Find next eligible pending application (FIFO)
-        pending = await DemoApplication.find(
-            DemoApplication.status == "pending"
-        ).sort("+created_at").to_list()
-
-        candidate = None
-        for p in pending:
-            org_active = await DemoApplication.find(
-                DemoApplication.organization == p.organization,
-                DemoApplication.status == "active",
-            ).count()
-            if org_active < MAX_PER_ORGANIZATION:
-                candidate = p
-                break
-
-        if not candidate:
-            break
-
-        await _activate_application(candidate, settings)
-        active_count += 1
-        activated += 1
-
-    if activated:
-        logger.info("Activated %d demo accounts", activated)
-    return activated
 
 
 async def _activate_application(app: DemoApplication, settings: Settings) -> None:
@@ -995,7 +863,7 @@ async def admin_add_demo_user(
     email: str,
     settings: Settings | None = None,
 ) -> DemoApplication:
-    """Admin: create a demo user directly, skipping the application/waitlist flow."""
+    """Admin: create a trial user directly and send them a sign-in link."""
     if settings is None:
         settings = Settings()
 
@@ -1025,7 +893,7 @@ async def admin_add_demo_user(
 
 
 async def admin_activate_user(demo_uuid: str, settings: Settings | None = None) -> bool:
-    """Admin: manually activate a waitlisted user (skip queue)."""
+    """Admin: activate an application an admin created but never sent."""
     if settings is None:
         settings = Settings()
 

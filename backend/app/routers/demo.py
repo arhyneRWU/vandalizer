@@ -1,4 +1,4 @@
-"""Demo waitlist API endpoints."""
+"""Trial/demo API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
@@ -8,9 +8,6 @@ from app.rate_limit import limiter
 from app.models.user import User
 from app.schemas.demo import (
     AdminAddDemoUserRequest,
-    DemoSignupRequest,
-    DemoSignupResponse,
-    WaitlistStatusResponse,
     PostExperienceRequest,
     PostExperienceResponseSchema,
     ResendCredentialsResponse,
@@ -28,46 +25,6 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Public endpoints (no auth required)
 # ---------------------------------------------------------------------------
-
-
-@router.post("/apply", response_model=DemoSignupResponse)
-async def apply(body: DemoSignupRequest, settings: Settings = Depends(get_settings)):
-    """Submit a demo application."""
-    try:
-        app = await demo_service.submit_application(
-            name=body.name,
-            email=body.email,
-            organization=body.organization,
-            questionnaire_responses=body.questionnaire_responses,
-            title=body.title,
-            settings=settings,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    return DemoSignupResponse(
-        uuid=app.uuid,
-        waitlist_position=app.waitlist_position or 1,
-        message="Application received! Check your email for confirmation.",
-    )
-
-
-@router.get("/status/{uuid}", response_model=WaitlistStatusResponse)
-async def waitlist_status(uuid: str):
-    """Check demo waitlist status."""
-    app = await demo_service.get_waitlist_status(uuid)
-    if not app:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Application not found"
-        )
-
-    return WaitlistStatusResponse(
-        uuid=app.uuid,
-        status=app.status,
-        waitlist_position=app.waitlist_position if app.status == "pending" else None,
-        estimated_wait=await demo_service.estimate_wait_text(app),
-        activation_email_failed=app.activation_email_failed,
-    )
 
 
 @router.get("/feedback/{token}")
@@ -90,15 +47,15 @@ async def resend_credentials(uuid: str, settings: Settings = Depends(get_setting
     """Resend a fresh sign-in link, or steer the user to the right next step.
 
     Always 200: the status field tells the frontend whether the link was sent,
-    the user is still on the waitlist, or the trial has ended (route to renewal).
+    the account was never activated, or the tokens ran out (route to top-up).
     """
     result = await demo_service.resend_credentials(uuid, settings)
     status_value = result.get("status")
     messages = {
         "sent": "We just emailed you a fresh one-click sign-in link.",
         "send_failed": "We couldn't send the email just now — please try again in a moment.",
-        "pending": "You're still on the waitlist — we'll email you the moment a spot opens up.",
-        "expired": "Your trial has wrapped up. Let's pick up where you left off.",
+        "pending": "That trial hasn't been activated yet — check with whoever invited you.",
+        "exhausted": "You've used your included tokens. Let's top you up and pick up where you left off.",
         "not_found": "We couldn't find a trial for that link.",
     }
     return ResendCredentialsResponse(
@@ -125,7 +82,7 @@ async def submit_feedback(token: str, body: PostExperienceRequest):
 
 @router.get("/trial-end/{token}", response_model=TrialEndInfoResponse)
 async def trial_end_info(token: str):
-    """Return the data the end-of-trial screen needs (engagement + renewal state)."""
+    """Return the data the trial-end screen needs (engagement + token balance)."""
     info = await demo_service.get_trial_end_info(token)
     if not info:
         raise HTTPException(
@@ -212,7 +169,7 @@ def _require_admin(user: User) -> None:
 
 @router.get("/admin/stats", response_model=DemoAdminStatsResponse)
 async def admin_stats(user: User = Depends(get_current_user)):
-    """Get demo program statistics."""
+    """Get trial program statistics."""
     _require_admin(user)
     stats = await demo_service.admin_get_stats()
     return DemoAdminStatsResponse(**stats)
@@ -230,14 +187,14 @@ async def admin_applications(
     status_filter: str | None = Query(default=None, alias="status"),
     user: User = Depends(get_current_user),
 ):
-    """List all demo applications."""
+    """List all trial accounts."""
     _require_admin(user)
     return await demo_service.admin_list_applications(status_filter)
 
 
 @router.post("/admin/release/{demo_uuid}")
 async def admin_release(demo_uuid: str, user: User = Depends(get_current_user)):
-    """Manually release an expired demo user."""
+    """Stop metering a finished trial user so they can use AI again."""
     _require_admin(user)
     success = await demo_service.admin_release_user(demo_uuid)
     if not success:

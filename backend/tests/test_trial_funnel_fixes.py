@@ -1,8 +1,8 @@
 """Unit tests for the trial-funnel UX fixes.
 
 Covers: the top-up returning a working way back in (magic links in the response
-and the confirmation email), the honest waitlist estimate, and the
-activation-email-failed flag lifecycle on resend.
+and the confirmation email), and the activation-email-failed flag lifecycle on
+resend.
 """
 
 import datetime
@@ -109,36 +109,6 @@ def test_trial_topup_email_prefers_magic_link():
 def test_trial_topup_email_falls_back_to_login():
     _, html = trial_topup_email("Ada", 4_000_000, "https://x")
     assert 'href="https://x/login"' in html
-
-
-# ---------------------------------------------------------------------------
-# Honest waitlist estimate
-# ---------------------------------------------------------------------------
-
-
-async def test_estimate_wait_is_minutes_when_slots_free():
-    apps = fake_model()
-    apps.find.return_value.count = AsyncMock(return_value=10)  # 40 slots free
-    pending = _app(status="pending", waitlist_position=3)
-    with patch.object(demo_service, "DemoApplication", apps):
-        text = await demo_service.estimate_wait_text(pending)
-    assert "15 minutes" in text
-
-
-async def test_estimate_wait_is_honest_when_full():
-    apps = fake_model()
-    apps.find.return_value.count = AsyncMock(
-        return_value=demo_service.MAX_ACTIVE_DEMOS
-    )
-    pending = _app(status="pending", waitlist_position=1)
-    with patch.object(demo_service, "DemoApplication", apps):
-        text = await demo_service.estimate_wait_text(pending)
-    assert "full" in text
-    assert "day" not in text  # the old fake "N day(s)" formula is gone
-
-
-async def test_estimate_wait_none_for_active():
-    assert await demo_service.estimate_wait_text(_app(status="active")) is None
 
 
 # ---------------------------------------------------------------------------

@@ -2,33 +2,9 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class DemoSignupRequest(BaseModel):
-    name: str
-    title: str = ""
-    email: str
-    organization: str
-    questionnaire_responses: dict = {}
-
-
-class DemoSignupResponse(BaseModel):
-    uuid: str
-    waitlist_position: int
-    message: str
-
-
-class WaitlistStatusResponse(BaseModel):
-    uuid: str
-    status: str
-    waitlist_position: Optional[int] = None
-    estimated_wait: Optional[str] = None
-    # True when the activation/resend email couldn't be delivered — the status
-    # page uses this to steer the applicant to the resend button.
-    activation_email_failed: bool = False
-
-
 class ResendCredentialsResponse(BaseModel):
     ok: bool
-    # sent | send_failed | pending | expired | not_found
+    # sent | send_failed | pending | exhausted | not_found
     status: str
     message: str
     email: Optional[str] = None

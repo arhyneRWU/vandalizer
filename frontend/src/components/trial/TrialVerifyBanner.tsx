@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MailCheck, Loader2 } from 'lucide-react'
 import { getTrialUsage, resendVerificationEmail } from '../../api/demo'
+import { useAuth } from '../../hooks/useAuth'
 
 /**
  * Tells an unconfirmed trial user why AI features aren't responding, and gives
@@ -12,24 +13,33 @@ import { getTrialUsage, resendVerificationEmail } from '../../api/demo'
  * the endpoint isn't even mounted, so a failed fetch is the normal case).
  */
 export function TrialVerifyBanner() {
+  const { user } = useAuth()
+  const isTrialUser = Boolean(user?.is_demo_user)
   const [needsVerify, setNeedsVerify] = useState(false)
   const [sending, setSending] = useState(false)
   const [sent, setSent] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
+    // The session already says whether this is a trial account, so only trial
+    // users pay for the lookup — on a deployment with the trial system off the
+    // route isn't even mounted, and this way nobody requests it.
+    if (!isTrialUser) {
+      setNeedsVerify(false)
+      return
+    }
     let cancelled = false
     getTrialUsage()
       .then((usage) => {
         if (!cancelled) setNeedsVerify(usage.enabled && !usage.email_verified)
       })
       .catch(() => {
-        // Trial system off, or not a trial deployment — nothing to show.
+        // Metering unavailable — say nothing rather than guess at a gate.
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [isTrialUser])
 
   if (!needsVerify) return null
 

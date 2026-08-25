@@ -15,15 +15,6 @@ def _run_async(coro):
     return run_task_async(coro)
 
 
-async def _init_and_process_waitlist():
-    from app.database import init_db
-    from app.services import demo_service
-
-    settings = Settings()
-    await init_db(settings)
-    return await demo_service.process_waitlist(settings)
-
-
 async def _init_and_sweep_budgets():
     from app.database import init_db
     from app.services import demo_service
@@ -49,20 +40,6 @@ async def _init_and_enqueue_recapture_all():
     settings = Settings()
     await init_db(settings)
     return await demo_service.enqueue_recapture_all(settings)
-
-
-@celery_app.task(
-    bind=True,
-    name="tasks.demo.process_waitlist",
-    autoretry_for=TRANSIENT_EXCEPTIONS,
-    retry_backoff=True,
-    max_retries=2,
-    default_retry_delay=30,
-)
-def process_demo_waitlist(self):
-    """Process the demo waitlist — activate eligible pending applications."""
-    count = _run_async(_init_and_process_waitlist())
-    return {"activated": count}
 
 
 @celery_app.task(
