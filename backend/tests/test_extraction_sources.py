@@ -6,14 +6,18 @@ sidecar plumbing (capture, merge, draft, consensus, filtering).
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.services.extraction_engine import ExtractionEngine
 from app.services.extraction_sources import (
     SOURCE_KEY,
+    _numbers_in,
     find_quote_offset,
     normalize_with_map,
     page_for_offset,
     resolve_entity_sources,
     same_value,
+    value_supported_by_quote,
 )
 from app.tasks.extraction_tasks import normalize_results
 
@@ -425,7 +429,9 @@ class TestBackfillGuard:
 
         Copying it would attach a real, verifiable passage that contradicts
         the displayed value — a source badge pointing at evidence against
-        itself.
+        itself. The quote is withheld, but an entry is left behind: dropping
+        the field entirely renders it unmarked, which is the state that looks
+        cleanest, so the least trustworthy value would lose its warning too.
         """
         final = [{"Deadline": "April 1"}]
         draft = [{
@@ -433,7 +439,26 @@ class TestBackfillGuard:
             SOURCE_KEY: {"Deadline": {"quote": "Proposals are due March 1."}},
         }]
         ExtractionEngine._backfill_sources(final, draft)
-        assert "Deadline" not in final[0].get(SOURCE_KEY, {})
+        entry = final[0][SOURCE_KEY]["Deadline"]
+        assert entry["quote"] is None
+        assert entry["dropped_reason"] == "value_changed"
+
+    def test_withheld_quote_resolves_to_an_unverified_entry(self):
+        """End to end: the withheld entry must survive resolution as a
+        present-but-unverified source, which is what makes the UI render
+        "no source found" rather than nothing at all."""
+        final = [{"Deadline": "April 1"}]
+        draft = [{
+            "Deadline": "March 1",
+            SOURCE_KEY: {"Deadline": {"quote": "Proposals are due March 1."}},
+        }]
+        ExtractionEngine._backfill_sources(final, draft)
+        resolve_entity_sources(final, "Proposals are due March 1.", {})
+        entry = final[0][SOURCE_KEY]["Deadline"]
+        assert entry["verified"] is False
+        assert entry["quote"] is None
+        assert entry["value_supported"] is None
+        assert entry["value_support_method"] == "value_changed_in_refinement"
 
     def test_unchanged_value_still_inherits_the_quote(self):
         final = [{"Deadline": "March 1"}]
@@ -478,3 +503,74 @@ class TestSameValue:
         src = entities[0][SOURCE_KEY]["People"]
         assert src["value_supported"] is None
         assert src["value_support_method"] == "non_scalar_value"
+
+
+class TestLiteralMatchBoundaries:
+    """A substring is not a value.
+
+    Every case here returned True before boundaries were required — the
+    over-claiming direction, on the field the whole feature exists for.
+    """
+
+    @pytest.mark.parametrize("value,quote", [
+        ("500000", "The total award is 5000000 dollars over five years."),
+        ("1,500,000", "The ceiling is $11,500,000 across all awards."),
+        ("$500,000", "The obligated total is $500,000.99 as of today."),
+        ("61100", "Account code 561100 covers equipment purchases."),
+        ("2026", "See https://grants.gov/opportunity/12026 for details."),
+        ("John Smith", "The contact is John Smithson, Director of Research."),
+        ("Cole", "Nicole Smith serves as principal investigator."),
+        ("Ann", "The award was announced on the agency web site."),
+    ])
+    def test_fragment_of_a_larger_token_is_not_support(self, value, quote):
+        assert value_supported_by_quote(value, quote) == (False, "no_match")
+
+    @pytest.mark.parametrize("value,quote,method", [
+        ("$500,000", "The award is $500,000.", "literal"),
+        ("500,000", "Totals: $1,500,000 overall and 500,000 in year two.", "literal"),
+        ("March 1, 2026", "Proposals are due March 1, 2026 at 5:00 PM.", "literal"),
+        ("$61,100", "Equipment costs total 61,100 in year one.", "numeric"),
+        ("March 1, 2026", "Applications close 3/1/2026 without exception.", "date"),
+        ("Jane Smith", "Contact Jane Smith, Director.", "literal"),
+    ])
+    def test_real_support_still_counts(self, value, quote, method):
+        """Sentence punctuation, a genuine second occurrence, and formatting
+        differences must all still resolve as supported."""
+        assert value_supported_by_quote(value, quote) == (True, method)
+
+
+class TestNumberParsing:
+    def test_percent_is_a_different_quantity_than_the_bare_number(self):
+        assert value_supported_by_quote("$50", "The negotiated F&A rate is 50% of MTDC.") == (
+            False, "no_match",
+        )
+
+    def test_a_percentage_is_supported_by_its_own_percentage(self):
+        assert value_supported_by_quote("26%", "The negotiated rate is 26% of MTDC.") == (
+            True, "literal",
+        )
+
+    def test_comma_separated_list_is_not_one_number(self):
+        """`[\\d,]*` read "1,2,3" as a single 123."""
+        assert _numbers_in("Sections 1,2,3 of the policy apply.") == {
+            (1.0, False), (2.0, False), (3.0, False),
+        }
+        assert value_supported_by_quote("123", "Sections 1,2,3 of the policy apply.") == (
+            False, "no_match",
+        )
+
+    def test_thousands_groups_still_parse(self):
+        assert _numbers_in("Equipment totals $61,100 this year.") == {(61100.0, False)}
+
+
+class TestQuoteLengthCap:
+    def test_oversized_quote_is_not_assessed(self):
+        """The quote is model-controlled and the date scan backtracks
+        quadratically on space-free text; a passage this long is pathological,
+        so it is excluded rather than measured."""
+        supported, method = value_supported_by_quote("3/1/2026", "May" * 4000)
+        assert (supported, method) == (None, "quote_too_long")
+
+    def test_a_normal_passage_is_still_assessed(self):
+        quote = "Proposals are due March 1, 2026. " + ("Boilerplate text. " * 50)
+        assert value_supported_by_quote("March 1, 2026", quote)[0] is True

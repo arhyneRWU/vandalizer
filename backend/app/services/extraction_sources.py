@@ -151,8 +151,19 @@ _NOT_FOUND_VARIANTS = frozenset({
     "no information", "no entry", "missing", "empty", "blank",
 })
 
-_CURRENCY_CHARS = "$€£¥%"
-_NUMBER_IN_TEXT_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+_CURRENCY_CHARS = "$€£¥"
+# Comma groups only in thousands position: `[\d,]*` swallowed "1,2,3" as one
+# token, which then parsed as 123 and "supported" a value of 123 with a quote
+# listing sections 1, 2 and 3.
+_NUMBER_IN_TEXT_RE = re.compile(
+    r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d+(?:\.\d+)?"
+)
+
+# A quote is a passage, not a document. Past this the value question is not
+# worth asking, and asking it is not free: the date scan below backtracks
+# quadratically on long space-free text (OCR that lost its spaces, or a
+# degenerate model response), and the quote is model-controlled.
+_MAX_QUOTE_CHARS = 4000
 
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 _DATE_IN_TEXT_RE = re.compile(
@@ -189,13 +200,67 @@ def _as_number(text: str) -> Optional[float]:
         return None
 
 
-def _numbers_in(text: str) -> set[float]:
-    out: set[float] = set()
+def _number_with_pct(text: str) -> Optional[tuple[float, bool]]:
+    """Parse a whole string as (number, is_percent).
+
+    A percentage is not the same quantity as the bare number: "$50" must not
+    be certified by a quote that says "50% of MTDC", so the unit travels with
+    the value instead of being stripped away.
+    """
+    s = text.strip()
+    pct = s.endswith("%")
+    if pct:
+        s = s[:-1]
+    n = _as_number(s)
+    return None if n is None else (n, pct)
+
+
+def _numbers_in(text: str) -> set[tuple[float, bool]]:
+    out: set[tuple[float, bool]] = set()
     for m in _NUMBER_IN_TEXT_RE.finditer(text):
         n = _as_number(m.group())
         if n is not None:
-            out.add(n)
+            out.add((n, text[m.end():m.end() + 1] == "%"))
     return out
+
+
+def _match_boundaries_ok(quote: str, start: int, end: int, *, numeric: bool) -> bool:
+    """Is the match at ``[start, end)`` a whole value rather than a fragment?
+
+    Without this the literal check is a bare substring test, so a quote saying
+    5000000 "supports" a value of 500000, $500,000.99 supports $500,000, and
+    "John Smithson" supports "John Smith" — over-claiming in exactly the
+    direction the value check exists to catch.
+    """
+    before = quote[start - 1] if start > 0 else ""
+    after = quote[end] if end < len(quote) else ""
+    if numeric:
+        # A digit or a group/decimal separator on either side means the match
+        # is a slice of a longer number. A trailing "." or "," only counts as
+        # part of the number when a digit follows it, so ordinary sentence
+        # punctuation still ends a value cleanly.
+        if before.isdigit() or before in ".,":
+            return False
+        if after.isdigit():
+            return False
+        if after in ".," and end + 1 < len(quote) and quote[end + 1].isdigit():
+            return False
+        return True
+    return not (before.isalnum() or after.isalnum())
+
+
+def _literal_match(norm_value: str, norm_quote: str, *, numeric: bool) -> bool:
+    """Whether *norm_value* occurs in *norm_quote* as a whole value.
+
+    Scans every occurrence: the first may be a fragment ("500,000" inside
+    "1,500,000") while a later one is genuine.
+    """
+    idx = norm_quote.find(norm_value)
+    while idx != -1:
+        if _match_boundaries_ok(norm_quote, idx, idx + len(norm_value), numeric=numeric):
+            return True
+        idx = norm_quote.find(norm_value, idx + 1)
+    return False
 
 
 def _as_date(text: str) -> Optional[date]:
@@ -234,7 +299,7 @@ def same_value(a, b) -> bool:
     if norm_a == norm_b:
         return True
 
-    num_a, num_b = _as_number(a_str), _as_number(b_str)
+    num_a, num_b = _number_with_pct(a_str), _number_with_pct(b_str)
     if num_a is not None and num_b is not None:
         return num_a == num_b
 
@@ -256,20 +321,30 @@ def value_supported_by_quote(
     rather than a span of it. ``method`` records how the answer was reached so
     the distribution can be measured before any of this drives a badge.
 
-    Deliberately strict: only literal, numeric, and date equivalence count.
+    Deliberately strict: only literal, numeric, and date equivalence count,
+    and a literal match must sit on value boundaries — a digit or separator
+    beside a number, or an alphanumeric beside a name, means the match is a
+    fragment of something else and does not count.
     A multi-part value assembled from a sentence ("Jane Smith, Chemistry")
     reads as unsupported. That is the conservative direction for a field that
     is recorded but not yet surfaced — if measurement shows it dominates, a
     partial-coverage rule can be added with evidence behind it.
 
-    Two known weaknesses to read the measured distribution against. Very short
-    values ("1", "A") match almost any passage by coincidence, so their
-    ``True`` carries little evidence. And a value that is a judgment about the
+    Three known weaknesses to read the measured distribution against. Very
+    short values ("1", "A") match almost any passage by coincidence, so their
+    ``True`` carries little evidence. A value that is a judgment about the
     passage rather than a span of it ("Yes" for "cost sharing is required")
-    reads as unsupported unless the field declares ``enum_values``.
+    reads as unsupported unless the field declares ``enum_values``. And the
+    check asks only whether the value appears *somewhere* in the passage, not
+    whether the passage assigns it to this field: a "Direct Costs" value is
+    supported by a quote that labels that same figure as indirect, and a year
+    (2024) by a dollar amount ($2,024). Reading a ``True`` as "the quote says
+    this field is this value" therefore over-reads it.
     """
     if not quote or not quote.strip():
         return None, "no_quote"
+    if len(quote) > _MAX_QUOTE_CHARS:
+        return None, "quote_too_long"
     if _is_not_found(value):
         return None, "empty_value"
     if enum_field:
@@ -286,10 +361,10 @@ def value_supported_by_quote(
     if not norm_value:
         return None, "empty_value"
 
-    if norm_value in norm_quote:
+    num = _number_with_pct(value_str)
+    if _literal_match(norm_value, norm_quote, numeric=num is not None):
         return True, "literal"
 
-    num = _as_number(value_str)
     if num is not None and num in _numbers_in(quote):
         return True, "numeric"
 
@@ -362,6 +437,13 @@ def resolve_entity_sources(
                     entity.get(field), quote,
                     enum_field=bool(meta.get("enum_values")),
                 )
+            elif isinstance(src, dict) and src.get("dropped_reason") == "value_changed":
+                # Pass 2 revised the value, so pass 1's quote was withheld
+                # rather than failing to locate. Kept as an entry (not dropped)
+                # so the UI renders "no source found" instead of nothing, and
+                # so these fields are counted rather than vanishing from the
+                # distribution.
+                supported, method = None, "value_changed_in_refinement"
             else:
                 supported, method = None, "quote_not_located"
             sidecar[field] = {

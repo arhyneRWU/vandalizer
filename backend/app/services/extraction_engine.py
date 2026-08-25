@@ -544,6 +544,12 @@ class ExtractionEngine:
                 if field not in entity or field in sidecar:
                     continue
                 if not _same_value(entity.get(field), draft_value):
+                    # Withhold the quote, but leave an entry behind. Dropping
+                    # the field entirely makes the UI render it unmarked —
+                    # the state that looks cleanest — so a revised value would
+                    # lose both its badge and its warning, and would vanish
+                    # from the value-support distribution instead of counting.
+                    sidecar[field] = {"quote": None, "dropped_reason": "value_changed"}
                     continue
                 sidecar[field] = src
 
