@@ -126,6 +126,10 @@ async def begin_self_serve_trial(
         existing.expires_at = None
         existing.budget_warning_sent = False
         await existing.save()
+        # Same gate as a fresh signup: adopting a pending record is still a
+        # first sign-in, and without this the account is unverified with no
+        # link ever sent — AI gated with nothing to click.
+        await send_verification_email(user, existing, settings)
         return existing
 
     app = DemoApplication(
@@ -373,6 +377,15 @@ async def _adopt_clock_era_trial_users(now: datetime.datetime) -> int:
     for user in users:
         touched = False
 
+        # Who predates the token model, decided before anything is rewritten:
+        # a clock-era account still carries an expiry, or never got a
+        # DemoApplication at all. A signup made under the token model has
+        # neither property — begin_self_serve_trial leaves demo_expires_at
+        # None and always mints a linked application.
+        clock_era = (
+            user.demo_expires_at is not None or user.user_id not in linked_user_ids
+        )
+
         # Retire the clock; give anyone without one the deployment default.
         if user.demo_expires_at is not None:
             user.demo_expires_at = None
@@ -380,12 +393,17 @@ async def _adopt_clock_era_trial_users(now: datetime.datetime) -> int:
         if user.trial_token_budget is None and settings_budget:
             user.trial_token_budget = settings_budget
             touched = True
-        # Grandfather existing trials past the new verification gate. They
+        # Grandfather clock-era trials past the new verification gate. They
         # signed up before it existed — most reached the product through an
         # emailed magic link anyway — and retroactively cutting off AI for
         # people mid-trial would be a far worse failure than the narrow abuse
-        # the gate exists to stop. It applies to signups from here on.
-        if not user.email_verified:
+        # the gate exists to stop.
+        #
+        # It must not reach anyone else. This sweep runs hourly, not once at
+        # deploy, so an unbounded version verifies every new signup at the
+        # next tick — the gate would disarm itself within the hour and the
+        # feature would be decorative.
+        if clock_era and not user.email_verified:
             user.email_verified = True
             touched = True
         if touched:
@@ -809,6 +827,14 @@ async def self_topup_trial(
     app.expires_at = None
     app.expired_at = None
     app.trial_extensions_used += 1
+    # Burn the link. This endpoint is unauthenticated by design — the token in
+    # the out-of-tokens email *is* the credential — so a token that survived
+    # its own use could be replayed to mint another grant on every call, which
+    # is an unbounded spend budget wearing a top-up button. Rotating rather
+    # than clearing keeps the field populated for the exhausted-user paths
+    # that hand it back out; the next out-of-tokens email carries the new one,
+    # and this run's own email gets the user back in by magic link anyway.
+    app.post_questionnaire_token = secrets.token_urlsafe(16)
     # A fresh budget window gets a fresh "running low" warning, and a working
     # account shouldn't keep a stale delivery-failure flag.
     app.budget_warning_sent = False

@@ -125,7 +125,10 @@ async def test_begin_trial_adopts_pending_application():
     pending = _app(status="pending", user_id=None)
     apps = _constructible_fake_model(find_one_result=pending)
 
-    with patch.object(demo_service, "DemoApplication", apps):
+    with (
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service, "send_verification_email", AsyncMock()),
+    ):
         await demo_service.begin_self_serve_trial(user, _settings())
 
     assert apps.created == []  # adopted, not duplicated
@@ -381,3 +384,26 @@ async def test_trial_start_none_for_regular_users():
     from app.services import feedback_prompt_service
 
     assert await feedback_prompt_service._trial_started_at(_user()) is None
+
+
+async def test_adopted_pending_application_still_gets_a_verification_email():
+    """Adopting a pending record is still a first sign-in. Without the send,
+    the account is gated with no link ever delivered."""
+    user = _user()
+    pending = SimpleNamespace(
+        status="pending", user_id=None, activated_at=None, expires_at=None,
+        budget_warning_sent=True,
+    )
+    pending.save = AsyncMock()
+    apps = _constructible_fake_model(find_one_result=pending)
+    sent = AsyncMock()
+
+    with (
+        patch.object(demo_service, "DemoApplication", apps),
+        patch.object(demo_service, "send_verification_email", sent),
+    ):
+        await demo_service.begin_self_serve_trial(user, _settings())
+
+    assert apps.created == []  # adopted, not duplicated
+    sent.assert_awaited_once()
+    assert sent.await_args.args[1] is pending

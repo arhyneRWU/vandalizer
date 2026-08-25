@@ -92,12 +92,19 @@ async def trial_end_info(token: str):
 
 
 @router.post("/trial-end/{token}/extend", response_model=TrialExtensionResponse)
+@limiter.limit("5/hour")
 async def extend_trial(
+    request: Request,
     token: str,
     body: TrialExtensionRequest,
     settings: Settings = Depends(get_settings),
 ):
-    """Self-serve token top-up from the trial-end screen."""
+    """Self-serve token top-up from the trial-end screen.
+
+    Unauthenticated on purpose — the emailed token is the credential — so the
+    grant is guarded twice: ``self_topup_trial`` rotates the token so a link
+    cannot be replayed, and this limit blunts guessing at the token space.
+    """
     result = await demo_service.self_topup_trial(token, body.notes, settings)
     if not result.get("ok"):
         raise HTTPException(
