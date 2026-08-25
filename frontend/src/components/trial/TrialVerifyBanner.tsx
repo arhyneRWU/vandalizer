@@ -31,7 +31,10 @@ export function TrialVerifyBanner() {
     let cancelled = false
     getTrialUsage()
       .then((usage) => {
-        if (!cancelled) setNeedsVerify(usage.enabled && !usage.email_verified)
+        // Deliberately not gated on `usage.enabled`: a deployment that
+        // uncapped per-account tokens has no meter to draw but still gates
+        // AI on confirmation, and a hidden banner would leave that silent.
+        if (!cancelled) setNeedsVerify(!usage.email_verified)
       })
       .catch(() => {
         // Metering unavailable — say nothing rather than guess at a gate.
