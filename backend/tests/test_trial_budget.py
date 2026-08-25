@@ -46,6 +46,93 @@ def test_budget_never_negative(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# effective_budget — per-user override vs deployment default
+# ---------------------------------------------------------------------------
+
+
+def test_effective_budget_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(None) == 2000
+
+
+def test_effective_budget_prefers_user_override(monkeypatch):
+    """Top-ups raise the per-user value; it must win over the default."""
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(6000) == 6000
+
+
+def test_effective_budget_user_zero_disables_the_cap(monkeypatch):
+    """An admin release sets 0 — that user is no longer metered."""
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(0) == 0
+
+
+def test_effective_budget_zero_when_deployment_disabled(monkeypatch):
+    """A per-user value can't switch metering on where it's globally off."""
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    assert trial_budget.effective_budget(5000) == 0
+
+
+# ---------------------------------------------------------------------------
+# get_trial_usage — the meter's data source
+# ---------------------------------------------------------------------------
+
+
+async def test_usage_disabled_for_non_trial_user(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=False, trial_token_budget=None)
+    )
+    assert usage["enabled"] is False
+    assert usage["budget"] == 0
+
+
+async def test_usage_reports_remaining_and_percent(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=1500))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=None)
+    )
+    assert usage == {
+        "enabled": True,
+        "budget": 2000,
+        "used": 1500,
+        "remaining": 500,
+        "percent": 75,
+    }
+
+
+async def test_usage_clamps_an_overshoot(monkeypatch):
+    """The last operation can run past the ceiling; the meter must not lie."""
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2400))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=None)
+    )
+    assert usage["remaining"] == 0
+    assert usage["percent"] == 100
+
+
+async def test_usage_uses_the_topped_up_budget(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2000))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=6000)
+    )
+    assert usage["budget"] == 6000
+    assert usage["remaining"] == 4000
+
+
+async def test_check_async_respects_a_topped_up_budget(monkeypatch):
+    """A user who topped up is under budget again and must not be blocked."""
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2500))
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=4000)
+    with patch("app.models.user.User", fake_model(find_one_result=user)):
+        await trial_budget.check_async("u-1")  # no raise
+
+
+# ---------------------------------------------------------------------------
 # check_async
 # ---------------------------------------------------------------------------
 
@@ -71,7 +158,7 @@ async def test_check_async_ignores_regular_users(monkeypatch):
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     used = AsyncMock(return_value=999_999)
     monkeypatch.setattr(trial_budget, "tokens_used_async", used)
-    user = SimpleNamespace(is_demo_user=False)
+    user = SimpleNamespace(is_demo_user=False, trial_token_budget=None)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         await trial_budget.check_async("u-1")
     used.assert_not_awaited()
@@ -82,7 +169,7 @@ async def test_check_async_allows_under_budget_trial_user(monkeypatch):
     monkeypatch.setattr(
         trial_budget, "tokens_used_async", AsyncMock(return_value=999)
     )
-    user = SimpleNamespace(is_demo_user=True)
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=None)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         await trial_budget.check_async("u-1")
 
@@ -92,7 +179,7 @@ async def test_check_async_raises_at_budget(monkeypatch):
     monkeypatch.setattr(
         trial_budget, "tokens_used_async", AsyncMock(return_value=1000)
     )
-    user = SimpleNamespace(is_demo_user=True)
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=None)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         with pytest.raises(TrialBudgetExceededError) as exc:
             await trial_budget.check_async("u-1")
@@ -124,7 +211,7 @@ def _sync_db(*, user_doc, total: int):
 
 def test_check_sync_raises_at_budget(monkeypatch):
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
-    db = _sync_db(user_doc={"is_demo_user": True}, total=2000)
+    db = _sync_db(user_doc={"is_demo_user": True, "trial_token_budget": None}, total=2000)
     with patch("app.tasks.get_sync_db", return_value=db):
         with pytest.raises(TrialBudgetExceededError):
             trial_budget.check_sync("u-1")
@@ -132,7 +219,7 @@ def test_check_sync_raises_at_budget(monkeypatch):
 
 def test_check_sync_ignores_regular_users(monkeypatch):
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
-    db = _sync_db(user_doc={"is_demo_user": False}, total=2000)
+    db = _sync_db(user_doc={"is_demo_user": False, "trial_token_budget": None}, total=2000)
     with patch("app.tasks.get_sync_db", return_value=db):
         trial_budget.check_sync("u-1")
     db.llm_usage.aggregate.assert_not_called()

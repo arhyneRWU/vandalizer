@@ -6,6 +6,7 @@ import type {
   FeedbackInfo,
   TrialEndInfo,
   TrialExtensionResult,
+  TrialUsage,
   DemoAdminStats,
   DemoApplication,
   PostExperienceResponseAdmin,
@@ -60,6 +61,11 @@ export function requestTrialExtension(token: string, notes?: Record<string, unkn
     method: 'POST',
     body: JSON.stringify({ notes: notes ?? null }),
   })
+}
+
+/** The signed-in user's trial token balance (`enabled: false` → render nothing). */
+export function getTrialUsage() {
+  return apiFetch<TrialUsage>('/api/demo/trial-usage')
 }
 
 // ---------------------------------------------------------------------------
