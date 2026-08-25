@@ -11,29 +11,6 @@ export interface SurveyField {
   section?: string
 }
 
-export interface DemoSignupRequest {
-  name: string
-  title: string
-  email: string
-  organization: string
-  questionnaire_responses: Record<string, unknown>
-}
-
-export interface DemoSignupResponse {
-  uuid: string
-  waitlist_position: number
-  message: string
-}
-
-export interface WaitlistStatusResponse {
-  uuid: string
-  status: string
-  waitlist_position: number | null
-  estimated_wait: string | null
-  /** The activation/resend email failed — steer the user to the resend button. */
-  activation_email_failed?: boolean
-}
-
 export interface PostExperienceRequest {
   responses: Record<string, unknown>
 }

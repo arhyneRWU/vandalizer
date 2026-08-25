@@ -269,27 +269,72 @@ async def test_verification_email_skipped_when_already_verified():
 # ---------------------------------------------------------------------------
 
 
-async def test_migration_marks_existing_trials_verified():
-    """Retroactively cutting off AI for people mid-trial would be a worse
-    failure than the narrow abuse the gate exists to stop."""
-    legacy = SimpleNamespace(
+def _trial_user(**overrides) -> SimpleNamespace:
+    user = SimpleNamespace(
         user_id="u-1", email="ada@example.edu", name="Ada",
         is_demo_user=True, demo_status="active", demo_expires_at=None,
         trial_token_budget=2_000_000, email_verified=False,
     )
-    legacy.save = AsyncMock()
+    for key, value in overrides.items():
+        setattr(user, key, value)
+    user.save = AsyncMock()
+    return user
 
+
+async def _sweep(user, *, linked=True):
+    apps = [SimpleNamespace(user_id="u-1")] if linked else []
+    cls = fake_model(apps)
+    if not linked:
+        # The unlinked path mints an application, so the stand-in needs a
+        # constructor as well as the query methods.
+        def _init(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+            self.insert = AsyncMock()
+            self.save = AsyncMock()
+
+        cls.__init__ = _init
+        cls.find_one = AsyncMock(return_value=None)
     with (
-        patch.object(demo_service, "User", fake_model([legacy])),
-        patch.object(
-            demo_service, "DemoApplication",
-            fake_model([SimpleNamespace(user_id="u-1")]),
-        ),
+        patch.object(demo_service, "User", fake_model([user])),
+        patch.object(demo_service, "DemoApplication", cls),
         patch.object(trial_budget, "_budget", lambda: 2_000_000),
     ):
-        migrated = await demo_service._adopt_clock_era_trial_users(
+        return await demo_service._adopt_clock_era_trial_users(
             datetime.datetime.now(datetime.timezone.utc)
         )
 
-    assert migrated == 1
+
+async def test_migration_marks_clock_era_trials_verified():
+    """Retroactively cutting off AI for people mid-trial would be a worse
+    failure than the narrow abuse the gate exists to stop.
+
+    A clock-era account is one that still carries an expiry.
+    """
+    legacy = _trial_user(
+        demo_expires_at=datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc),
+    )
+    assert await _sweep(legacy) == 1
     assert legacy.email_verified is True
+    assert legacy.demo_expires_at is None  # clock retired in the same pass
+
+
+async def test_migration_grandfathers_users_that_never_got_an_application():
+    """The other clock-era population: registration once set only the User
+    flags, so these have no DemoApplication to link."""
+    orphan = _trial_user()
+    await _sweep(orphan, linked=False)
+    assert orphan.email_verified is True
+
+
+async def test_migration_does_not_verify_a_signup_made_under_the_token_model():
+    """The gate would disarm itself otherwise.
+
+    This sweep runs hourly, not once at deploy. A new signup has no expiry and
+    a linked application, so an unbounded grandfather clause would verify
+    every account that never clicked its link at the next tick — and the
+    feature would be decorative within the hour.
+    """
+    fresh = _trial_user()  # no expiry, application linked — the new shape
+    await _sweep(fresh)
+    assert fresh.email_verified is False

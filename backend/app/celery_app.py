@@ -33,10 +33,6 @@ celery.conf.task_routes = {
 }
 
 celery.conf.beat_schedule = {
-    "demo-process-waitlist": {
-        "task": "tasks.demo.process_waitlist",
-        "schedule": crontab(minute="*/5"),
-    },
     # Trial token lifecycle: running-low warnings, then exhaustion. Hourly is
     # for the *emails* only — the spend gate itself is enforced live at the
     # metering chokepoint, so nothing overspends between sweeps.
@@ -130,7 +126,7 @@ celery.conf.beat_schedule = {
 }
 
 if not settings.enable_trial_system:
-    for _key in ("demo-process-waitlist", "demo-sweep-budgets"):
+    for _key in ("demo-sweep-budgets",):
         celery.conf.beat_schedule.pop(_key, None)
 
 # Anonymous deployment heartbeat — always scheduled; the task resolves the

@@ -1,8 +1,5 @@
 import { apiFetch } from './client'
 import type {
-  DemoSignupRequest,
-  DemoSignupResponse,
-  WaitlistStatusResponse,
   FeedbackInfo,
   TrialEndInfo,
   TrialExtensionResult,
@@ -16,20 +13,9 @@ import type {
 // Public endpoints (no auth required)
 // ---------------------------------------------------------------------------
 
-export function submitDemoApplication(data: DemoSignupRequest) {
-  return apiFetch<DemoSignupResponse>('/api/demo/apply', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  })
-}
-
-export function getWaitlistStatus(uuid: string) {
-  return apiFetch<WaitlistStatusResponse>(`/api/demo/status/${uuid}`)
-}
-
 export interface ResendResult {
   ok: boolean
-  status: 'sent' | 'send_failed' | 'pending' | 'expired' | 'not_found'
+  status: 'sent' | 'send_failed' | 'pending' | 'exhausted' | 'not_found'
   message: string
   email?: string | null
   feedback_token?: string | null

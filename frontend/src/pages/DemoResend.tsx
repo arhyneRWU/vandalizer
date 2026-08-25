@@ -30,8 +30,8 @@ export default function DemoResend() {
       .finally(() => setLoading(false))
   }, [uuid])
 
-  // Trial's over → send them to the warm renewal screen.
-  if (result?.status === 'expired' && result.feedback_token) {
+  // Out of tokens → send them to the warm top-up screen.
+  if (result?.status === 'exhausted' && result.feedback_token) {
     return <Navigate to="/demo/trial-end" search={{ token: result.feedback_token }} />
   }
 

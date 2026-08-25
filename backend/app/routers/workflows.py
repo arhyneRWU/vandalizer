@@ -17,7 +17,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app.dependencies import get_api_key_user, get_current_user
-from app.exceptions import TrialBudgetExceededError
+from app.exceptions import TrialSpendBlockedError
 from app.models.user import User
 from app.services import access_control
 from app.services.access_control import get_authorized_search_set, get_authorized_workflow
@@ -1253,7 +1253,10 @@ async def improve_prompt_endpoint(
             sample_input=body.sample_input,
             user_id=user.user_id,
         )
-    except TrialBudgetExceededError:
+    except TrialSpendBlockedError:
+        # Let the AppError handler answer with the gate's own status and
+        # message; wrapping it in a 502 would report a trial limit as a
+        # provider outage.
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to generate suggestion: {exc}")
