@@ -21,7 +21,11 @@ from __future__ import annotations
 import datetime
 import logging
 
-from app.exceptions import TrialBudgetExceededError, TrialUnverifiedError
+from app.exceptions import (
+    TrialBudgetExceededError,
+    TrialSpendBlockedError,
+    TrialUnverifiedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +251,7 @@ async def check_async(user_id: str | None) -> None:
         used = await tokens_used_async(user_id)
         over_budget = used >= budget
         fleet_paused = False if over_budget else await _fleet_paused_async()
-    except (TrialUnverifiedError, TrialBudgetExceededError):
+    except TrialSpendBlockedError:
         raise
     except Exception as e:
         logger.error("Trial budget check failed for %s: %s", user_id, e)
@@ -285,7 +289,7 @@ def check_sync(user_id: str | None) -> None:
         used = int(rows[0]["total"]) if rows else 0
         over_budget = used >= budget
         fleet_paused = False if over_budget else _fleet_paused_sync()
-    except (TrialUnverifiedError, TrialBudgetExceededError):
+    except TrialSpendBlockedError:
         raise
     except Exception as e:
         logger.error("Trial budget check failed for %s: %s", user_id, e)

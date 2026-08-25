@@ -273,9 +273,9 @@ def _classify_stream_error(exc: BaseException) -> tuple[str, str]:
 
     # Trial lifecycle events (out of tokens, unconfirmed address, fleet pause)
     # — expected states with actionable messages, not bugs.
-    from app.exceptions import TrialBudgetExceededError, TrialUnverifiedError
+    from app.exceptions import TrialSpendBlockedError
 
-    if isinstance(exc, (TrialBudgetExceededError, TrialUnverifiedError)):
+    if isinstance(exc, TrialSpendBlockedError):
         return "warning", exc.message
 
     # Upstream LLM context window exceeded — user-input issue, not a bug.
