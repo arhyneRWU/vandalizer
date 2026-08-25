@@ -37,6 +37,7 @@ def _settings(**overrides) -> SimpleNamespace:
 
 
 async def test_unverified_trial_user_cannot_spend(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     user = SimpleNamespace(
         is_demo_user=True, trial_token_budget=None, email_verified=False
@@ -54,6 +55,7 @@ async def test_unverified_trial_user_cannot_spend(monkeypatch):
 
 
 async def test_verified_trial_user_under_budget_passes(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=10))
     monkeypatch.setattr(
@@ -68,6 +70,7 @@ async def test_verified_trial_user_under_budget_passes(monkeypatch):
 
 async def test_verification_never_gates_a_regular_user(monkeypatch):
     """Staff arrive by bootstrap, invite, or SSO — never asked to confirm."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     user = SimpleNamespace(
         is_demo_user=False, trial_token_budget=None, email_verified=False
@@ -77,6 +80,7 @@ async def test_verification_never_gates_a_regular_user(monkeypatch):
 
 
 def test_unverified_trial_user_cannot_spend_sync(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     db = MagicMock()
     db.user.find_one.return_value = {
@@ -104,6 +108,7 @@ def test_chat_surfaces_unverified_as_a_warning():
 
 
 async def test_fleet_pause_blocks_a_user_who_is_personally_under_budget(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=10))
     monkeypatch.setattr(
@@ -122,6 +127,7 @@ async def test_fleet_pause_blocks_a_user_who_is_personally_under_budget(monkeypa
 async def test_personal_budget_message_wins_over_the_fleet_message(monkeypatch):
     """Someone out of their own tokens gets the top-up message, which is the
     one they can act on — not the fleet notice."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
     monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=5000))
     fleet = AsyncMock(return_value=True)
@@ -338,3 +344,94 @@ async def test_migration_does_not_verify_a_signup_made_under_the_token_model():
     fresh = _trial_user()  # no expiry, application linked — the new shape
     await _sweep(fresh)
     assert fresh.email_verified is False
+
+
+# ---------------------------------------------------------------------------
+# The three gates are independent
+#
+# They answer different questions — "is this address real", "has this person
+# had their share", "can the deployment afford this month" — so turning one
+# off must not turn the others off. TRIAL_TOKEN_BUDGET=0 previously
+# short-circuited the whole check, silently disabling verification and the
+# fleet ceiling along with the per-account cap.
+# ---------------------------------------------------------------------------
+
+
+async def test_uncapped_budget_still_requires_verification(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)  # per-account uncapped
+    user = SimpleNamespace(
+        is_demo_user=True, trial_token_budget=None, email_verified=False
+    )
+    with patch("app.models.user.User", fake_model(find_one_result=user)):
+        with pytest.raises(TrialUnverifiedError):
+            await trial_budget.check_async("u-1")
+
+
+async def test_uncapped_budget_still_honors_the_fleet_ceiling(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    monkeypatch.setattr(
+        trial_budget, "_fleet_paused_async", AsyncMock(return_value=True)
+    )
+    used = AsyncMock(return_value=0)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", used)
+    user = SimpleNamespace(
+        is_demo_user=True, trial_token_budget=None, email_verified=True
+    )
+    with patch("app.models.user.User", fake_model(find_one_result=user)):
+        with pytest.raises(TrialBudgetExceededError) as exc:
+            await trial_budget.check_async("u-1")
+
+    assert exc.value.message == trial_budget.FLEET_PAUSED_MESSAGE
+    # No per-account ledger read when there is no per-account cap to compare to.
+    used.assert_not_awaited()
+
+
+async def test_uncapped_and_verified_and_fleet_ok_passes(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    monkeypatch.setattr(
+        trial_budget, "_fleet_paused_async", AsyncMock(return_value=False)
+    )
+    user = SimpleNamespace(
+        is_demo_user=True, trial_token_budget=None, email_verified=True
+    )
+    with patch("app.models.user.User", fake_model(find_one_result=user)):
+        await trial_budget.check_async("u-1")  # no raise
+
+
+def test_uncapped_budget_still_requires_verification_sync(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    db = MagicMock()
+    db.user.find_one.return_value = {
+        "is_demo_user": True, "trial_token_budget": None, "email_verified": False,
+    }
+    with patch("app.tasks.get_sync_db", return_value=db):
+        with pytest.raises(TrialUnverifiedError):
+            trial_budget.check_sync("u-1")
+
+
+async def test_trial_system_off_disables_every_gate(monkeypatch):
+    """The master switch is the one thing that turns all of them off."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: False)
+    fleet = AsyncMock(return_value=True)
+    monkeypatch.setattr(trial_budget, "_fleet_paused_async", fleet)
+    users = fake_model()
+    with patch("app.models.user.User", users):
+        await trial_budget.check_async("u-1")  # no raise
+    users.find_one.assert_not_awaited()
+    fleet.assert_not_awaited()
+
+
+async def test_usage_reports_verification_even_when_uncapped(monkeypatch):
+    """The banner reads this; hiding it would leave the gate silent."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True,
+                        trial_token_budget=None, email_verified=False)
+    )
+    assert usage["enabled"] is False  # no meter to draw
+    assert usage["email_verified"] is False  # but the gate is still on
