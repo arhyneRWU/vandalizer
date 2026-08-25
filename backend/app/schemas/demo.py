@@ -69,6 +69,8 @@ class TrialUsageResponse(BaseModel):
     used: int
     remaining: int
     percent: int
+    # False means AI features are gated until the address is confirmed.
+    email_verified: bool = True
 
 
 class TrialExtensionRequest(BaseModel):

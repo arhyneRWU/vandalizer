@@ -218,6 +218,37 @@ def waitlist_confirmation_email(name: str, position: int, frontend_url: str, sta
     return subject, html
 
 
+def verify_email_email(
+    name: str, magic_link: str, budget_tokens: int | None = None
+) -> tuple[str, str]:
+    """Returns (subject, html_body) asking a new signup to confirm their address.
+
+    Sent at registration on a trial deployment. Confirming is what unlocks AI
+    features — and because the link signs them in, the one click both verifies
+    the address and gets them back to the workspace.
+    """
+    subject = "Confirm your email to start using Vandalizer"
+    allowance = (
+        f" Your account includes <span class=\"highlight\">{_fmt_tokens(budget_tokens)} AI tokens</span>,"
+        " with no time limit."
+        if budget_tokens
+        else ""
+    )
+    html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
+    <div class="container"><div class="card">
+      <div class="logo">Vandalizer</div>
+      <h1>One click and you're in</h1>
+      <p>Hi {name}, welcome to Vandalizer. Confirm this email address to switch on
+         the AI features — extraction, workflows, and chat over your documents.{allowance}</p>
+      <p style="margin-top:24px"><a class="btn" href="{magic_link}">Confirm my email</a></p>
+      <p style="font-size:13px;color:#6b7280;margin-top:16px">The link signs you
+         in too, so there's nothing else to do. You can browse your workspace
+         before confirming; AI features wait until you do.</p>
+      <div class="footer">Vandalizer</div>
+    </div></div></body></html>"""
+    return subject, html
+
+
 _CODE_STYLE = (
     "font-family:'SF Mono',Monaco,Consolas,'Courier New',monospace;"
     "background:#0a0a0a;color:#fff;padding:3px 8px;border-radius:4px;"

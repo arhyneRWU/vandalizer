@@ -1,9 +1,10 @@
 """Demo waitlist API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.config import Settings
 from app.dependencies import get_current_user, get_settings
+from app.rate_limit import limiter
 from app.models.user import User
 from app.schemas.demo import (
     AdminAddDemoUserRequest,
@@ -164,6 +165,34 @@ async def trial_usage(user: User = Depends(get_current_user)):
     from app.services import trial_budget
 
     return TrialUsageResponse(**await trial_budget.get_trial_usage(user))
+
+
+@router.post("/resend-verification")
+@limiter.limit("3/minute")
+async def resend_verification(
+    request: Request,
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Re-send the confirm-your-email link to the signed-in trial user.
+
+    Always 200 with an `ok` flag: the caller is already authenticated, so
+    there's nothing to enumerate, and an already-verified account is a
+    no-op success rather than an error.
+    """
+    if not user.is_demo_user or user.email_verified:
+        return {"ok": True, "already_verified": True}
+
+    from app.models.demo import DemoApplication
+
+    app = await DemoApplication.find_one(DemoApplication.user_id == user.user_id)
+    if not app:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No trial application found for this account.",
+        )
+    sent = await demo_service.send_verification_email(user, app, settings)
+    return {"ok": sent, "already_verified": False}
 
 
 # ---------------------------------------------------------------------------
