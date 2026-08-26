@@ -6,6 +6,7 @@ import {
   type KBValidationResult,
   type KBValidationDetail,
 } from '../../api/knowledge'
+import { explainKBScore } from './kbScoreFormula'
 
 interface Props {
   kbReady: boolean
@@ -197,16 +198,30 @@ function CertifiedQualityCard({ run }: { run: KBValidationResult }) {
   const bd = run.score_breakdown
   const penalized = !!bd && bd.sample_size_penalty > 0
   const needed = bd?.test_cases_needed ?? 0
+  const { components } = explainKBScore(run)
   return (
     <div style={{
       padding: 12, marginBottom: 10, backgroundColor: '#1a1f2e',
       border: `1px solid ${c.border}`, borderRadius: 6,
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-        <span style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: 0.5 }}>Quality</span>
+        <span style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: 0.5 }}>Overall quality</span>
         <span style={{ fontSize: 22, fontWeight: 700, color: c.text }}>
           {tierLabel} — {Math.round(run.score)}%
         </span>
+      </div>
+      {/* The formula is printed, not tucked in a tooltip: this number is a
+          composite and was being read as the judge's answer accuracy. */}
+      <div style={{ fontSize: 11, color: '#aaa', lineHeight: 1.6, marginTop: 4 }}>
+        A weighted composite, not answer accuracy on its own:{' '}
+        {components.map((comp, i) => (
+          <span key={comp.key} style={{ whiteSpace: 'nowrap' }}>
+            {i > 0 && <span style={{ color: '#666' }}> + </span>}
+            <span style={{ color: '#888' }}>{Math.round(comp.weight * 100)}% ×</span>{' '}
+            <span style={{ color: comp.key === 'judge' ? '#22c55e' : '#ccc' }}>{comp.label}</span>{' '}
+            <span style={{ color: '#ddd', fontWeight: 600 }}>{Math.round(comp.value)}%</span>
+          </span>
+        ))}
       </div>
       {penalized && bd && (
         <div style={{ fontSize: 11, color: '#fbbf24', lineHeight: 1.5, marginTop: 4 }}>
@@ -225,12 +240,18 @@ function LiftCard({ run }: { run: KBValidationResult }) {
   const b = run.retrieval_precision.avg_baseline_score
   const lift = run.retrieval_precision.avg_lift
   if (j == null) return null
+  const n = run.retrieval_precision.num_queries_judged
 
   return (
     <div style={{
       padding: 12, backgroundColor: '#1a1f2e',
       border: '1px solid #2e3a52', borderRadius: 6,
     }}>
+      {/* This is the number to use for "how accurate are the answers" — the
+          judge's mean score, before it is blended into the overall composite. */}
+      <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+        Answer accuracy — judge score averaged over {n ?? '?'} question{n === 1 ? '' : 's'}
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
         {b != null && (
           <Stat label="Without KB" value={b * 100} color="#888" />

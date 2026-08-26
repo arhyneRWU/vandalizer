@@ -1138,3 +1138,68 @@ async def test_every_detail_row_records_what_it_scored_against():
     ):
         assert by_uuid[uuid]["expected_answer"] == answer, f"{uuid} lost its expected answer"
         assert by_uuid[uuid]["external_id"] == ext, f"{uuid} lost its external id"
+
+
+# ---------------------------------------------------------------------------
+# Overall score composition — the reported score is a composite, not the
+# judge's answer accuracy, and the breakdown must say so.
+# ---------------------------------------------------------------------------
+
+
+def test_kb_score_components_judged_run_uses_all_four_signals():
+    from app.services.kb_validation_service import kb_score_components
+
+    out = kb_score_components(
+        avg_judge_score=0.836,
+        num_queries_judged=95,
+        avg_precision=1.0,
+        source_health_ratio=1.0,
+        chunk_coverage_ratio=1.0,
+        num_test_queries=95,
+    )
+    # 0.4*83.6 + 0.25*100 + 0.2*100 + 0.15*100 = 93.44 — the ticket's exact
+    # shape: an 83.6% judge average reported as a low-90s overall score.
+    assert round(out["raw_score"], 1) == 93.4
+    assert [c["key"] for c in out["components"]] == [
+        "judge", "retrieval_precision", "source_health", "chunk_coverage",
+    ]
+    assert [c["weight"] for c in out["components"]] == [0.40, 0.25, 0.20, 0.15]
+    assert out["components"][0]["value"] == 83.6
+    assert out["components"][0]["label"] == "answer accuracy (judge)"
+    assert out["formula"] == (
+        "overall = 40% × answer accuracy (judge) + 25% × retrieval precision"
+        " + 20% × source health + 15% × chunk coverage"
+    )
+
+
+def test_kb_score_components_retrieval_only_when_nothing_was_judged():
+    from app.services.kb_validation_service import kb_score_components
+
+    out = kb_score_components(
+        avg_judge_score=None,
+        num_queries_judged=0,
+        avg_precision=0.8,
+        source_health_ratio=1.0,
+        chunk_coverage_ratio=0.5,
+        num_test_queries=4,
+    )
+    assert round(out["raw_score"], 1) == 80.0  # 0.5*80 + 0.3*100 + 0.2*50
+    assert [c["key"] for c in out["components"]] == [
+        "retrieval_precision", "source_health", "chunk_coverage",
+    ]
+    assert "answer accuracy" not in out["formula"]
+
+
+def test_kb_score_components_no_queries_scores_health_and_coverage():
+    from app.services.kb_validation_service import kb_score_components
+
+    out = kb_score_components(
+        avg_judge_score=None,
+        num_queries_judged=None,
+        avg_precision=None,
+        source_health_ratio=0.5,
+        chunk_coverage_ratio=1.0,
+        num_test_queries=0,
+    )
+    assert round(out["raw_score"], 1) == 70.0  # 0.6*50 + 0.4*100
+    assert out["formula"] == "overall = 60% × source health + 40% × chunk coverage"
