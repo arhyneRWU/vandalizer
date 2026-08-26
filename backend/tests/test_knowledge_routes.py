@@ -346,6 +346,7 @@ class TestKnowledgeListEndpoints:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
         ):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
@@ -383,6 +384,7 @@ class TestKnowledgeListEndpoints:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
         ):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
@@ -431,6 +433,7 @@ class TestKnowledgeListEndpoints:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
             patch("app.routers.knowledge.VerifiedItemMetadata") as MockMeta,
         ):
             MockUser.find_one = AsyncMock(return_value=user)
@@ -483,6 +486,7 @@ class TestKnowledgeListEndpoints:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
             patch("app.routers.knowledge.VerifiedItemMetadata") as MockMeta,
         ):
             MockUser.find_one = AsyncMock(return_value=user)
@@ -526,6 +530,7 @@ class TestKnowledgeListEndpoints:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
         ):
             MockUser.find_one = AsyncMock(return_value=user)
             mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
@@ -631,6 +636,7 @@ class TestKnowledgeCRUD:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
             # SmartDocument.find requires Beanie initialization which the
             # ASGI test client skips; stub the title lookup helper directly.
             patch(
@@ -687,6 +693,7 @@ class TestKnowledgeCRUD:
             patch("app.routers.knowledge.organization_service") as mock_org,
             patch("app.routers.knowledge.ValidationRun") as MockRun,
             patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
             patch(
                 "app.routers.knowledge._resolve_document_titles",
                 new_callable=AsyncMock,
@@ -2768,3 +2775,96 @@ class TestValidationRunExport:
 
         assert resp.status_code == 404
         MockRun.find_one.assert_not_awaited()
+
+
+class TestKnowledgeOptimizationStatus:
+    """The Optimized chip's full story rides on the v2 list and the detail."""
+
+    @pytest.mark.asyncio
+    async def test_list_v2_carries_optimization_status(self, client):
+        from app.services.kb_optimization_status import OptimizationStatus
+
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+        status = OptimizationStatus(
+            state="stale",
+            applied_at=datetime.datetime(2026, 8, 1, 12, 0, tzinfo=datetime.timezone.utc),
+            applied_run_uuid="run-1",
+            last_run_at=datetime.datetime(2026, 8, 1, 13, 0, tzinfo=datetime.timezone.utc),
+            last_run_uuid="run-1",
+            tuned_keys=["k"],
+            stale=True,
+            stale_reasons=["Sources changed since the settings were tuned: 5 added (had 50 sources)."],
+            sources_at_run=50, sources_added=5,
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch(
+                "app.routers.knowledge.optimization_status_by_kb",
+                AsyncMock(return_value={"kb-uuid-1": status}),
+            ) as loader,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.list_knowledge_bases = AsyncMock(return_value=([kb], 1))
+            mock_svc.list_references = AsyncMock(return_value=[])
+            mock_svc.get_kb_usage_map = AsyncMock(return_value={})
+            MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+            MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+
+            resp = await client.get(
+                "/api/knowledge/list/v2?scope=mine", cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        loader.assert_awaited_once_with([kb])
+        item = resp.json()["items"][0]
+        assert item["optimization"] == {
+            "state": "stale",
+            "applied_at": "2026-08-01T12:00:00+00:00",
+            "applied_run_uuid": "run-1",
+            "last_run_at": "2026-08-01T13:00:00+00:00",
+            "last_run_uuid": "run-1",
+            "tuned_keys": ["k"],
+            "stale": True,
+            "stale_reasons": ["Sources changed since the settings were tuned: 5 added (had 50 sources)."],
+            "sources_at_run": 50, "sources_added": 5, "sources_removed": 0,
+            "queries_at_run": 0, "queries_added": 0, "queries_removed": 0, "queries_edited": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_list_v2_omits_optimization_when_there_is_nothing_to_say(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        kb = _mock_kb()
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "user1", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.knowledge.svc") as mock_svc,
+            patch("app.routers.knowledge.organization_service") as mock_org,
+            patch("app.routers.knowledge.ValidationRun") as MockRun,
+            patch("app.routers.knowledge.KBOptimizationRun") as MockOpt,
+            patch("app.routers.knowledge.optimization_status_by_kb", AsyncMock(return_value={})),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            mock_org.get_user_org_ancestry = AsyncMock(return_value=[])
+            mock_svc.list_knowledge_bases = AsyncMock(return_value=([kb], 1))
+            mock_svc.list_references = AsyncMock(return_value=[])
+            mock_svc.get_kb_usage_map = AsyncMock(return_value={})
+            MockRun.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+            MockOpt.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
+
+            resp = await client.get(
+                "/api/knowledge/list/v2?scope=mine", cookies=cookies, headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["optimization"] is None
