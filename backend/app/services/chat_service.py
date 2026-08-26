@@ -1142,8 +1142,17 @@ _QUOTED_PHRASE_RE = re.compile("[\"“]([^\"“”\n]{3,60})[\"”]")
 # after a "what/which is/are" frame. "What are the three field sites?" -> "field
 # sites". Only this frame fires, and only when two content words survive the
 # lead-in strip, so ordinary prose and open-ended requests pin nothing.
+#
+# The frame has to open a sentence — start of message, or after a sentence
+# boundary, optionally behind a connective ("So, what is…"). Unanchored, the
+# same words match a relative clause mid-sentence ("summarize the section
+# which is most important…") and pin a junk bigram; on a small knowledge base,
+# where the hit cut-off can never fire, that spends up to half the lane on
+# chunks containing it.
 _ASKED_PHRASE_RE = re.compile(
-    r"\bwh(?:at|ich)\s+(?:is|are|was|were)\b([^?.,;:!\n]{0,60})",
+    r"(?:^|[.?!;:\n])\s*"
+    r"(?:(?:and|so|also|then|now|but|ok|okay)\b,?\s*)?"
+    r"wh(?:at|ich)\s+(?:is|are|was|were)\b([^?.,;:!\n]{0,60})",
     re.IGNORECASE,
 )
 
@@ -1183,11 +1192,22 @@ _MAX_PIN_TERMS = 4
 # pool needs. Section numbers the user cited explicitly are exempt: those are a
 # deliberate lookup, however often the corpus repeats them.
 #
+# The count is of *exact* hits — chunks that pass the word-boundary filter —
+# not of the raw substring pool. ``$contains "SF-424"`` also matches every
+# "SF-424A" and "SF-424B" chunk, and counting those discarded the base form
+# from a packet stamped with its variants even when it had two genuine hits.
+#
 # Note what this does *not* protect: a flat count can only fire on a collection
 # big enough to reach it, so on a small knowledge base every term survives it.
 # That is why the phrase channel above has to be narrow on its own terms rather
 # than leaning on this.
 _MAX_PIN_TERM_HITS = 24
+
+# How many raw substring candidates to pull per lookup before the exact filter
+# runs. Wider than the hit cap because the pool is what the cap is measured
+# on after filtering: a base identifier buried under its own suffixed variants
+# needs room for its exact hits to be fetched at all.
+_PIN_FETCH_POOL = _MAX_PIN_TERM_HITS * 4 + 1
 
 
 def _extract_pin_terms(message: str) -> list[str]:
@@ -1316,8 +1336,7 @@ async def _retrieve_pinned_chunks(
         pooled: set = set()
         for variant in dict.fromkeys(variants):
             for r in await asyncio.to_thread(
-                dm.get_kb_chunks_containing, kb_uuid, variant,
-                _MAX_PIN_TERM_HITS + 1,
+                dm.get_kb_chunks_containing, kb_uuid, variant, _PIN_FETCH_POOL,
             ):
                 cid = r.get("chunk_id")
                 if cid is not None and cid in pooled:
@@ -1325,14 +1344,17 @@ async def _retrieve_pinned_chunks(
                 if cid is not None:
                     pooled.add(cid)
                 candidates.append(r)
-        if not is_section and len(candidates) > _MAX_PIN_TERM_HITS:
+        # Filter to exact hits *before* the boilerplate cut-off: the raw pool
+        # counts every superstring ("AA-11" for "AA-1", "SF-424A" for
+        # "SF-424"), and measuring that discarded terms with a handful of
+        # genuine hits.
+        matched = [r for r in candidates if exact.search(r.get("content") or "")]
+        if not is_section and len(matched) > _MAX_PIN_TERM_HITS:
             continue
         kept = 0
-        for r in _rank_pinned_chunks(candidates, exact):
+        for r in _rank_pinned_chunks(matched, exact):
             if kept >= limit_per_ref:
                 break
-            if not exact.search(r.get("content") or ""):
-                continue
             cid = r.get("chunk_id")
             if cid is not None and cid in seen:
                 continue
