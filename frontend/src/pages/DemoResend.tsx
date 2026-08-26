@@ -42,7 +42,7 @@ export default function DemoResend() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <Link
             to="/landing"
-            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
             className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />

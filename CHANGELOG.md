@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v4.11.1] - 2026-08-25
+
+### Fixed
+- **"Create your account" on the trial page landed on an empty page.** Trial v2 (v4.11.0) removed the waitlist form and made the landing page's register form the signup — but that form only rendered when the `password` auth method was on, and a trial deployment that had switched password sign-in off for its own staff (the waitlist never needed it) got a landing page with no form at all, so the button appeared to do nothing. `POST /api/auth/register` never gated on auth methods; the UI now matches it and shows the password block whenever the trial system is enabled. The CTA and the `/register` redirect also deep-link to `/landing?register=1`, which opens the block in register mode, instead of dropping a would-be signup on the login form with a small "Create account" toggle to find.
+
 ## [v4.11.0] - 2026-08-25
 
 ### Added

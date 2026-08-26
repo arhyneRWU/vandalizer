@@ -126,7 +126,7 @@ export default function DemoTrialEnd() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <Link
             to="/landing"
-            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
             className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -157,7 +157,7 @@ export default function DemoTrialEnd() {
               <p className="text-gray-400">{error}</p>
               <Link
                 to="/landing"
-                search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+                search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
                 className="inline-block mt-6 rounded-lg bg-white/10 px-6 py-3 font-bold text-white hover:bg-white/20 transition-colors"
               >
                 Go to Homepage

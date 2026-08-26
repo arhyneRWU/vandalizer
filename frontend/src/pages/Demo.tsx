@@ -101,7 +101,7 @@ export default function Demo() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <Link
             to="/landing"
-            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
             className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -146,7 +146,7 @@ export default function Demo() {
 
           <Link
             to="/landing"
-            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: '1' }}
             className="inline-flex items-center gap-2 rounded-lg bg-[#f1b300] px-8 py-4 text-lg font-bold text-black hover:bg-[#d49e00] transition-colors"
           >
             Create your account <ArrowRight className="w-5 h-5" />
