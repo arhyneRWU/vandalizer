@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Workflow pickers no longer truncate silently at 500.** The workflow list endpoint caps a page at 500 and reports the full match count beside it, but the project "Pin a tool" picker and the Automation dashboard read only the page: a user with more workflows than that got a list with some missing, no indication, and no way to reach them — the same failure the pagination envelope was added to fix, now at 500 instead of 100. Both surfaces now say "Showing N of M" whenever the page is short of the server's count (the pin picker also counted its own 30-chip cap silently), and both gain a search box that re-queries the server across every visible workflow rather than filtering the page in hand, so an item past the cut is reachable by name. The pin picker's other three lists (extractions, automations, knowledge bases) are narrowed by the same box locally.
+
 ## [v4.11.1] - 2026-08-25
 
 ### Fixed
