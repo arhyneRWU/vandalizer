@@ -82,6 +82,8 @@ RESULT_COLUMNS = [
     "retrieval_precision",
     "answer_match",
     "actual_answer",
+    "actual_answer_truncated",
+    "generation_truncated",
     "judge_score",
     "judge_verdict",
     "judge_confidence",
@@ -89,6 +91,8 @@ RESULT_COLUMNS = [
     "missing_facts",
     "hallucinated_facts",
     "baseline_answer",
+    "baseline_answer_truncated",
+    "baseline_generation_truncated",
     "baseline_score",
     "baseline_verdict",
     "lift",
@@ -144,6 +148,12 @@ def build_kb_validation_results_export(
             "retrieval_precision": det.get("precision"),
             "answer_match": det.get("answer_match"),
             "actual_answer": det.get("actual_answer") or "",
+            # Both flags are False for rows written before they existed: those
+            # runs stored at most 2,000 characters with no record of whether
+            # more was generated, so an older row of exactly 2,000 characters
+            # may be cut without saying so.
+            "actual_answer_truncated": bool(det.get("actual_answer_truncated")),
+            "generation_truncated": bool(det.get("generation_truncated")),
             "judge_score": judge.get("score"),
             "judge_verdict": judge.get("verdict") or "",
             "judge_confidence": judge.get("confidence"),
@@ -151,6 +161,8 @@ def build_kb_validation_results_export(
             "missing_facts": judge.get("missing_facts") or [],
             "hallucinated_facts": judge.get("hallucinated_facts") or [],
             "baseline_answer": det.get("baseline_answer") or "",
+            "baseline_answer_truncated": bool(det.get("baseline_answer_truncated")),
+            "baseline_generation_truncated": bool(det.get("baseline_generation_truncated")),
             "baseline_score": baseline.get("score"),
             "baseline_verdict": baseline.get("verdict") or "",
             "lift": det.get("lift"),

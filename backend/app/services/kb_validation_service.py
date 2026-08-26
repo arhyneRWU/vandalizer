@@ -14,7 +14,7 @@ from pydantic_ai import Agent
 from app.models.kb_test_query import KBTestQuery
 from app.models.knowledge import KnowledgeBase, KnowledgeBaseSource
 from app.services.document_manager import DocumentManager
-from app.services.llm_service import RAG_SYSTEM_PROMPT, get_agent_model
+from app.services.llm_service import RAG_SYSTEM_PROMPT, capture_truncation, get_agent_model
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +589,22 @@ async def _generate_baseline_answer(query: str, model_name: str) -> tuple[str, i
 # grounded answers got flagged as hallucinated.
 _JUDGE_CONTEXT_MAX_CHARS = 12000
 
+# How much of a generated answer the run's detail row keeps. The judge always
+# scores the full text; this bounds only what is persisted on the ValidationRun
+# and therefore what an export can show. The old cap was 2,000 characters —
+# short enough that a fifth of FCOI answers ended mid-word in the export with
+# no way to tell, which reads as "the judge scored a fragment". A row that
+# does hit this cap says so via ``actual_answer_truncated``.
+_STORED_ANSWER_MAX_CHARS = 50_000
+
+
+def _store_answer(answer: str | None) -> tuple[str, bool]:
+    """Return ``(stored_text, storage_truncated)`` for a generated answer."""
+    text = answer or ""
+    if len(text) <= _STORED_ANSWER_MAX_CHARS:
+        return text, False
+    return text[:_STORED_ANSWER_MAX_CHARS], True
+
 
 _KB_JUDGE_COMMON_TAIL = (
     "\nReturn ONLY JSON (no markdown, no extra text) with this shape:\n"
@@ -886,9 +902,13 @@ async def judge_test_queries(
     async def judge_one(tq) -> dict:
         async with sem:
             try:
-                kb_result = await _generate_kb_answer(
-                    kb_uuid, tq.query, model_name
-                )
+                # A model that stops at its output cap produces an answer the
+                # judge scores as incomplete — that is a property of the run,
+                # not of the KB, and the row has to say so.
+                with capture_truncation() as kb_truncations:
+                    kb_result = await _generate_kb_answer(
+                        kb_uuid, tq.query, model_name
+                    )
                 # Backward-compat: callers/mocks may return 2-tuple (legacy).
                 if len(kb_result) == 3:
                     actual_answer, retrieved, kb_tokens = kb_result
@@ -909,8 +929,10 @@ async def judge_test_queries(
                 baseline_judge = None
                 baseline_tokens = 0
                 lift = None
+                baseline_truncations: list[dict] = []
                 if include_baseline:
-                    bl = await _generate_baseline_answer(tq.query, model_name)
+                    with capture_truncation() as baseline_truncations:
+                        bl = await _generate_baseline_answer(tq.query, model_name)
                     if isinstance(bl, tuple):
                         baseline_answer, baseline_tokens = bl
                     else:  # legacy mock returning bare string
@@ -937,14 +959,24 @@ async def judge_test_queries(
                     + (int(baseline_judge.get("tokens_used", 0) or 0) if baseline_judge else 0)
                 )
 
+                stored_answer, answer_cut = _store_answer(actual_answer)
+                stored_baseline, baseline_cut = (
+                    _store_answer(baseline_answer) if baseline_answer is not None else (None, False)
+                )
                 return {
                     "query_uuid": getattr(tq, "uuid", ""),
                     "external_id": getattr(tq, "external_id", None) or "",
                     "expected_answer": getattr(tq, "expected_answer", None) or "",
                     "query": tq.query,
                     "category": getattr(tq, "category", None),
-                    "actual_answer": (actual_answer or "")[:2000],
-                    "baseline_answer": (baseline_answer or "")[:2000] if baseline_answer is not None else None,
+                    "actual_answer": stored_answer,
+                    # Storage cap hit: the judge saw more than this row holds.
+                    "actual_answer_truncated": answer_cut,
+                    # Model hit its output cap: the judge scored an incomplete answer.
+                    "generation_truncated": bool(kb_truncations),
+                    "baseline_answer": stored_baseline,
+                    "baseline_answer_truncated": baseline_cut,
+                    "baseline_generation_truncated": bool(baseline_truncations),
                     "judge": with_judge,
                     "baseline_judge": baseline_judge,
                     "lift": round(lift, 3) if lift is not None else None,
@@ -1138,7 +1170,8 @@ async def judge_baselines_only(
     async def one(tq) -> dict:
         async with sem:
             try:
-                bl = await _generate_baseline_answer(tq.query, model_name)
+                with capture_truncation() as baseline_truncations:
+                    bl = await _generate_baseline_answer(tq.query, model_name)
                 if isinstance(bl, tuple):
                     baseline_answer, baseline_tokens = bl
                 else:  # legacy mock returning bare string
@@ -1150,10 +1183,13 @@ async def judge_baselines_only(
                     model_name=model_name,
                     retrieved_context=None,
                 )
+                stored_baseline, baseline_cut = _store_answer(baseline_answer)
                 return {
                     "query_uuid": getattr(tq, "uuid", ""),
                     "query": tq.query,
-                    "baseline_answer": (baseline_answer or "")[:2000],
+                    "baseline_answer": stored_baseline,
+                    "baseline_answer_truncated": baseline_cut,
+                    "baseline_generation_truncated": bool(baseline_truncations),
                     "baseline_judge": baseline_judge,
                     "tokens_used": (
                         baseline_tokens

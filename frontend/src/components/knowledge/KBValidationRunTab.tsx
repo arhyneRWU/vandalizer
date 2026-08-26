@@ -353,11 +353,23 @@ function DetailRow({
       </button>
       {expanded && (
         <div style={{ padding: '8px 12px 12px 32px', borderTop: '1px solid #2e2e2e', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {detail.generation_truncated && (
+            <TruncationNote what="The with-KB answer" />
+          )}
           {detail.actual_answer && (
-            <Block label="With-KB answer" body={detail.actual_answer} />
+            <Block
+              label={detail.actual_answer_truncated ? 'With-KB answer (stored text cut; judge saw the full answer)' : 'With-KB answer'}
+              body={detail.actual_answer}
+            />
+          )}
+          {hasBaseline && detail.baseline_generation_truncated && (
+            <TruncationNote what="The baseline answer" />
           )}
           {hasBaseline && detail.baseline_answer && (
-            <Block label="Baseline answer (no KB)" body={detail.baseline_answer} />
+            <Block
+              label={detail.baseline_answer_truncated ? 'Baseline answer (no KB; stored text cut)' : 'Baseline answer (no KB)'}
+              body={detail.baseline_answer}
+            />
           )}
           {j?.reasoning && (
             <Block label="Judge reasoning" body={j.reasoning} muted />
@@ -379,6 +391,15 @@ function DetailRow({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function TruncationNote({ what }: { what: string }) {
+  return (
+    <div style={{ fontSize: 11, color: '#f59e0b' }} role="note">
+      {what} stopped at the model&apos;s output limit, so the judge scored an incomplete answer.
+      Raise “Response reserve (output tokens)” for this model under Admin → System Config → Models.
     </div>
   )
 }
