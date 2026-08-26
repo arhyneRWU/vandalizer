@@ -1,5 +1,27 @@
 export type KBScope = 'mine' | 'team' | 'verified' | 'reference'
 
+// What the "Optimized" chip means for a KB, from the v2 list / detail endpoint.
+//   applied   — tuned RAG settings are live in chat
+//   stale     — live, but sources or test questions changed materially since tuning
+//   available — a completed optimization has settings that were never applied
+export interface KBOptimizationStatus {
+  state: 'applied' | 'stale' | 'available'
+  applied_at?: string | null
+  applied_run_uuid?: string | null
+  last_run_at?: string | null
+  last_run_uuid?: string | null
+  tuned_keys?: string[]
+  stale: boolean
+  stale_reasons: string[]
+  sources_at_run?: number
+  sources_added?: number
+  sources_removed?: number
+  queries_at_run?: number
+  queries_added?: number
+  queries_removed?: number
+  queries_edited?: number
+}
+
 export interface KnowledgeBase {
   uuid: string
   title: string
@@ -32,6 +54,8 @@ export interface KnowledgeBase {
   // Set by KB Autovalidate's apply path
   has_optimized_config?: boolean
   optimized_config_set_at?: string | null
+  // Full story behind the chip (see KBOptimizationStatus); null when nothing to say.
+  optimization?: KBOptimizationStatus | null
   // AI-trust signals from the latest validation run. Scores are 0-1.
   last_validation_score?: number | null
   last_validation_baseline_score?: number | null

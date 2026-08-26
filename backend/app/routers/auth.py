@@ -171,13 +171,12 @@ async def register(
         )
 
     if settings.enable_trial_system:
-        from app.services.demo_service import TRIAL_DAYS
+        from app.services import demo_service
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        user.is_demo_user = True
-        user.demo_expires_at = now + datetime.timedelta(days=TRIAL_DAYS)
-        user.demo_status = "active"
-        await user.save()
+        # Mints an *active* DemoApplication alongside the User flags, so the
+        # expiry sweep, warning emails, and trial-end renewal cover
+        # self-registered users exactly like waitlist activations.
+        await demo_service.begin_self_serve_trial(user, settings)
 
     # If the user was signing up to accept a team invite, auto-accept it.
     # Only accepts when the registered email matches the invite's recipient
@@ -240,10 +239,11 @@ async def forgot_password(
 
     # A locked trial can't be recovered with a password — login rejects locked
     # accounts regardless of the password. Sending a reset link is a dead end, so
-    # steer them to the renewal screen instead.
+    # steer them to the top-up screen instead. (Only clock-era accounts are ever
+    # "locked"; token-metered trials go "exhausted", which stays signed-in.)
     if user.is_demo_user and user.demo_status == "locked":
         from app.models.demo import DemoApplication
-        from app.services.email_service import send_email, trial_expired_email
+        from app.services.email_service import send_email, trial_exhausted_email
 
         demo_app = await DemoApplication.find_one(
             DemoApplication.user_id == user.user_id
@@ -256,12 +256,12 @@ async def forgot_password(
                 f"{settings.frontend_url}/demo/trial-end"
                 f"?token={demo_app.post_questionnaire_token}"
             )
-            subject, html = trial_expired_email(
+            subject, html = trial_exhausted_email(
                 user.name or user.user_id, trial_end_url
             )
             await send_email(
                 user.email or email, subject, html, settings,
-                email_type="trial_expired",
+                email_type="trial_exhausted",
             )
         logger.info("Password reset: routed locked trial %s to renewal", user.user_id)
         return {"ok": True}
@@ -327,6 +327,8 @@ async def reset_password(
             detail="User not found.",
         )
 
+    # The reset link came from their inbox, so this proves the address too.
+    user.email_verified = True
     user.password_hash = hash_password(body.password)
     # Invalidate every outstanding session: a reset is the recovery path after a
     # suspected compromise, so any access/refresh token minted earlier (including
@@ -363,6 +365,12 @@ async def magic_login(
     user = await User.find_one(User.user_id == user_id_str)
     if not user:
         return RedirectResponse(url=f"{settings.frontend_url}/landing?error=invalid_link")
+
+    # Following an emailed one-time link proves control of the inbox — this is
+    # the primary way a trial account becomes verified (see trial_budget).
+    if not user.email_verified:
+        user.email_verified = True
+        await user.save()
 
     response = RedirectResponse(url=f"{settings.frontend_url}/")
     _set_tokens(response, user, settings)
@@ -472,10 +480,20 @@ async def update_profile(
     return await _user_response(user)
 
 
+def _email_prefs_response(prefs: dict | None) -> dict:
+    # Always return every known key so the settings UI never renders an
+    # undefined checkbox; missing keys default to enabled (opt-out model).
+    prefs = prefs or {}
+    return {
+        "onboarding": prefs.get("onboarding", True),
+        "nudges": prefs.get("nudges", True),
+    }
+
+
 @router.get("/email-preferences")
 async def get_email_preferences(user: User = Depends(get_current_user)):
     """Get the current user's email notification preferences."""
-    return user.email_preferences or {"onboarding": True, "nudges": True}
+    return _email_prefs_response(user.email_preferences)
 
 
 @router.put("/email-preferences")
@@ -490,7 +508,7 @@ async def update_email_preferences(
             prefs[key] = bool(body[key])
     user.email_preferences = prefs
     await user.save()
-    return prefs
+    return _email_prefs_response(prefs)
 
 
 @router.post("/account/delete/preflight")

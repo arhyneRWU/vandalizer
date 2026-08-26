@@ -17,7 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 from pydantic_ai import Agent, BinaryContent, NativeOutput
 
 from app.models.system_config import DEFAULT_EXTRACTION_CONFIG, _deep_merge
-from app.services.extraction_sources import SOURCE_KEY, resolve_entity_sources
+from app.services.extraction_sources import (
+    SOURCE_KEY,
+    resolve_entity_sources,
+    same_value as _same_value,
+)
 from app.services.llm_service import (
     build_thinking_model_settings,
     create_chat_agent,
@@ -82,6 +86,17 @@ PROMPT_VARIANTS: dict[str, "callable"] = {
 def _resolve_prompt(variant: str | None, source_label: str) -> str:
     fn = PROMPT_VARIANTS.get(variant or "default", _prompt_default)
     return fn(source_label)
+
+
+class ExtractionError(RuntimeError):
+    """An extraction attempt failed — LLM/provider error or unparseable output.
+
+    Raised instead of returning an empty result so callers mark the run as
+    FAILED. An empty list from the engine must mean "the model found nothing",
+    never "the call died": swallowing errors into ``[]`` produced runs marked
+    "completed" with every field null — a crash rendered as "not in document",
+    which is the most dangerous possible misreport for this product.
+    """
 
 
 class ExtractionEngine:
@@ -191,7 +206,7 @@ class ExtractionEngine:
                     self._resolve_sources(
                         doc_results,
                         texts[idx] if idx < len(texts) else "",
-                        (doc_metadata or []), idx,
+                        (doc_metadata or []), idx, meta_map,
                     )
                 all_results.extend(doc_results)
             return all_results
@@ -211,15 +226,18 @@ class ExtractionEngine:
                 capture_sources=capture_sources,
             )
             if doc_results and capture_sources:
-                self._resolve_sources(doc_results, doc_text, (doc_metadata or []), idx)
+                self._resolve_sources(doc_results, doc_text, (doc_metadata or []), idx, meta_map)
             all_results.extend(doc_results)
 
         return all_results
 
     @staticmethod
-    def _resolve_sources(entities: list, doc_text: str, doc_metadata: list[dict], idx: int) -> None:
+    def _resolve_sources(
+        entities: list, doc_text: str, doc_metadata: list[dict], idx: int,
+        field_meta: dict[str, dict] | None = None,
+    ) -> None:
         meta = doc_metadata[idx] if idx < len(doc_metadata) else {}
-        resolve_entity_sources(entities, doc_text or "", meta or {})
+        resolve_entity_sources(entities, doc_text or "", meta or {}, field_meta)
 
     def build_from_documents(self, doc_texts: list[str], model: str) -> dict | None:
         """Generate extraction entities from document text using LLM."""
@@ -472,18 +490,28 @@ class ExtractionEngine:
         # not the document — rely on pass 1's quotes instead.
         p2_capture = capture_sources and p2_content is content
 
-        if p2_structured:
-            final = self._extract_structured(
-                p2_content, keys, p2_model,
-                thinking_override=p2_thinking,
-                draft_hint=draft_hint,
-                allow_fallback=False,
-                meta_map=meta_map,
-                prompt_variant=prompt_variant,
-                capture_sources=p2_capture,
-            )
-        else:
-            final = self._extract_fallback_json(p2_content, keys, p2_model, thinking_override=p2_thinking, meta_map=meta_map, prompt_variant=prompt_variant, capture_sources=p2_capture)
+        # A pass-2 failure degrades to the pass-1 draft (logged) rather than
+        # failing the document — the draft is a complete extraction, and
+        # refinement is best-effort. A pass-1 failure above still propagates:
+        # with no draft there is nothing honest to return.
+        try:
+            if p2_structured:
+                final = self._extract_structured(
+                    p2_content, keys, p2_model,
+                    thinking_override=p2_thinking,
+                    draft_hint=draft_hint,
+                    allow_fallback=False,
+                    meta_map=meta_map,
+                    prompt_variant=prompt_variant,
+                    capture_sources=p2_capture,
+                )
+            else:
+                final = self._extract_fallback_json(p2_content, keys, p2_model, thinking_override=p2_thinking, meta_map=meta_map, prompt_variant=prompt_variant, capture_sources=p2_capture)
+        except ExtractionError as e:
+            if not draft:
+                raise
+            logger.warning("Two-pass refinement failed (%s); returning pass-1 draft", e)
+            final = []
 
         if capture_sources and final and draft:
             self._backfill_sources(final, draft)
@@ -491,21 +519,39 @@ class ExtractionEngine:
 
     @staticmethod
     def _backfill_sources(final: list, draft: list) -> None:
-        """Fill final entities' missing per-field quotes from the draft pass."""
-        draft_sources: dict = {}
+        """Fill final entities' missing per-field quotes from the draft pass.
+
+        Only when pass 2 kept pass 1's value for that field. Pass 2 routinely
+        *changes* values, and the draft's quote supports the draft's value —
+        copying it onto a changed value attaches a passage that contradicts
+        what is displayed, then the quote verifies (it is real document text)
+        and the field earns a source badge pointing at evidence against
+        itself. Values are compared after the same normalization used for
+        source matching, so formatting-only differences still backfill.
+        """
+        draft_entries: dict = {}
         for entity in draft:
             if isinstance(entity, dict) and isinstance(entity.get(SOURCE_KEY), dict):
                 for field, src in entity[SOURCE_KEY].items():
-                    draft_sources.setdefault(field, src)
-        if not draft_sources:
+                    draft_entries.setdefault(field, (entity.get(field), src))
+        if not draft_entries:
             return
         for entity in final:
             if not isinstance(entity, dict):
                 continue
             sidecar = entity.setdefault(SOURCE_KEY, {})
-            for field, src in draft_sources.items():
-                if field in entity and field not in sidecar:
-                    sidecar[field] = src
+            for field, (draft_value, src) in draft_entries.items():
+                if field not in entity or field in sidecar:
+                    continue
+                if not _same_value(entity.get(field), draft_value):
+                    # Withhold the quote, but leave an entry behind. Dropping
+                    # the field entirely makes the UI render it unmarked —
+                    # the state that looks cleanest — so a revised value would
+                    # lose both its badge and its warning, and would vanish
+                    # from the value-support distribution instead of counting.
+                    sidecar[field] = {"quote": None, "dropped_reason": "value_changed"}
+                    continue
+                sidecar[field] = src
 
     @staticmethod
     def _format_draft_as_text(draft: dict, keys: list[str]) -> str:
@@ -548,28 +594,49 @@ class ExtractionEngine:
     # ------------------------------------------------------------------
 
     def _extract_with_consensus(self, content: ExtractionContent, keys: list[str], model_name: str, config: dict, meta_map: dict[str, dict] | None = None, capture_sources: bool = False) -> list:
+        # A minority of failed replicates degrades to voting among the
+        # successes (logged); ALL replicates failing raises — a total failure
+        # must never come back as an empty "nothing found" result.
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_1 = executor.submit(self._dispatch_extraction, content, keys, model_name, config, meta_map, capture_sources)
             future_2 = executor.submit(self._dispatch_extraction, content, keys, model_name, config, meta_map, capture_sources)
-            result_1 = future_1.result()
-            result_2 = future_2.result()
+            results: list = []
+            errors: list[ExtractionError] = []
+            for future in (future_1, future_2):
+                try:
+                    results.append(future.result())
+                except ExtractionError as e:
+                    errors.append(e)
+        if not results:
+            raise errors[0]
+        if errors:
+            logger.warning(
+                "%d of 2 consensus replicates failed (%s); voting among the rest",
+                len(errors), errors[0],
+            )
 
-        # Quotes legitimately vary between replicates, so the source sidecar
-        # must not participate in the agreement check or the vote.
-        norm_1 = self._strip_sources(self._normalize_to_dict(result_1))
-        norm_2 = self._strip_sources(self._normalize_to_dict(result_2))
+        if len(results) == 2:
+            result_1, result_2 = results
+            # Quotes legitimately vary between replicates, so the source
+            # sidecar must not participate in the agreement check or the vote.
+            norm_1 = self._strip_sources(self._normalize_to_dict(result_1))
+            norm_2 = self._strip_sources(self._normalize_to_dict(result_2))
+            if norm_1 == norm_2:
+                return result_1 if result_1 else result_2
 
-        if norm_1 == norm_2:
-            return result_1 if result_1 else result_2
+        try:
+            results.append(self._dispatch_extraction(content, keys, model_name, config, meta_map, capture_sources))
+        except ExtractionError as e:
+            if len(results) < 2:
+                raise
+            logger.warning("Consensus tiebreak replicate failed (%s); voting among 2", e)
 
-        result_3 = self._dispatch_extraction(content, keys, model_name, config, meta_map, capture_sources)
-        norm_3 = self._strip_sources(self._normalize_to_dict(result_3))
-
-        consensus = self._majority_vote(keys, [norm_1, norm_2, norm_3])
+        norms = [self._strip_sources(self._normalize_to_dict(r)) for r in results]
+        consensus = self._majority_vote(keys, norms)
         if capture_sources:
             sidecar = self._sidecar_for_consensus(
-                consensus, [norm_1, norm_2, norm_3],
-                [self._normalize_to_dict(r) for r in (result_1, result_2, result_3)],
+                consensus, norms,
+                [self._normalize_to_dict(r) for r in results],
             )
             if sidecar:
                 consensus[SOURCE_KEY] = sidecar
@@ -916,9 +983,15 @@ class ExtractionEngine:
             if ("output validation" in error_msg or "retries" in error_msg.lower()
                     or "validation error" in error_msg.lower()):
                 if allow_fallback:
+                    logger.warning(
+                        "Structured extraction failed (%s); retrying via JSON fallback",
+                        error_msg,
+                    )
                     return self._extract_fallback_json(content, keys, model_name, thinking_override=thinking_override, meta_map=meta_map, prompt_variant=prompt_variant, capture_sources=capture_sources)
-                return []
-            return []
+                logger.exception("Structured extraction failed with no fallback allowed")
+                raise ExtractionError(f"Structured extraction failed: {error_msg}") from e
+            logger.exception("Extraction LLM call failed")
+            raise ExtractionError(f"Extraction failed: {error_msg}") from e
 
     @staticmethod
     def _attach_source_quotes(entities: list, sources: list) -> None:
@@ -1016,8 +1089,17 @@ class ExtractionEngine:
                 elif isinstance(parsed, list):
                     return parsed
                 return []
-            except json.JSONDecodeError:
-                return []
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Fallback extraction returned unparseable JSON (%d chars): %s",
+                    len(output or ""), e,
+                )
+                raise ExtractionError(
+                    "Model returned unparseable output in JSON-fallback extraction"
+                ) from e
 
-        except Exception:
-            return []
+        except ExtractionError:
+            raise
+        except Exception as e:
+            logger.exception("Fallback extraction LLM call failed")
+            raise ExtractionError(f"Extraction failed: {e}") from e

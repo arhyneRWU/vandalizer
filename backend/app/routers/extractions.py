@@ -1656,7 +1656,9 @@ async def get_extraction_suggestions(
             }],
         }
 
-    suggestions = await generate_improvement_suggestions("search_set", uuid, result_snapshot)
+    suggestions = await generate_improvement_suggestions(
+        "search_set", uuid, result_snapshot, user_id=user.user_id,
+    )
     return {"suggestions": suggestions}
 
 

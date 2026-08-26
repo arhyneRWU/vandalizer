@@ -93,6 +93,31 @@ class UpdateSourceRequest(BaseModel):
     source_reference: Optional[str] = None
 
 
+class KBOptimizationStatusResponse(BaseModel):
+    """What the "Optimized" chip means for this KB, and whether it still holds.
+
+    ``applied``: tuned RAG settings are live. ``stale``: live, but the sources
+    or test questions have changed materially since they were tuned.
+    ``available``: a completed optimization has settings that were never
+    applied (or were reverted). See ``services/kb_optimization_status``.
+    """
+    state: str  # applied | stale | available
+    applied_at: Optional[str] = None
+    applied_run_uuid: Optional[str] = None
+    last_run_at: Optional[str] = None
+    last_run_uuid: Optional[str] = None
+    tuned_keys: list[str] = []
+    stale: bool = False
+    stale_reasons: list[str] = []
+    sources_at_run: int = 0
+    sources_added: int = 0
+    sources_removed: int = 0
+    queries_at_run: int = 0
+    queries_added: int = 0
+    queries_removed: int = 0
+    queries_edited: int = 0
+
+
 class KBResponse(BaseModel):
     uuid: str
     title: str
@@ -127,6 +152,10 @@ class KBResponse(BaseModel):
     # surfaces as a small "Optimized" chip.
     has_optimized_config: bool = False
     optimized_config_set_at: Optional[str] = None
+    # Full story behind the chip — applied / stale / available, when, from
+    # which run, and what changed since. None when there is nothing to say.
+    # Populated by the v2 list and the detail endpoint.
+    optimization: Optional[KBOptimizationStatusResponse] = None
     # AI-trust signals from the latest KB validation run.
     # Scores are 0-1; lift is also 0-1 (e.g., 0.28 == +28pts vs. baseline).
     last_validation_score: Optional[float] = None

@@ -1116,6 +1116,17 @@ async def adopt_knowledge_base(
         user_org_ancestry=user_org_ancestry,
     )
     if not source_kb:
+        # One message to the client (a uuid probe must not learn whether a KB
+        # exists), but the log says which it was — "exists but verified=False"
+        # took an afternoon to find from the outside.
+        raw = await KnowledgeBase.find_one(KnowledgeBase.uuid == source_kb_uuid)
+        logger.warning(
+            "adopt refused for kb %s by user %s: %s",
+            source_kb_uuid, user.user_id,
+            "no such knowledge base" if raw is None else
+            f"exists (verified={raw.verified}, shared_with_team={raw.shared_with_team}, "
+            f"team_id={raw.team_id}, organization_ids={raw.organization_ids})",
+        )
         raise ValueError("Knowledge base not found or not accessible")
     # Only allow referencing verified or team-shared KBs (not your own private ones — those are already "yours")
     if source_kb.user_id == user.user_id and not source_kb.verified and not source_kb.shared_with_team:
