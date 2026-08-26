@@ -55,6 +55,26 @@ from app.models.workflow import Workflow, WorkflowStep, WorkflowStepTask
 
 logger = logging.getLogger(__name__)
 
+
+def _reinstate_verified(doc) -> bool:
+    """Restore ``verified=True`` on an existing catalog row the seed is re-attaching.
+
+    A prune (``_retire_item``) or the admin retire toggle flips the row to
+    ``verified=False`` and keeps it so the change is reversible. When a later
+    catalog version reinstates that seed, the row is found by ``seed_id``, its
+    content refreshed and its library item + metadata re-created — but the flag
+    stayed False. The catalog then advertised a knowledge base or extraction set
+    that ``can_view_*`` refuses to everyone but its owner, which surfaced as
+    "Knowledge base not found or not accessible" on Adopt (prod, 2026-08-26).
+
+    Returns True when the flag was changed so the caller saves the row.
+    """
+    if getattr(doc, "verified", True):
+        return False
+    doc.verified = True
+    print("    (reinstated: verified flag restored)")
+    return True
+
 SEEDS_DIR = pathlib.Path(__file__).resolve().parent.parent / "seeds"
 VERSION_FILE = SEEDS_DIR / "VERSION"
 SYSTEM_USER = "system"
@@ -324,7 +344,7 @@ async def seed_workflow(
         if patched:
             print(f"    (patched {patched} extraction task(s))")
 
-        changed = False
+        changed = _reinstate_verified(existing)
         new_name = item["name"]
         if existing.name != new_name:
             existing.name = new_name
@@ -493,7 +513,7 @@ async def _refresh_search_set(
     """Apply updates to an existing SearchSet: refresh top-level fields, add any
     missing items from the seed (matched by searchphrase), add missing test cases,
     and refresh metadata/library/collections."""
-    changed = False
+    changed = _reinstate_verified(ss)
     if ss.title != item["title"]:
         ss.title = item["title"]
         changed = True
@@ -694,7 +714,7 @@ async def seed_knowledge_base(
         )
         from app.utils.bot_challenge import looks_like_bot_challenge
 
-        changed = False
+        changed = _reinstate_verified(existing)
         if existing.resource_config.get("seed_id") != seed_id:
             existing.resource_config = {**existing.resource_config, "seed_id": seed_id}
             changed = True
