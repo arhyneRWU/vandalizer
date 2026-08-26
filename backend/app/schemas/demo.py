@@ -2,33 +2,9 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class DemoSignupRequest(BaseModel):
-    name: str
-    title: str = ""
-    email: str
-    organization: str
-    questionnaire_responses: dict = {}
-
-
-class DemoSignupResponse(BaseModel):
-    uuid: str
-    waitlist_position: int
-    message: str
-
-
-class WaitlistStatusResponse(BaseModel):
-    uuid: str
-    status: str
-    waitlist_position: Optional[int] = None
-    estimated_wait: Optional[str] = None
-    # True when the activation/resend email couldn't be delivered — the status
-    # page uses this to steer the applicant to the resend button.
-    activation_email_failed: bool = False
-
-
 class ResendCredentialsResponse(BaseModel):
     ok: bool
-    # sent | send_failed | pending | expired | not_found
+    # sent | send_failed | pending | exhausted | not_found
     status: str
     message: str
     email: Optional[str] = None
@@ -51,6 +27,26 @@ class TrialEndInfoResponse(BaseModel):
     max_extensions: int
     can_self_extend: bool
     already_extended: bool
+    # Token balance when the screen was opened, and what a top-up adds.
+    tokens_used: int = 0
+    tokens_budget: int = 0
+    topup_tokens: int = 0
+
+
+class TrialUsageResponse(BaseModel):
+    """Trial token balance for the signed-in user.
+
+    ``enabled`` is False for non-trial users and cap-disabled deployments; the
+    other fields are zero then and must not be rendered.
+    """
+
+    enabled: bool
+    budget: int
+    used: int
+    remaining: int
+    percent: int
+    # False means AI features are gated until the address is confirmed.
+    email_verified: bool = True
 
 
 class TrialExtensionRequest(BaseModel):
@@ -60,8 +56,10 @@ class TrialExtensionRequest(BaseModel):
 class TrialExtensionResponse(BaseModel):
     ok: bool
     message: str
-    expires_at: Optional[str] = None
-    # One-time magic sign-in URL for the renewal screen's "Enter" button —
+    # Tokens added by this top-up, and the account's new lifetime ceiling.
+    tokens_granted: Optional[int] = None
+    tokens_budget: Optional[int] = None
+    # One-time magic sign-in URL for the top-up screen's "Enter" button —
     # trial accounts have no known password, so this is their way back in.
     login_url: Optional[str] = None
 

@@ -16,7 +16,12 @@ from tests.conftest import fake_model
 
 
 def _settings(*, enabled: bool = True, budget: int = 1000) -> SimpleNamespace:
-    return SimpleNamespace(enable_trial_system=enabled, trial_token_budget=budget)
+    return SimpleNamespace(
+        enable_trial_system=enabled,
+        trial_token_budget=budget,
+        trial_global_monthly_tokens=0,  # fleet ceiling has its own test module
+        redis_host="localhost",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -46,13 +51,115 @@ def test_budget_never_negative(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# effective_budget — per-user override vs deployment default
+# ---------------------------------------------------------------------------
+
+
+def test_effective_budget_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(None) == 2000
+
+
+def test_effective_budget_prefers_user_override(monkeypatch):
+    """Top-ups raise the per-user value; it must win over the default."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(6000) == 6000
+
+
+def test_effective_budget_user_zero_disables_the_cap(monkeypatch):
+    """An admin release sets 0 — that user is no longer metered."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    assert trial_budget.effective_budget(0) == 0
+
+
+def test_effective_budget_zero_when_deployment_disabled(monkeypatch):
+    """A per-user value can't switch metering on where it's globally off."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+    assert trial_budget.effective_budget(5000) == 0
+
+
+# ---------------------------------------------------------------------------
+# get_trial_usage — the meter's data source
+# ---------------------------------------------------------------------------
+
+
+async def test_usage_disabled_for_non_trial_user(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=False, trial_token_budget=None, email_verified=True)
+    )
+    assert usage["enabled"] is False
+    assert usage["budget"] == 0
+
+
+async def test_usage_reports_remaining_and_percent(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=1500))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=None, email_verified=True)
+    )
+    assert usage == {
+        "enabled": True,
+        "budget": 2000,
+        "used": 1500,
+        "remaining": 500,
+        "percent": 75,
+        "email_verified": True,
+    }
+
+
+async def test_usage_clamps_an_overshoot(monkeypatch):
+    """The last operation can run past the ceiling; the meter must not lie."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2400))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=None, email_verified=True)
+    )
+    assert usage["remaining"] == 0
+    assert usage["percent"] == 100
+
+
+async def test_usage_uses_the_topped_up_budget(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2000))
+    usage = await trial_budget.get_trial_usage(
+        SimpleNamespace(user_id="u-1", is_demo_user=True, trial_token_budget=6000, email_verified=True)
+    )
+    assert usage["budget"] == 6000
+    assert usage["remaining"] == 4000
+
+
+async def test_check_async_respects_a_topped_up_budget(monkeypatch):
+    """A user who topped up is under budget again and must not be blocked."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
+    monkeypatch.setattr(trial_budget, "_budget", lambda: 2000)
+    monkeypatch.setattr(trial_budget, "tokens_used_async", AsyncMock(return_value=2500))
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=4000, email_verified=True)
+    with patch("app.models.user.User", fake_model(find_one_result=user)):
+        await trial_budget.check_async("u-1")  # no raise
+
+
+# ---------------------------------------------------------------------------
 # check_async
 # ---------------------------------------------------------------------------
 
 
-async def test_check_async_noop_when_disabled(monkeypatch):
-    """With no budget, the check returns before any DB access."""
-    monkeypatch.setattr(trial_budget, "_budget", lambda: 0)
+async def test_check_async_noop_when_trial_system_is_off(monkeypatch):
+    """The master switch short-circuits before any DB access.
+
+    This is the *trial system* switch, not the per-account budget:
+    TRIAL_TOKEN_BUDGET=0 means "don't cap individuals" and deliberately leaves
+    verification and the fleet ceiling running (see test_trial_verification).
+    """
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: False)
     users = fake_model()
     with patch("app.models.user.User", users):
         await trial_budget.check_async("u-1")
@@ -60,6 +167,7 @@ async def test_check_async_noop_when_disabled(monkeypatch):
 
 
 async def test_check_async_noop_without_user_id(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     users = fake_model()
     with patch("app.models.user.User", users):
@@ -68,31 +176,34 @@ async def test_check_async_noop_without_user_id(monkeypatch):
 
 
 async def test_check_async_ignores_regular_users(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     used = AsyncMock(return_value=999_999)
     monkeypatch.setattr(trial_budget, "tokens_used_async", used)
-    user = SimpleNamespace(is_demo_user=False)
+    user = SimpleNamespace(is_demo_user=False, trial_token_budget=None, email_verified=True)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         await trial_budget.check_async("u-1")
     used.assert_not_awaited()
 
 
 async def test_check_async_allows_under_budget_trial_user(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     monkeypatch.setattr(
         trial_budget, "tokens_used_async", AsyncMock(return_value=999)
     )
-    user = SimpleNamespace(is_demo_user=True)
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=None, email_verified=True)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         await trial_budget.check_async("u-1")
 
 
 async def test_check_async_raises_at_budget(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     monkeypatch.setattr(
         trial_budget, "tokens_used_async", AsyncMock(return_value=1000)
     )
-    user = SimpleNamespace(is_demo_user=True)
+    user = SimpleNamespace(is_demo_user=True, trial_token_budget=None, email_verified=True)
     with patch("app.models.user.User", fake_model(find_one_result=user)):
         with pytest.raises(TrialBudgetExceededError) as exc:
             await trial_budget.check_async("u-1")
@@ -101,6 +212,7 @@ async def test_check_async_raises_at_budget(monkeypatch):
 
 async def test_check_async_fails_open_on_db_error(monkeypatch):
     """An infrastructure failure in the check must never block LLM features."""
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     users = fake_model()
     users.find_one = AsyncMock(side_effect=RuntimeError("down"))
@@ -123,22 +235,25 @@ def _sync_db(*, user_doc, total: int):
 
 
 def test_check_sync_raises_at_budget(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
-    db = _sync_db(user_doc={"is_demo_user": True}, total=2000)
+    db = _sync_db(user_doc={"is_demo_user": True, "trial_token_budget": None, "email_verified": True}, total=2000)
     with patch("app.tasks.get_sync_db", return_value=db):
         with pytest.raises(TrialBudgetExceededError):
             trial_budget.check_sync("u-1")
 
 
 def test_check_sync_ignores_regular_users(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
-    db = _sync_db(user_doc={"is_demo_user": False}, total=2000)
+    db = _sync_db(user_doc={"is_demo_user": False, "trial_token_budget": None, "email_verified": True}, total=2000)
     with patch("app.tasks.get_sync_db", return_value=db):
         trial_budget.check_sync("u-1")
     db.llm_usage.aggregate.assert_not_called()
 
 
 def test_check_sync_fails_open_on_db_error(monkeypatch):
+    monkeypatch.setattr(trial_budget, "_trial_system_on", lambda: True)
     monkeypatch.setattr(trial_budget, "_budget", lambda: 1000)
     with patch("app.tasks.get_sync_db", side_effect=RuntimeError("down")):
         trial_budget.check_sync("u-1")
