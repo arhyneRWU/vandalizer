@@ -60,3 +60,4 @@ Copy `.env.example` to `.env`. Key variables: `redis_host`, `ENVIRONMENT` (devel
 
 - Python >=3.11,<3.13; `uv` is the Python package manager (never `pip`), `npm` for the frontend
 - Celery tasks use `bind=True` and `autoretry_for` patterns
+- When you add, remove, or rename a route in `backend/app/routers/` or a call in `frontend/src/api/*.ts`, run `make endpoint-map` and read the two orphan lists in `scripts/ui_endpoint_map.md` — a frontend call matching no route is a live 404. `make backend-static` gates this in CI.
