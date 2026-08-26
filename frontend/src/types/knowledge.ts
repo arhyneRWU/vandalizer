@@ -81,6 +81,8 @@ export interface KnowledgeBaseSource {
   // "ready" but incomplete, so the UI warns instead of showing a clean check.
   truncated?: boolean
   created_at: string
+  // When the text was last fetched/ingested (null while pending).
+  processed_at?: string | null
 }
 
 export interface KnowledgeBaseSourceDetail extends KnowledgeBaseSource {
@@ -92,7 +94,6 @@ export interface KnowledgeBaseSourceDetail extends KnowledgeBaseSource {
   // Navigation pages the crawl followed for their links but did not embed.
   skipped_urls?: string[] | null
   child_sources: KnowledgeBaseSource[]
-  processed_at?: string | null
 }
 
 export interface KnowledgeBaseDetail extends KnowledgeBase {
