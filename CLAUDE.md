@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Vandalizer is an AI-powered document intelligence platform for research administration, built at the University of Idaho. Users upload documents, run LLM-powered extraction workflows, chat with documents via RAG, and collaborate in teams.
 
+**Stack**: FastAPI + Beanie (backend), React 19 + Vite (frontend), Celery (task queues), MongoDB, Redis, ChromaDB.
+
 ## Development Commands
 
 Full Dockerized install + admin account + catalog seed (the supported deploy path, for users asking how to deploy on a server): `./setup.sh` from the project root. See `DEPLOY.md`. The commands below are the hot-reload dev loop.
@@ -56,4 +58,5 @@ Copy `.env.example` to `.env`. Key variables: `redis_host`, `ENVIRONMENT` (devel
 
 ## Conventions
 
+- Python >=3.11,<3.13; `uv` is the Python package manager (never `pip`), `npm` for the frontend
 - Celery tasks use `bind=True` and `autoretry_for` patterns
