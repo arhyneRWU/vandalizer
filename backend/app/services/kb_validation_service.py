@@ -1476,6 +1476,92 @@ async def check_retrieval_precision(
     }
 
 
+# Weights for the overall KB quality score. Each tier applies when the tiers
+# above it have no data: a judged run uses all four signals, a run with test
+# queries but no judge scores uses retrieval + health + coverage, and a KB with
+# no test queries at all is scored on health + coverage alone.
+#
+# The overall score is a composite. It is NOT the judge's answer accuracy —
+# that is ``avg_judge_score`` on its own. Anything that reports the overall
+# score should say so; see ``kb_score_components``.
+KB_SCORE_LABELS = {
+    "judge": "answer accuracy (judge)",
+    "retrieval_precision": "retrieval precision",
+    "source_health": "source health",
+    "chunk_coverage": "chunk coverage",
+}
+KB_SCORE_WEIGHTS_JUDGED = {
+    "judge": 0.40,
+    "retrieval_precision": 0.25,
+    "source_health": 0.20,
+    "chunk_coverage": 0.15,
+}
+KB_SCORE_WEIGHTS_RETRIEVAL_ONLY = {
+    "retrieval_precision": 0.50,
+    "source_health": 0.30,
+    "chunk_coverage": 0.20,
+}
+KB_SCORE_WEIGHTS_NO_QUERIES = {
+    "source_health": 0.60,
+    "chunk_coverage": 0.40,
+}
+
+
+def kb_score_components(
+    *,
+    avg_judge_score: float | None,
+    num_queries_judged: int | None,
+    avg_precision: float | None,
+    source_health_ratio: float | None,
+    chunk_coverage_ratio: float | None,
+    num_test_queries: int,
+) -> dict:
+    """Assemble the overall KB quality score and say how it was assembled.
+
+    Pure, so the export can re-derive the breakdown for runs recorded before
+    ``score_components`` was persisted on the snapshot. All inputs are 0–1
+    ratios; the returned values and score are on a 0–100 scale.
+
+    Returns ``{"raw_score", "formula", "components"}`` where ``components`` is
+    an ordered list of ``{key, label, weight, value}`` and ``formula`` is a
+    one-line human-readable statement such as
+    ``"overall = 40% × answer accuracy (judge) + 25% × retrieval precision + …"``.
+    """
+    judged = (
+        num_test_queries > 0
+        and avg_judge_score is not None
+        and (num_queries_judged or 0) > 0
+    )
+    if judged:
+        weights = KB_SCORE_WEIGHTS_JUDGED
+    elif num_test_queries > 0:
+        weights = KB_SCORE_WEIGHTS_RETRIEVAL_ONLY
+    else:
+        weights = KB_SCORE_WEIGHTS_NO_QUERIES
+
+    ratios = {
+        "judge": avg_judge_score,
+        "retrieval_precision": avg_precision,
+        "source_health": source_health_ratio,
+        "chunk_coverage": chunk_coverage_ratio,
+    }
+    components = []
+    raw = 0.0
+    for key, weight in weights.items():
+        value = float(ratios.get(key) or 0.0) * 100
+        raw += value * weight
+        components.append({
+            "key": key,
+            "label": KB_SCORE_LABELS[key],
+            "weight": weight,
+            "value": round(value, 1),
+        })
+    formula = "overall = " + " + ".join(
+        f"{round(c['weight'] * 100)}% × {c['label']}" for c in components
+    )
+    return {"raw_score": raw, "formula": formula, "components": components}
+
+
 async def run_kb_validation(
     kb_uuid: str,
     user_id: str,
@@ -1599,26 +1685,16 @@ async def run_kb_validation(
             retrieval["judge_variance_meta"] = judge_payload["judge_variance_meta"]
 
     # Scoring.
-    retrieval_score = retrieval["avg_precision"] * 100
-    health_score = health["ratio"] * 100
-    coverage_score = coverage["ratio"] * 100
-
     judge_avg = retrieval.get("avg_judge_score") if judge_payload else None
-    if test_queries and judge_avg is not None and retrieval.get("num_queries_judged", 0) > 0:
-        # Judge-based weights: judge 40% + retrieval 25% + health 20% + coverage 15%
-        judge_score = judge_avg * 100
-        raw_score = (
-            judge_score * 0.40
-            + retrieval_score * 0.25
-            + health_score * 0.20
-            + coverage_score * 0.15
-        )
-    elif test_queries:
-        # Retrieval-only (legacy / no expected_answer present).
-        raw_score = retrieval_score * 0.5 + health_score * 0.3 + coverage_score * 0.2
-    else:
-        # No test queries — weight health and coverage.
-        raw_score = health_score * 0.6 + coverage_score * 0.4
+    scoring = kb_score_components(
+        avg_judge_score=judge_avg,
+        num_queries_judged=retrieval.get("num_queries_judged", 0),
+        avg_precision=retrieval["avg_precision"],
+        source_health_ratio=health["ratio"],
+        chunk_coverage_ratio=coverage["ratio"],
+        num_test_queries=len(test_queries),
+    )
+    raw_score = scoring["raw_score"]
 
     result = {
         "kb_uuid": kb_uuid,
@@ -1627,6 +1703,12 @@ async def run_kb_validation(
         "chunk_coverage": coverage,
         "retrieval_precision": retrieval,
         "raw_score": round(raw_score, 1),
+        # How raw_score was assembled — the overall score is a weighted
+        # composite, NOT the judge's answer accuracy, and a support ticket
+        # showed the two were being read as the same number. Persisted with
+        # the run so the results screen and the export can state the formula.
+        "score_components": scoring["components"],
+        "score_formula": scoring["formula"],
         "num_test_queries": len(test_queries),
         "num_sources": health["total"],
         # Match the shape expected by persist_validation_run
