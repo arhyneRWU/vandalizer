@@ -103,6 +103,19 @@ export interface ExtractionFieldSource {
   document_uuid: string | null
   document_title: string | null
   verified: boolean
+  /**
+   * Whether the extracted value actually appears in `quote` — the stronger
+   * claim `verified` does not make. `null` when the check does not apply (no
+   * located quote, a "not found" value, or an enum field whose value is a
+   * mapping of the prose rather than a span of it); absent on results
+   * extracted before this was recorded.
+   *
+   * Recorded but not yet surfaced: the badge still keys off `verified` until
+   * the true/false distribution across real extractions is known.
+   */
+  value_supported?: boolean | null
+  /** How `value_supported` was decided, for measuring that distribution. */
+  value_support_method?: string
 }
 
 export type ExtractionSourceMap = Record<string, ExtractionFieldSource>

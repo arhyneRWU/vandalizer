@@ -17,13 +17,15 @@ import { SurveyFieldRenderer } from '../components/survey/SurveyFieldRenderer'
 import { SurveyWizard } from '../components/survey/SurveyWizard'
 import { RENEWAL_NOTES_FIELDS } from '../components/survey/renewalNotesFields'
 import { groupBySection } from '../lib/survey'
+import { formatTokens } from '../lib/formatTokens'
 import type { TrialEndInfo } from '../types/demo'
 
 // ---------------------------------------------------------------------------
-// End-of-trial screen — a warm thank-you + frictionless renewal. Replaces the
-// hard lockout dead-end. Renewals are unlimited: low-engagement users keep going
-// with one click, engaged users in exchange for a few notes. Token-authenticated
-// (the lock token), no session required.
+// End-of-trial screen — a warm thank-you + frictionless token top-up. The trial
+// is a budget, not a clock, so this is where a used-up balance gets refilled.
+// Top-ups are unlimited: low-engagement users take one with a click, engaged
+// users in exchange for a few notes. Token-authenticated (the trial-end token),
+// no session required.
 // ---------------------------------------------------------------------------
 
 export default function DemoTrialEnd() {
@@ -38,6 +40,7 @@ export default function DemoTrialEnd() {
   const [submitting, setSubmitting] = useState(false)
   const [extended, setExtended] = useState(false)
   const [loginUrl, setLoginUrl] = useState<string | null>(null)
+  const [grantedTokens, setGrantedTokens] = useState<number | null>(null)
   const [answers, setAnswers] = useState<Record<string, unknown>>({})
 
   useEffect(() => {
@@ -62,6 +65,7 @@ export default function DemoTrialEnd() {
     try {
       const result = await requestTrialExtension(token, notes)
       setLoginUrl(result.login_url ?? null)
+      setGrantedTokens(result.tokens_granted ?? null)
       setExtended(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not extend your trial.')
@@ -122,7 +126,7 @@ export default function DemoTrialEnd() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <Link
             to="/landing"
-            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+            search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
             className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -153,21 +157,24 @@ export default function DemoTrialEnd() {
               <p className="text-gray-400">{error}</p>
               <Link
                 to="/landing"
-                search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined }}
+                search={{ error: undefined, invite_token: undefined, admin: undefined, next: undefined, register: undefined }}
                 className="inline-block mt-6 rounded-lg bg-white/10 px-6 py-3 font-bold text-white hover:bg-white/20 transition-colors"
               >
                 Go to Homepage
               </Link>
             </div>
           ) : extended ? (
-            // --- Renewal succeeded ---
+            // --- Top-up succeeded ---
             <div className="text-center py-12">
               <div className="p-8 rounded-2xl border border-green-500/20 bg-green-500/5">
                 <Rocket className="w-16 h-16 text-green-400 mx-auto mb-6" />
                 <h2 className="text-2xl font-bold text-white mb-4">You're back in!</h2>
                 <p className="text-gray-400 mb-6">
-                  Your trial's extended by another two weeks. Pick up right where you left off —
-                  and thank you, genuinely, for helping shape where Vandalizer goes next.
+                  {grantedTokens
+                    ? `${formatTokens(grantedTokens)} more tokens are on your account.`
+                    : 'Your tokens are topped up.'}{' '}
+                  Pick up right where you left off — and thank you, genuinely, for
+                  helping shape where Vandalizer goes next.
                 </p>
                 <button
                   onClick={enterApp}
@@ -193,11 +200,12 @@ export default function DemoTrialEnd() {
               </div>
 
               {info.engagement === 'low' ? (
-                // Low engagement → frictionless one-click renewal
+                // Low engagement → frictionless one-click top-up
                 <div className="text-center">
                   <p className="text-gray-300 mb-6">
-                    Looks like you were just getting started — no rush at all. Grab another two
-                    weeks, on us, and take it for a proper spin.
+                    Looks like you were just getting started — no rush at all. Grab
+                    another {formatTokens(info.topup_tokens)} tokens, on us, and take
+                    it for a proper spin.
                   </p>
                   {error && (
                     <div className="mb-4 rounded-md bg-red-500/20 border border-red-500/30 p-3 text-sm text-red-300">
@@ -211,7 +219,7 @@ export default function DemoTrialEnd() {
                   >
                     {submitting ? (
                       <>
-                        <Loader2 className="w-5 h-5 animate-spin" /> Extending…
+                        <Loader2 className="w-5 h-5 animate-spin" /> Topping up…
                       </>
                     ) : (
                       <>
@@ -219,21 +227,24 @@ export default function DemoTrialEnd() {
                       </>
                     )}
                   </button>
-                  <p className="mt-3 text-xs text-gray-500">Adds 14 more days, instantly.</p>
+                  <p className="mt-3 text-xs text-gray-500">
+                    Adds {formatTokens(info.topup_tokens)} tokens, instantly. No time limit.
+                  </p>
                 </div>
               ) : (
-                // Engaged → a few notes in exchange for more time
+                // Engaged → a few notes in exchange for more tokens
                 <div>
                   <p className="text-gray-300 mb-6">
-                    You've put Vandalizer to real work — thank you. Tell us a little about how it's
-                    going; your notes go straight to the team, and you'll be back in with another
-                    two weeks the moment you submit.
+                    You've put Vandalizer to real work — {formatTokens(info.tokens_used)}{' '}
+                    tokens' worth. Tell us a little about how it's going; your notes go
+                    straight to the team, and another {formatTokens(info.topup_tokens)}{' '}
+                    tokens land on your account the moment you submit.
                   </p>
                   <SurveyWizard
                     steps={steps}
                     onSubmit={() => handleExtend(answers)}
                     submitting={submitting}
-                    submitLabel="Get 2 more weeks"
+                    submitLabel={`Get ${formatTokens(info.topup_tokens)} more tokens`}
                     submitIcon={Sparkles}
                     error={error}
                   />

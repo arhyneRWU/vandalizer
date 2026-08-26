@@ -113,17 +113,27 @@ def validate_chunk(
             f"Compliance Requirements:\n{compliance}\n"
             f"Document Text Chunk:\n{chunk_text}"
         )
-        from app.exceptions import TrialBudgetExceededError
+        from app.exceptions import TrialSpendBlockedError
         from app.services.metering import metered
         try:
             with metered("upload_validation", user_id=user_id):
                 result = agent.run_sync(prompt)
-        except TrialBudgetExceededError:
+        except TrialSpendBlockedError as blocked:
+            # Any trial gate — exhausted budget, unconfirmed email, fleet pause
+            # — is a "couldn't afford to run it" not a failure. Skip the chunk
+            # so the chord completes and the document doesn't sit in
+            # ``validating`` forever, and report the gate's own reason so the
+            # feedback says which one it was.
             logger.info(
-                "Trial budget exhausted for %s — skipping compliance chunk %d/%d of %s",
-                user_id, index, total, document_path,
+                "Trial spend blocked for %s (%s) — skipping compliance chunk %d/%d of %s",
+                user_id, type(blocked).__name__, index, total, document_path,
             )
-            return {"valid": True, "feedback": BUDGET_SKIPPED_FEEDBACK, "index": index, "skipped": True}
+            return {
+                "valid": True,
+                "feedback": blocked.message or BUDGET_SKIPPED_FEEDBACK,
+                "index": index,
+                "skipped": True,
+            }
         output = result.output
 
         # Parse structured output or treat as text
@@ -188,11 +198,11 @@ def summarize_results(
         combined = "\n\n".join(feedback_list)
 
     # Summarize via LLM
-    from app.exceptions import TrialBudgetExceededError
+    from app.exceptions import TrialBudgetExceededError, TrialSpendBlockedError
     try:
         if skipped:
-            # The budget that skipped the chunks is exhausted; do not spend
-            # more summarizing the fact.
+            # Whatever gate skipped the chunks still applies; don't spend more
+            # summarizing the fact.
             raise TrialBudgetExceededError(BUDGET_SKIPPED_FEEDBACK)
         agent = _get_secure_agent()
         from app.services.metering import metered
@@ -212,7 +222,7 @@ def summarize_results(
         else:
             summary = {"valid": all_valid, "feedback": str(output)}
 
-    except TrialBudgetExceededError:
+    except TrialSpendBlockedError:
         summary = {"valid": all_valid, "feedback": combined[:2000]}
     except Exception as e:
         logger.error("Error summarizing results: %s", e)

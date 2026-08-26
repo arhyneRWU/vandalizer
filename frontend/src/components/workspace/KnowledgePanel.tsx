@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, Sparkles, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight } from 'lucide-react'
 import { useKnowledgeBases, useScopedKnowledgeBases } from '../../hooks/useKnowledgeBases'
 import { useProjectPins } from '../../hooks/useProjectPins'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
@@ -24,6 +24,7 @@ import { ShareWithTeamDialog } from '../library/ShareWithTeamDialog'
 import { useToast } from '../../contexts/ToastContext'
 import { useConfirm } from '../shared/useConfirm'
 import { SharedKBDeleteDialog, type SharedKBDeleteChoice } from '../shared/SharedKBDeleteDialog'
+import { OptimizedBadge, VerifiedBadge } from '../knowledge/KBTrustBadges'
 
 type TabKey = 'mine' | 'team' | 'explore'
 const TABS: { key: TabKey; label: string }[] = [
@@ -775,34 +776,8 @@ export function KnowledgePanel() {
               Team
             </span>
           )}
-          {selectedKB.verified && (
-            <span style={{
-              fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8,
-              color: '#15803d', backgroundColor: '#dcfce7',
-              display: 'flex', alignItems: 'center', gap: 3,
-            }}>
-              <ShieldCheck size={10} />
-              Verified
-            </span>
-          )}
-          {selectedKB.has_optimized_config && (
-            <span
-              title={
-                selectedKB.optimized_config_set_at
-                  ? `Optimized settings applied ${new Date(selectedKB.optimized_config_set_at).toLocaleString()}`
-                  : 'Optimized settings applied'
-              }
-              style={{
-                fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8,
-                color: '#a78bfa', backgroundColor: 'rgba(124, 58, 237, 0.12)',
-                border: '1px solid rgba(124, 58, 237, 0.3)',
-                display: 'flex', alignItems: 'center', gap: 3,
-              }}
-            >
-              <Sparkles size={10} />
-              Optimized
-            </span>
-          )}
+          {selectedKB.verified && <VerifiedBadge />}
+          <OptimizedBadge kb={selectedKB} withTime />
           <span
             style={{
               fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 10,

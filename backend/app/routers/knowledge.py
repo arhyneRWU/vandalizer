@@ -31,6 +31,7 @@ from app.schemas.knowledge import (
     KBDetailResponse,
     KBListResponse,
     KBReferenceResponse,
+    KBOptimizationStatusResponse,
     KBResponse,
     KBSourceDetailResponse,
     KBSourceResponse,
@@ -42,6 +43,7 @@ from app.schemas.knowledge import (
 from app.services import access_control
 from app.services import knowledge_service as svc
 from app.services.name_conflicts import DuplicateNameError
+from app.services.kb_optimization_status import OptimizationStatus, optimization_status_by_kb
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,7 @@ def _kb_response(
     trust: "_TrustSummary | None" = None,
     last_used_at: datetime.datetime | None = None,
     can_manage: bool = True,
+    optimization: "OptimizationStatus | None" = None,
 ) -> KBResponse:
     import datetime as _dt
     override = getattr(kb, "rag_config_override", None)
@@ -141,6 +144,7 @@ def _kb_response(
         scope=scope,
         has_optimized_config=has_override,
         optimized_config_set_at=override_at_str,
+        optimization=_optimization_response(optimization),
         last_validation_score=last_score,
         last_validation_baseline_score=last_baseline,
         last_validation_lift=last_lift,
@@ -149,6 +153,31 @@ def _kb_response(
             last_used_at.isoformat() if isinstance(last_used_at, _dt.datetime) else None
         ),
         can_manage=can_manage,
+    )
+
+
+def _optimization_response(
+    status: "OptimizationStatus | None",
+) -> KBOptimizationStatusResponse | None:
+    if status is None:
+        return None
+    iso = lambda d: d.isoformat() if d else None  # noqa: E731
+    return KBOptimizationStatusResponse(
+        state=status.state,
+        applied_at=iso(status.applied_at),
+        applied_run_uuid=status.applied_run_uuid,
+        last_run_at=iso(status.last_run_at),
+        last_run_uuid=status.last_run_uuid,
+        tuned_keys=list(status.tuned_keys),
+        stale=status.stale,
+        stale_reasons=list(status.stale_reasons),
+        sources_at_run=status.sources_at_run,
+        sources_added=status.sources_added,
+        sources_removed=status.sources_removed,
+        queries_at_run=status.queries_at_run,
+        queries_added=status.queries_added,
+        queries_removed=status.queries_removed,
+        queries_edited=status.queries_edited,
     )
 
 
@@ -341,11 +370,11 @@ async def list_knowledge_bases_v2(
         catalog_names = {m.item_id: m.display_name for m in metas if m.display_name}
 
     all_uuids = [kb.uuid for kb in kbs] + [src.uuid for _, src in ref_kbs]
+    all_kbs = list(kbs) + [src for _, src in ref_kbs]
     latest_runs = await _latest_runs_by_kb(all_uuids)
     usage_map = await svc.get_kb_usage_map(user.user_id, all_uuids)
-    manage_flags = await _manage_flags_by_kb(
-        list(kbs) + [src for _, src in ref_kbs], user, user_org_ancestry,
-    )
+    manage_flags = await _manage_flags_by_kb(all_kbs, user, user_org_ancestry)
+    optimization = await optimization_status_by_kb(all_kbs)
 
     items: list[KBResponse] = []
     for kb in kbs:
@@ -356,6 +385,7 @@ async def list_knowledge_bases_v2(
             trust=latest_runs.get(kb.uuid),
             last_used_at=usage_map.get(kb.uuid),
             can_manage=manage_flags.get(kb.uuid, False),
+            optimization=optimization.get(kb.uuid),
         ))
 
     for ref, source_kb in ref_kbs:
@@ -365,6 +395,7 @@ async def list_knowledge_bases_v2(
             trust=latest_runs.get(source_kb.uuid),
             last_used_at=usage_map.get(source_kb.uuid),
             can_manage=manage_flags.get(source_kb.uuid, False),
+            optimization=optimization.get(source_kb.uuid),
         )
         resp.title = catalog_names.get(str(source_kb.id), resp.title)
         resp.is_reference = True
@@ -520,11 +551,13 @@ async def get_knowledge_base(uuid: str, user: User = Depends(get_current_user)):
     titles = await _resolve_document_titles(sources)
     latest_runs = await _latest_runs_by_kb([kb.uuid])
     manage_flags = await _manage_flags_by_kb([kb], user, user_org_ancestry)
+    optimization = await optimization_status_by_kb([kb])
     return KBDetailResponse(
         **_kb_response(
             kb,
             trust=latest_runs.get(kb.uuid),
             can_manage=manage_flags.get(kb.uuid, False),
+            optimization=optimization.get(kb.uuid),
         ).model_dump(),
         sources=[
             _source_response(s, document_title=titles.get(s.document_uuid or ""))
