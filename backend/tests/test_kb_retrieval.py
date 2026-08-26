@@ -644,6 +644,35 @@ def test_extract_pin_terms_drops_a_phrase_wrapping_a_pinned_term():
     ) == ["force majeure"]
 
 
+def test_questioned_phrase_needs_a_question_frame():
+    """"what/which is" mid-sentence is a relative clause, not a question.
+
+    Unanchored, "Summarize the section which is most important for
+    compliance" pinned "most important" — a junk bigram that, on a small
+    knowledge base where the hit cut-off cannot fire, spends up to half the
+    lane on whatever chunks happen to contain it.
+    """
+    for prose in (
+        "Summarize the section which is most important for compliance",
+        "Explain the clause that says what is allowable cost here",
+        "List the vendors and note which are preferred suppliers today",
+        "Tell me what is the total budget",
+    ):
+        assert chat_service._extract_pin_terms(prose) == [], prose
+    # The frame still fires when it opens a sentence: at the start of the
+    # message, after a sentence boundary, or behind a connective.
+    assert chat_service._extract_pin_terms("what is the total budget") == ["total budget"]
+    assert chat_service._extract_pin_terms(
+        "Explain the budget. What are the field sites?"
+    ) == ["field sites"]
+    assert chat_service._extract_pin_terms(
+        "Thanks. So, what is the total budget?"
+    ) == ["total budget"]
+    assert chat_service._extract_pin_terms(
+        "First question: which is the correct form to use?"
+    ) == ["correct form"]
+
+
 def test_extract_pin_terms_ignores_plain_prose():
     """Ordinary requests must pin nothing — the lane costs half the top-k."""
     for prose in (
@@ -779,6 +808,38 @@ async def test_retrieve_pinned_chunks_skips_boilerplate_identifier():
 
     assert boilerplate == []
     assert len(cited) == 6, "an explicitly cited section still pins"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_pinned_chunks_counts_exact_hits_not_the_substring_pool():
+    """The boilerplate cut-off must measure exact hits, not raw candidates.
+
+    ``$contains "AA-1"`` also returns every "AA-11" chunk. Counting those
+    discarded "AA-1" outright when it had two genuine hits — the SF-424 /
+    SF-424A shape this product sees in every packet.
+    """
+    variants = [
+        {"content": f"AA-11 running header {i}.", "chunk_id": f"v{i}",
+         "metadata": {"source_name": "doc.pdf"}, "score": None, "similarity": None}
+        for i in range(chat_service._MAX_PIN_TERM_HITS - 1)
+    ]
+    genuine = [
+        {"content": "Form AA-1 is the base attachment.", "chunk_id": "g1",
+         "metadata": {"source_name": "doc.pdf"}, "score": None, "similarity": None},
+        {"content": "Submit AA-1 with the cover sheet.", "chunk_id": "g2",
+         "metadata": {"source_name": "doc.pdf"}, "score": None, "similarity": None},
+    ]
+    fake_dm = MagicMock()
+    fake_dm.get_kb_chunks_containing = MagicMock(return_value=variants + genuine)
+
+    with patch("app.services.document_manager.get_document_manager",
+               return_value=fake_dm):
+        out = await chat_service._retrieve_pinned_chunks("kb-1", ["AA-1"])
+
+    assert sorted(r["chunk_id"] for r in out) == ["g1", "g2"]
+    # The pool is fetched wider than the cap so exact hits buried under their
+    # own variants can be reached at all.
+    assert fake_dm.get_kb_chunks_containing.call_args.args[2] > chat_service._MAX_PIN_TERM_HITS
 
 
 @pytest.mark.asyncio

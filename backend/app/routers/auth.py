@@ -239,10 +239,11 @@ async def forgot_password(
 
     # A locked trial can't be recovered with a password — login rejects locked
     # accounts regardless of the password. Sending a reset link is a dead end, so
-    # steer them to the renewal screen instead.
+    # steer them to the top-up screen instead. (Only clock-era accounts are ever
+    # "locked"; token-metered trials go "exhausted", which stays signed-in.)
     if user.is_demo_user and user.demo_status == "locked":
         from app.models.demo import DemoApplication
-        from app.services.email_service import send_email, trial_expired_email
+        from app.services.email_service import send_email, trial_exhausted_email
 
         demo_app = await DemoApplication.find_one(
             DemoApplication.user_id == user.user_id
@@ -255,12 +256,12 @@ async def forgot_password(
                 f"{settings.frontend_url}/demo/trial-end"
                 f"?token={demo_app.post_questionnaire_token}"
             )
-            subject, html = trial_expired_email(
+            subject, html = trial_exhausted_email(
                 user.name or user.user_id, trial_end_url
             )
             await send_email(
                 user.email or email, subject, html, settings,
-                email_type="trial_expired",
+                email_type="trial_exhausted",
             )
         logger.info("Password reset: routed locked trial %s to renewal", user.user_id)
         return {"ok": True}
@@ -326,6 +327,8 @@ async def reset_password(
             detail="User not found.",
         )
 
+    # The reset link came from their inbox, so this proves the address too.
+    user.email_verified = True
     user.password_hash = hash_password(body.password)
     # Invalidate every outstanding session: a reset is the recovery path after a
     # suspected compromise, so any access/refresh token minted earlier (including
@@ -362,6 +365,12 @@ async def magic_login(
     user = await User.find_one(User.user_id == user_id_str)
     if not user:
         return RedirectResponse(url=f"{settings.frontend_url}/landing?error=invalid_link")
+
+    # Following an emailed one-time link proves control of the inbox — this is
+    # the primary way a trial account becomes verified (see trial_budget).
+    if not user.email_verified:
+        user.email_verified = True
+        await user.save()
 
     response = RedirectResponse(url=f"{settings.frontend_url}/")
     _set_tokens(response, user, settings)

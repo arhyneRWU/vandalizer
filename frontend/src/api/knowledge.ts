@@ -207,7 +207,13 @@ export type KBValidationDetail = {
   expected_sources?: string[]
   answer_match?: boolean | null
   actual_answer?: string
+  /** Stored text is shorter than what the judge scored (storage cap). */
+  actual_answer_truncated?: boolean
+  /** The model stopped at its output cap — the judge scored an incomplete answer. */
+  generation_truncated?: boolean
   baseline_answer?: string | null
+  baseline_answer_truncated?: boolean
+  baseline_generation_truncated?: boolean
   judge?: KBJudgeVerdict | null
   baseline_judge?: KBJudgeVerdict | null
   lift?: number | null
@@ -249,6 +255,17 @@ export type KBValidationResult = {
     discrimination_summary?: { useful: number; redundant: number; failing: number; other: number }
     details: KBValidationDetail[]
   }
+  // How raw_score was assembled: the overall score is a weighted composite of
+  // answer accuracy, retrieval precision, source health, and chunk coverage —
+  // NOT the judge's answer accuracy (that is retrieval_precision.avg_judge_score).
+  // Absent on runs recorded before this was persisted; see kbScoreFormula.ts.
+  score_formula?: string | null
+  score_components?: {
+    key: 'judge' | 'retrieval_precision' | 'source_health' | 'chunk_coverage'
+    label: string
+    weight: number
+    value: number
+  }[] | null
   // Certified quality score (raw_score after the low-sample-size discount),
   // matching the persisted quality tile shown later.
   score?: number | null

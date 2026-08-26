@@ -218,6 +218,37 @@ def waitlist_confirmation_email(name: str, position: int, frontend_url: str, sta
     return subject, html
 
 
+def verify_email_email(
+    name: str, magic_link: str, budget_tokens: int | None = None
+) -> tuple[str, str]:
+    """Returns (subject, html_body) asking a new signup to confirm their address.
+
+    Sent at registration on a trial deployment. Confirming is what unlocks AI
+    features — and because the link signs them in, the one click both verifies
+    the address and gets them back to the workspace.
+    """
+    subject = "Confirm your email to start using Vandalizer"
+    allowance = (
+        f" Your account includes <span class=\"highlight\">{_fmt_tokens(budget_tokens)} AI tokens</span>,"
+        " with no time limit."
+        if budget_tokens
+        else ""
+    )
+    html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
+    <div class="container"><div class="card">
+      <div class="logo">Vandalizer</div>
+      <h1>One click and you're in</h1>
+      <p>Hi {name}, welcome to Vandalizer. Confirm this email address to switch on
+         the AI features — extraction, workflows, and chat over your documents.{allowance}</p>
+      <p style="margin-top:24px"><a class="btn" href="{magic_link}">Confirm my email</a></p>
+      <p style="font-size:13px;color:#6b7280;margin-top:16px">The link signs you
+         in too, so there's nothing else to do. You can browse your workspace
+         before confirming; AI features wait until you do.</p>
+      <div class="footer">Vandalizer</div>
+    </div></div></body></html>"""
+    return subject, html
+
+
 _CODE_STYLE = (
     "font-family:'SF Mono',Monaco,Consolas,'Courier New',monospace;"
     "background:#0a0a0a;color:#fff;padding:3px 8px;border-radius:4px;"
@@ -226,18 +257,24 @@ _CODE_STYLE = (
 )
 
 
+def _fmt_tokens(tokens: int) -> str:
+    """'2,000,000' — token counts are big; commas keep them readable."""
+    return f"{tokens:,}"
+
+
 def activation_email(
     name: str,
     user_id: str,
-    expires_at: str,
     frontend_url: str,
     magic_link: str | None = None,
+    budget_tokens: int | None = None,
 ) -> tuple[str, str]:
     """Returns (subject, html_body) for demo account activation.
 
     Passwordless by design: the email leads with a one-click sign-in link rather
     than an emailed password, so there's no credential to mistype, rotate, or
     leak. Users who prefer a password can set one anytime via "Forgot password".
+    The trial is token-metered, not timed — the email says what's included.
     """
     subject = "Your Vandalizer Demo Account is Ready!"
     # Primary CTA: the one-click link. Fall back to /login only if (unexpectedly)
@@ -249,78 +286,95 @@ def activation_email(
     else:
         sign_in_section = f"""
       <p style="margin-top:24px"><a class="btn" href="{frontend_url}/login">Sign in</a></p>"""
+    included = (
+        f"""full platform access with <span class="highlight">{_fmt_tokens(budget_tokens)} AI tokens</span> included — no time limit, use them at your own pace"""
+        if budget_tokens
+        else "full platform access"
+    )
     html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
     <div class="container"><div class="card">
       <div class="logo">Vandalizer</div>
       <h1>Your demo account is active!</h1>
-      <p>Hi {name}, great news: your Vandalizer demo account is ready to go. You have <span class="highlight">2 weeks</span> of full platform access.</p>{sign_in_section}
+      <p>Hi {name}, great news: your Vandalizer demo account is ready to go. You have {included}.</p>{sign_in_section}
       <p style="font-size:13px;color:#6b7280;margin-top:16px">Your account email is <code style="{_CODE_STYLE}">{user_id}</code>. Prefer to log in with a password? Set one anytime via <a href="{frontend_url}/login" style="color:#f1b300">Forgot password</a>.</p>
-      <p>Your trial expires on <span class="highlight">{expires_at}</span>.</p>
       <div class="footer">Vandalizer</div>
     </div></div></body></html>"""
     return subject, html
 
 
-def expiry_warning_email(name: str, days_left: int, expires_at: str, frontend_url: str) -> tuple[str, str]:
-    """Returns (subject, html_body) for trial expiry warning."""
-    subject = f"Your Vandalizer demo expires in {days_left} day{'s' if days_left != 1 else ''}"
-    html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
-    <div class="container"><div class="card">
-      <div class="logo">Vandalizer</div>
-      <h1>Your demo is expiring soon</h1>
-      <p>Hi {name}, your Vandalizer demo trial expires on <span class="highlight">{expires_at}</span> ({days_left} day{'s' if days_left != 1 else ''} remaining).</p>
-      <p>Make sure to explore any features you haven't tried yet! After expiry, your account will be locked and you'll be asked to complete a short feedback questionnaire.</p>
-      <p style="margin-top:24px"><a class="btn" href="{frontend_url}/landing">Go to Vandalizer</a></p>
-      <div class="footer">Vandalizer</div>
-    </div></div></body></html>"""
-    return subject, html
+def budget_warning_email(
+    name: str, used: int, budget: int, frontend_url: str
+) -> tuple[str, str]:
+    """Returns (subject, html_body) for the ~80%-of-budget heads-up.
 
-
-def trial_expired_email(name: str, trial_end_url: str) -> tuple[str, str]:
-    """Returns (subject, html_body) for the friendly end-of-trial notification.
-
-    Links to the end-of-trial screen, where the user can pick up where they left
-    off (self-serve renewal) or tell us what to build next.
+    The token-metered twin of the old day-12 expiry warning: nothing is about
+    to be taken away on a date, so the tone is informational — here's where you
+    are, and here's what happens when you get to the end.
     """
-    subject = "Your Vandalizer trial — pick up where you left off"
+    remaining = max(0, budget - used)
+    subject = "You've used most of your included Vandalizer tokens"
     html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
     <div class="container"><div class="card">
       <div class="logo">Vandalizer</div>
-      <h1>Your trial wrapped up — but you don't have to stop here</h1>
-      <p>Hi {name}, your two weeks with Vandalizer are up. Vandalizer is an
-         evolving beta built for research offices, and the feedback from trial
-         users like you is actively shaping where it goes next.</p>
-      <p>Want more time? You can pick up right where you left off, or tell us
-         what would make Vandalizer more useful for your office — either way,
-         we'll keep your access going.</p>
-      <p style="margin-top:24px"><a class="btn" href="{trial_end_url}">Keep going &amp; share your thoughts</a></p>
-      <p>Trial access continues as new releases come out. Thanks for helping
-         build it.</p>
+      <h1>A heads-up on your token balance</h1>
+      <p>Hi {name}, you've used <span class="highlight">{_fmt_tokens(used)}</span> of your
+         {_fmt_tokens(budget)} included AI tokens — about
+         <span class="highlight">{_fmt_tokens(remaining)}</span> left.</p>
+      <p>Nothing expires and there's no deadline. When the balance runs out, your
+         workspace stays exactly as it is — documents, extractions, and past
+         answers all remain — and we'll send you a one-click top-up link so you
+         can keep going.</p>
+      <p style="margin-top:24px"><a class="btn" href="{frontend_url}/landing">Back to Vandalizer</a></p>
       <div class="footer">Vandalizer</div>
     </div></div></body></html>"""
     return subject, html
 
 
-def trial_extended_email(
+def trial_exhausted_email(name: str, trial_end_url: str) -> tuple[str, str]:
+    """Returns (subject, html_body) for the friendly out-of-tokens notification.
+
+    Links to the trial-end screen, where the user can top up (one click for
+    light users, a few notes for heavy ones) or tell us what to build next.
+    """
+    subject = "Your Vandalizer tokens ran out — here's a top-up"
+    html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
+    <div class="container"><div class="card">
+      <div class="logo">Vandalizer</div>
+      <h1>You've used your included tokens — let's get you more</h1>
+      <p>Hi {name}, you've worked through the AI tokens included with your
+         Vandalizer account. Vandalizer is an evolving beta built for research
+         offices, and the feedback from people using it like you are is actively
+         shaping where it goes next.</p>
+      <p>Your workspace is untouched and still yours to browse — everything you
+         uploaded and extracted is right where you left it. To start running AI
+         again, grab a top-up below, or tell us what would make Vandalizer more
+         useful for your office. Either way, we'll keep you going.</p>
+      <p style="margin-top:24px"><a class="btn" href="{trial_end_url}">Top up &amp; share your thoughts</a></p>
+      <div class="footer">Vandalizer</div>
+    </div></div></body></html>"""
+    return subject, html
+
+
+def trial_topup_email(
     name: str,
-    expires_at: str,
+    new_budget: int,
     frontend_url: str,
     magic_link: str | None = None,
 ) -> tuple[str, str]:
-    """Returns (subject, html_body) confirming a self-serve trial renewal.
+    """Returns (subject, html_body) confirming a self-serve token top-up.
 
     Trial accounts sign in via magic link (their password is random and was
     never disclosed), so the CTA carries one whenever the caller can mint it —
     a bare /login link is a dead end for these users.
     """
-    subject = "Your Vandalizer trial is extended"
+    subject = "Your Vandalizer tokens are topped up"
     cta_url = magic_link or f"{frontend_url}/login"
     html = f"""<!DOCTYPE html><html><head>{_BASE_STYLE}</head><body>
     <div class="container"><div class="card">
       <div class="logo">Vandalizer</div>
       <h1>You're back in — welcome!</h1>
-      <p>Hi {name}, your Vandalizer trial has been extended. You now have access
-         through <span class="highlight">{expires_at}</span>.</p>
+      <p>Hi {name}, your Vandalizer account is topped up. Your balance now runs to
+         <span class="highlight">{_fmt_tokens(new_budget)} tokens</span> in total.</p>
       <p>Thanks for helping shape the product. As new releases land, you'll see
          them here first.</p>
       <p style="margin-top:24px"><a class="btn" href="{cta_url}">Back to Vandalizer</a></p>

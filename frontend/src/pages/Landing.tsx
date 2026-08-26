@@ -196,8 +196,13 @@ function LandingRegisterForm({ onSwitch }: { onSwitch: () => void }) {
 // ---------------------------------------------------------------------------
 
 function AuthBlock({ config }: { config: AuthConfig | null }) {
-  const [mode, setMode] = useState<'login' | 'register'>('login')
   const search = useSearch({ strict: false }) as Record<string, string | undefined>
+  // `/landing?register=1` opens in register mode. The trial CTA on /demo and
+  // the /register redirect deep-link here; without it a would-be signup
+  // landed on the login form and had to find the small "Create account" toggle.
+  const [mode, setMode] = useState<'login' | 'register'>(
+    search?.register === '1' ? 'register' : 'login',
+  )
   const oauthError = search?.error
   const adminOverride = search?.admin === '1'
 
@@ -210,7 +215,12 @@ function AuthBlock({ config }: { config: AuthConfig | null }) {
   }
 
   const oauthEnabled = config.auth_methods.includes('oauth')
-  const passwordEnabled = config.auth_methods.includes('password') || adminOverride
+  // The trial is password self-registration — POST /api/auth/register has no
+  // auth-method gate — so a deployment that switched password sign-in off for
+  // its own staff still needs this block whenever the trial system is on.
+  // Otherwise "Create your account" on /demo lands on an empty landing page.
+  const passwordEnabled =
+    config.auth_methods.includes('password') || adminOverride || !!config.trial_system_enabled
   const azureProvider = config.oauth_providers.find(
     (p) => p.provider === 'azure' && p.configured,
   )

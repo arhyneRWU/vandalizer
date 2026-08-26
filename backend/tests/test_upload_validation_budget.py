@@ -60,3 +60,50 @@ def test_summarize_reports_skipped_sections_without_spending_more():
     written = db.smart_document.update_one.call_args.args[1]["$set"]
     assert written["validating"] is False
     assert "not checked" in written["validation_feedback"]
+
+
+# ---------------------------------------------------------------------------
+# Any trial gate degrades the same way, not just an exhausted budget
+# ---------------------------------------------------------------------------
+
+
+def _unverified(user_id):
+    from app.exceptions import TrialUnverifiedError
+
+    raise TrialUnverifiedError("confirm your email")
+
+
+def test_validate_chunk_marks_skipped_when_email_unverified():
+    """An unverified trial user's first upload must not strand the document.
+
+    `validate_chunk` used to catch only TrialBudgetExceededError. Adding the
+    verification gate as a sibling exception meant it escaped to the task's
+    retry path, the chord never fired its callback, and the document sat at
+    `validating: True` forever — for every new trial user before they clicked
+    the confirmation link. Both gates now share TrialSpendBlockedError.
+    """
+    agent = MagicMock()
+    with patch.object(uv, "_get_secure_agent", return_value=agent), \
+         patch("app.services.trial_budget.check_sync", side_effect=_unverified):
+        result = uv.validate_chunk.apply(
+            args=("doc.pdf", "rules", "text", 1, 2), kwargs={"user_id": "trial-u"},
+        ).get()
+
+    assert result["skipped"] is True
+    assert result["valid"] is True
+    # The feedback names the gate that actually fired, not "budget exhausted".
+    assert "confirm your email" in result["feedback"].lower()
+    agent.run_sync.assert_not_called()
+
+
+def test_every_trial_gate_shares_one_base():
+    """The degradation contract is the base class, so a future gate is covered
+    without revisiting each catch site."""
+    from app.exceptions import (
+        TrialBudgetExceededError,
+        TrialSpendBlockedError,
+        TrialUnverifiedError,
+    )
+
+    assert issubclass(TrialBudgetExceededError, TrialSpendBlockedError)
+    assert issubclass(TrialUnverifiedError, TrialSpendBlockedError)
