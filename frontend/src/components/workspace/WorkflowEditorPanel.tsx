@@ -4046,7 +4046,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 />
                 <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
                   Use <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>{'{{placeholder}}'}</code> syntax.
-                  AI will fill placeholders from the input data.
+                  Values are copied verbatim from the input and everything outside the placeholders is kept exactly as written.
+                  A placeholder the input doesn&apos;t answer is filled with <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided]</code> and listed in the step&apos;s warning.
                 </div>
               </div>
             )}

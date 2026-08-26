@@ -1165,6 +1165,108 @@ class DocumentRendererNode(Node):
         }
 
 
+# ---------------------------------------------------------------------------
+# Form Filler
+# ---------------------------------------------------------------------------
+#
+# The form is rendered in Python, not by the model. The model is asked for one
+# JSON object of placeholder -> value (or null) and never sees the template, so
+# the layout is preserved by construction, a missing value is always the same
+# token, and there is no way for a note about missing fields to come back in
+# place of the form. Before this, the step went through llm_chat_model, whose
+# chat framing ("format as clean markdown", "say so explicitly if the context
+# lacks what the instruction needs") contradicted "return only the filled
+# template" — and with no temperature set, which reading won was a coin flip
+# per run. A support ticket counted four different output shapes in ten runs
+# of the same inputs.
+
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+FORM_FILLER_MISSING = "[Not provided]"
+
+FORM_FILLER_VALUES_INSTRUCTIONS = (
+    "You fill form templates for a document-processing workflow. You are given the "
+    "placeholder names from a template and a CONTEXT block. Return ONE JSON object "
+    "whose keys are exactly the placeholder names and whose values are strings copied "
+    "verbatim from the CONTEXT — the same digits, units, punctuation and capitalisation "
+    "as the source; never reformatted, rounded, expanded, abbreviated or summarised. "
+    "When the CONTEXT does not state a value for a placeholder, use JSON null. Do not "
+    "guess, do not use outside knowledge, do not add keys, and write nothing before or "
+    "after the JSON object."
+)
+
+FORM_FILLER_FREEFORM_INSTRUCTIONS = (
+    "You fill form templates for a document-processing workflow. Return the TEMPLATE "
+    "with its blanks filled from the CONTEXT and every other character unchanged: same "
+    "lines, same order, same headings, same punctuation. Copy each value verbatim from "
+    "the CONTEXT. Where the CONTEXT does not state a value, write exactly "
+    f"{FORM_FILLER_MISSING} in that blank. Never restructure the template, never add "
+    "notes, lists or commentary, and never reply with a message instead of the "
+    "template. Output the filled template and nothing else."
+)
+
+
+def _context_block(input_data) -> str:
+    if input_data is None or input_data == "":
+        return ""
+    if isinstance(input_data, str):
+        return input_data
+    try:
+        return json.dumps(input_data, indent=2, default=str)
+    except (TypeError, ValueError):
+        return str(input_data)
+
+
+def _run_form_filler_model(
+    model: str, instructions: str, prompt: str, *,
+    system_config_doc: dict | None, usage_acc: UsageAccumulator | None,
+) -> str:
+    """One deterministic LLM call: dedicated instructions, temperature 0."""
+    from pydantic_ai import Agent
+
+    from app.services.llm_service import build_thinking_model_settings, get_agent_model
+
+    agent_model = get_agent_model(model, system_config_doc=system_config_doc)
+    settings = dict(build_thinking_model_settings(model, None, system_config_doc) or {})
+    settings["temperature"] = 0.0
+    agent = Agent(agent_model, instructions=instructions, model_settings=settings)
+    result = agent.run_sync(prompt)
+    if usage_acc:
+        usage_acc.record(result)
+    return result.output or ""
+
+
+def template_placeholders(template: str) -> list[str]:
+    """Placeholder names in first-appearance order, de-duplicated."""
+    return list(dict.fromkeys(_PLACEHOLDER_RE.findall(template or "")))
+
+
+def render_filled_template(
+    template: str, values: dict, missing_token: str = FORM_FILLER_MISSING,
+) -> tuple[str, list[str]]:
+    """Substitute placeholders; return (text, names that had no value)."""
+    missing: list[str] = []
+
+    def _sub(m: "re.Match[str]") -> str:
+        name = m.group(1)
+        value = values.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if name not in missing:
+                missing.append(name)
+            return missing_token
+        return value if isinstance(value, str) else json.dumps(value, default=str)
+
+    return _PLACEHOLDER_RE.sub(_sub, template or ""), missing
+
+
+def _parse_values_json(text: str, placeholders: list[str]) -> dict:
+    from app.services.workflow_validator import _extract_json
+
+    parsed = _extract_json(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("expected a JSON object")
+    return {name: parsed.get(name) for name in placeholders}
+
+
 class FormFillerNode(Node):
     def __init__(self, data: dict) -> None:
         super().__init__("FormFiller")
@@ -1173,24 +1275,66 @@ class FormFillerNode(Node):
 
     def process(self, inputs):
         template = self.data.get("template", "")
+        missing_token = (self.data.get("missing_value") or "").strip() or FORM_FILLER_MISSING
         prev_step_name = inputs.get("step_name")
 
         sources = _resolve_input_sources(self.data, prev_step_name)
         input_data = _build_combined_context(self.data, inputs, sources)
+        context = _context_block(input_data)
 
         self.report_progress("Filling template")
+        result = {"input": inputs.get("output"), "step_name": self.name}
+
+        placeholders = template_placeholders(template)
+        if not placeholders:
+            # No {{name}} markers to substitute: the model has to fill the
+            # blanks itself. Still its own instructions and temperature 0.
+            prompt = f"TEMPLATE:\n{template}\n\nCONTEXT:\n{context}"
+            result["output"] = _run_form_filler_model(
+                self.model, FORM_FILLER_FREEFORM_INSTRUCTIONS, prompt,
+                system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
+            ).strip()
+            result["warning"] = (
+                "This template has no {{placeholder}} markers, so the model filled "
+                "its blanks freehand. Mark each blank as {{name}} to get the same "
+                "layout and the same missing-value text on every run."
+            )
+            return result
 
         prompt = (
-            f"Fill all {{{{placeholders}}}} in the following template using the provided data. "
-            f"Return only the filled template with no extra commentary.\n\n"
-            f"Template:\n{template}"
+            f"PLACEHOLDERS:\n{json.dumps(placeholders)}\n\n"
+            f"CONTEXT:\n{context}"
         )
-        filled = llm_chat_model(
-            model=self.model, prompt=prompt, data=input_data,
-            include_next_step=False, system_config_doc=self._sys_cfg,
-            usage_acc=self._usage_acc,
+        raw = _run_form_filler_model(
+            self.model, FORM_FILLER_VALUES_INSTRUCTIONS, prompt,
+            system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
         )
-        return {"output": filled, "input": inputs.get("output"), "step_name": self.name}
+        try:
+            values = _parse_values_json(raw, placeholders)
+        except ValueError:
+            # One retry with the failure named; a second failure is a real error
+            # and the step fails visibly rather than shipping a guess.
+            raw = _run_form_filler_model(
+                self.model, FORM_FILLER_VALUES_INSTRUCTIONS,
+                prompt + "\n\nYour previous reply was not a JSON object. Reply with "
+                "only the JSON object.",
+                system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
+            )
+            try:
+                values = _parse_values_json(raw, placeholders)
+            except ValueError as e:
+                raise ValueError(
+                    f"Form Filler: the model did not return placeholder values as JSON ({e})"
+                ) from e
+
+        filled, missing = render_filled_template(template, values, missing_token)
+        result["output"] = filled
+        if missing:
+            result["warning"] = (
+                f"{len(missing)} field{'s' if len(missing) != 1 else ''} not found in "
+                f"the input and filled with {missing_token}: {', '.join(missing)}"
+            )
+        return result
 
 
 class DataExportNode(Node):
