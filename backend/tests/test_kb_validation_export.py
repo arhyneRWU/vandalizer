@@ -330,3 +330,28 @@ def test_an_older_run_still_falls_back_to_the_live_test_set():
 
     assert rows[0]["expected_answer"] == "From the live set"
     assert rows[0]["external_id"] == "OLD-1"
+
+
+def test_rows_carry_truncation_flags_and_default_false_for_older_runs():
+    """Rows written before the flags existed export False (not missing), and
+    rows that recorded a cut export it under both the storage and the
+    generation flag, independently for the baseline."""
+    vr = _make_vr()
+    details = vr.result_snapshot["retrieval_precision"]["details"]
+    details[0]["actual_answer_truncated"] = True
+    details[0]["generation_truncated"] = False
+    details[0]["baseline_generation_truncated"] = True
+    _, _, rows = build_kb_validation_results_export(
+        kb=_make_kb(), vr=vr, test_queries=_make_queries(), catalog_version=None,
+        exported_by_user_id="u", exported_at="2026-08-26T00:00:00Z",
+    )
+    first = rows[0]
+    assert first["actual_answer_truncated"] is True
+    assert first["generation_truncated"] is False
+    assert first["baseline_answer_truncated"] is False
+    assert first["baseline_generation_truncated"] is True
+    older = rows[1]
+    for key in ("actual_answer_truncated", "generation_truncated",
+                "baseline_answer_truncated", "baseline_generation_truncated"):
+        assert key in RESULT_COLUMNS
+        assert older[key] is False
