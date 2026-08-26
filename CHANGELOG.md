@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Chat's exact-match lane no longer discards an identifier because its variants are common, and no longer pins fragments of relative clauses.** The lane that fetches chunks literally containing an identifier the user typed treated a term found in more than 24 chunks as boilerplate — but it counted the raw substring pool, so `SF-424` was measured against every `SF-424A` and `SF-424B` chunk too, and a base form with two genuine hits in a packet stamped with its variants was dropped outright. The cut-off now counts only exact, word-bounded hits, and the pool is fetched wider so those hits can be reached under the variants. Separately, the "what/which is …" trigger that pins the noun phrase of a definitional question fired anywhere in the message, so *"summarize the section which is most important for compliance"* pinned `most important`; on a small knowledge base, where the cut-off cannot fire, that spent up to half the lane on chunks containing a junk bigram. The trigger now has to open a sentence. Every failure mode of either change degrades to the vector-only retrieval that preceded the lane, not below it.
+
+
 ## [v4.11.1] - 2026-08-25
 
 ### Fixed
