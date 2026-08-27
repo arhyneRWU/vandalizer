@@ -559,7 +559,19 @@ export function WorkflowEditorPanel() {
   // workflows never require input; text needs non-empty text; otherwise a doc
   // — unless a project is active, in which case the run falls back to all of
   // the project's files.
-  const missingInput = isNoInput ? false : isTextInput ? !textInput.trim() : (selectedDocUuids.length === 0 && !activeProjectUuid)
+  // Fixed documents (Input tab) are merged into every run by the loader, so
+  // they satisfy the selection on their own; a project does the same.
+  const fixedDocCount = Array.isArray(workflow?.input_config?.fixed_documents)
+    ? (workflow!.input_config!.fixed_documents as unknown[]).length
+    : 0
+  const runInput = describeRunInput({
+    triggerType: workflow?.input_config?.trigger_type as string | undefined,
+    selectedCount: selectedDocUuids.length,
+    fixedCount: fixedDocCount,
+    hasProject: !!activeProjectUuid,
+    textInput,
+  })
+  const missingInput = runInput.missing
   // A workflow with nothing to do still "runs": it completes in milliseconds
   // and hands back the input document's uuid as its output. The empty
   // "Document" step is the run's own input placeholder — the canvas hides it,
@@ -586,13 +598,18 @@ export function WorkflowEditorPanel() {
         setActiveTab('design')
         await runner.start(openWorkflowId, allUuids, undefined, false)
       } else {
-        // Default to the whole project when nothing is explicitly selected.
+        // Default to the whole project when nothing is explicitly selected;
+        // failing that, the fixed documents alone (the run loader merges them
+        // in, so an empty explicit selection is a valid run).
         let uuids = selectedDocUuids
         if (uuids.length === 0) {
-          if (!activeProjectUuid) return
-          uuids = (await getProjectDocuments(activeProjectUuid)).document_uuids
-          if (uuids.length === 0) {
-            toast('No files in this project to run on yet', 'info')
+          if (activeProjectUuid) {
+            uuids = (await getProjectDocuments(activeProjectUuid)).document_uuids
+            if (uuids.length === 0) {
+              toast('No files in this project to run on yet', 'info')
+              return
+            }
+          } else if (fixedDocCount === 0) {
             return
           }
         }
@@ -1094,10 +1111,10 @@ export function WorkflowEditorPanel() {
             Add a step below — there is nothing for this workflow to do yet
           </div>
         )}
-        {hasSteps && !isTextInput && !isNoInput && selectedDocUuids.length === 0 && (
+        {hasSteps && runInput.hint && (
           <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
             <FileText style={{ width: 12, height: 12 }} />
-            {activeProjectUuid ? 'Will run on all files in this project' : 'Select a document to run this workflow'}
+            {runInput.hint}
           </div>
         )}
         {isNoInput && (
@@ -2420,6 +2437,35 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // workflow the viewer can see but not manage (shared or verified) with a 404,
 // so surfacing the raw "Workflow not found" would read as if the workflow
 // vanished — say what actually happened instead.
+/**
+ * Whether a run has the input it needs, and the hint to show when it doesn't.
+ *
+ * Fixed documents count as the selection in Manual mode: the run loader merges
+ * them into every run, so a workflow with a fixed document has something to
+ * run on even with nothing selected — pre-assigning was meant to avoid that
+ * selection, and the button used to demand it anyway (support ticket).
+ */
+export function describeRunInput(input: {
+  triggerType: string | undefined
+  selectedCount: number
+  fixedCount: number
+  hasProject: boolean
+  textInput: string
+}): { missing: boolean; hint: string | null } {
+  const { triggerType, selectedCount, fixedCount, hasProject, textInput } = input
+  if (triggerType === 'no_input') return { missing: false, hint: null }
+  if (triggerType === 'text_input') return { missing: !textInput.trim(), hint: null }
+  if (selectedCount > 0) return { missing: false, hint: null }
+  if (hasProject) return { missing: false, hint: 'Will run on all files in this project' }
+  if (fixedCount > 0) {
+    return {
+      missing: false,
+      hint: `Will run on its ${fixedCount} fixed document${fixedCount !== 1 ? 's' : ''} — select more to add to them`,
+    }
+  }
+  return { missing: true, hint: 'Select a document to run this workflow' }
+}
+
 function describeConfigSaveError(err: unknown, what: string): string {
   if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
     return `Couldn't save ${what} — you don't have permission to edit this workflow. Save a copy to your library to make an editable version.`
@@ -6063,6 +6109,8 @@ function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
             </div>
             <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 12 }}>
               Pre-assign documents that will always be included when this workflow runs.
+              They count as the selection: with a fixed document, Run works without selecting anything else,
+              and any documents you do select are added alongside them.
             </div>
             <FixedDocumentsZone
               fixedDocs={fixedDocs}
