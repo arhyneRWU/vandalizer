@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
 import { useKnowledgeBases, useScopedKnowledgeBases } from '../../hooks/useKnowledgeBases'
 import { useProjectPins } from '../../hooks/useProjectPins'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
@@ -342,7 +342,23 @@ export function KnowledgePanel() {
     api.addUrlsToKB(selectedKB.uuid, urls, crawlEnabled, maxCrawlPages, allowedDomains)
       .then((result) => {
         const n = result?.added ?? urls.length
-        toast(`Added ${n} URL${n === 1 ? '' : 's'} — crawling in background`, 'success')
+        const skipped = result?.skipped ?? 0
+        const plural = (c: number) => (c === 1 ? '' : 's')
+        if (n === 0 && skipped > 0) {
+          // Nothing was fetched: re-adding an existing URL is a no-op. Say so —
+          // a silent "Added 2" here sent one user on a fruitless refresh loop.
+          toast(
+            `${skipped} URL${plural(skipped)} already in this KB — nothing was fetched. Use the ↻ button on a source to re-fetch its page.`,
+            'info',
+          )
+        } else if (skipped > 0) {
+          toast(
+            `Added ${n} URL${plural(n)} — crawling in background. ${skipped} already in this KB and not re-fetched.`,
+            'success',
+          )
+        } else {
+          toast(`Added ${n} URL${plural(n)} — crawling in background`, 'success')
+        }
         loadDetail(selectedKB.uuid)
         refresh()
       })
@@ -351,6 +367,25 @@ export function KnowledgePanel() {
         toast(err instanceof Error ? err.message : 'Failed to add URLs', 'error')
       })
       .finally(() => setAddingUrls(false))
+  }
+
+  const handleRefreshSource = async (source: KnowledgeBaseSource) => {
+    if (!selectedKB) return
+    try {
+      await api.refreshKBSource(selectedKB.uuid, source.uuid)
+      // Optimistically flip to building so the status poller starts.
+      setSelectedKB(prev => prev ? {
+        ...prev,
+        status: 'building',
+        sources: prev.sources.map(s => s.uuid === source.uuid ? { ...s, status: 'pending' as const } : s),
+      } : prev)
+      toast('Re-fetching page in background — previous text is kept if the fetch fails', 'success')
+      loadDetail(selectedKB.uuid)
+      refresh()
+    } catch (err) {
+      console.error('Failed to refresh source:', err)
+      toast(err instanceof Error ? err.message : 'Failed to refresh source', 'error')
+    }
   }
 
   const handleRemoveSource = async (sourceUuid: string) => {
@@ -1381,6 +1416,22 @@ export function KnowledgePanel() {
                               >
                                 <Pencil size={12} style={{ color: '#888' }} />
                               </button>
+                              {source.source_type === 'url' && (
+                                <button
+                                  type="button"
+                                  aria-label="Refresh source"
+                                  onClick={(e) => { e.stopPropagation(); handleRefreshSource(source) }}
+                                  disabled={source.status === 'processing' || source.status === 'pending'}
+                                  title={
+                                    source.processed_at
+                                      ? `Re-fetch this page (last fetched ${new Date(source.processed_at).toLocaleDateString()})`
+                                      : 'Re-fetch this page'
+                                  }
+                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2, display: 'flex' }}
+                                >
+                                  <RefreshCw size={12} style={{ color: '#888' }} />
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 aria-label="Remove source"
