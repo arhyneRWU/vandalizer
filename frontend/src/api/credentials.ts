@@ -24,7 +24,7 @@ export function createCredential(data: {
 
 export function updateCredential(
   id: string,
-  data: { name?: string; description?: string; payload?: Record<string, string> },
+  data: { name?: string; description?: string; payload?: Record<string, string>; type?: CredentialType },
 ) {
   return apiFetch<Credential>(`/api/credentials/${id}`, {
     method: 'PATCH',

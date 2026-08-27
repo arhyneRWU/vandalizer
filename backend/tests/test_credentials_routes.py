@@ -226,3 +226,117 @@ class TestConnectionTestRoutes:
             MockUser.find_one = AsyncMock(return_value=user)
             resp = await client.post("/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers, json={})
         assert resp.status_code == 404
+
+
+
+# Shared with test_credentials_service: an RSA key for OAuth payloads.
+from cryptography.hazmat.backends import default_backend  # noqa: E402
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+
+@pytest.fixture(scope="module")
+def rsa_private_pem() -> str:
+    """Generate a fresh RSA private key for signing tests."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+
+class TestChangeCredentialType:
+    def _cred(self):
+        cred = MagicMock()
+        cred.id = "507f1f77bcf86cd799439011"
+        cred.user_id = "testuser"
+        cred.team_id = None
+        cred.name = "Lakehouse"
+        cred.description = None
+        cred.type = "static_header"
+        cred.payload = {"header_name": "X-Api-Key", "header_value": "ENC"}
+        cred.created_at = None
+        cred.updated_at = None
+        cred.save = AsyncMock()
+        return cred
+
+    @pytest.mark.asyncio
+    async def test_type_change_replaces_the_payload_and_repoints_steps(self, client, rsa_private_pem):
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = self._cred()
+        task = MagicMock()
+        task.data = {"auth_strategy": "static_header", "credential_id": cred.id, "url": "https://x"}
+        task.save = AsyncMock()
+        find_result = MagicMock()
+        find_result.to_list = AsyncMock(return_value=[task])
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials.credentials_service.validate_outbound_url", return_value="ok", create=True),
+            patch("app.services.credentials_service.validate_outbound_url", return_value="ok"),
+            patch("app.routers.credentials.credentials_service.invalidate_cached_token") as mock_inval,
+            patch("app.models.workflow.WorkflowStepTask.find", return_value=find_result),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.patch(
+                f"/api/credentials/{cred.id}", cookies=cookies, headers=headers,
+                json={"type": "oauth_client_credentials", "payload": {
+                    "client_id": "c1", "token_endpoint": "https://issuer/token", "private_key": rsa_private_pem,
+                }},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["type"] == "oauth_client_credentials"
+        assert body["steps_updated"] == 1
+        assert body["payload"]["client_id"] == "c1"
+        assert body["payload"]["private_key"] == "<set>"
+        assert "header_name" not in body["payload"]  # nothing merged from the old type
+        assert cred.type == "oauth_client_credentials"
+        assert task.data["auth_strategy"] == "oauth_client_credentials"
+        task.save.assert_awaited_once()
+        mock_inval.assert_called_once_with(cred.id)
+
+    @pytest.mark.asyncio
+    async def test_type_change_without_a_full_payload_is_refused(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = self._cred()
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.patch(f"/api/credentials/{cred.id}", cookies=cookies, headers=headers,
+                                      json={"type": "oauth_client_credentials"})
+            assert resp.status_code == 400
+            assert "complete payload" in resp.json()["detail"]
+            resp = await client.patch(f"/api/credentials/{cred.id}", cookies=cookies, headers=headers,
+                                      json={"type": "oauth_client_credentials", "payload": {"client_id": "c1"}})
+            assert resp.status_code == 400
+            assert "token_endpoint" in resp.json()["detail"]
+        cred.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_same_type_still_merges(self, client):
+        """Sending the current type is not a change: the rotate-one-secret merge path stays."""
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = self._cred()
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials.credentials_service.merge_update_payload",
+                  return_value={"header_name": "X-New", "header_value": "kept"}) as mock_merge,
+            patch("app.routers.credentials.credentials_service.invalidate_cached_token"),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.patch(f"/api/credentials/{cred.id}", cookies=cookies, headers=headers,
+                                      json={"type": "static_header", "payload": {"header_name": "X-New"}})
+        assert resp.status_code == 200, resp.text
+        mock_merge.assert_called_once()
+        assert resp.json()["steps_updated"] is None

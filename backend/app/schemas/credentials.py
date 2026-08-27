@@ -22,6 +22,10 @@ class UpdateCredentialRequest(BaseModel):
     # If provided, replaces the encrypted payload wholesale. Omit to keep
     # existing secrets in place when only renaming.
     payload: Optional[dict] = None
+    # Switch the credential to another type. The stored secrets belong to the
+    # old type, so a type change requires a complete ``payload`` for the new
+    # one; API Node steps using this credential are re-pointed to match.
+    type: Optional[CredentialType] = None
 
 
 class CredentialResponse(BaseModel):
@@ -35,6 +39,9 @@ class CredentialResponse(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     can_manage: bool = True
+    # Set on an update that changed the type: how many API Node steps were
+    # re-pointed to the new type so their runs keep working.
+    steps_updated: Optional[int] = None
 
 
 class TestCredentialDraftRequest(BaseModel):

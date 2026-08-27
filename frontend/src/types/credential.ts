@@ -11,6 +11,8 @@ export interface Credential {
   created_at: string | null
   updated_at: string | null
   can_manage: boolean
+  /** On an update that changed the type: API steps re-pointed to it. */
+  steps_updated?: number | null
 }
 
 /** One step of a credential connection test. */
