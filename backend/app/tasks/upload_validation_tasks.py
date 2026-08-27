@@ -12,6 +12,7 @@ from celery import chord
 
 from app.celery_app import celery_app
 from app.tasks import TRANSIENT_EXCEPTIONS
+from app.services.ocr_client import OcrUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,24 @@ def perform_document_validation(
         ext = os.path.splitext(file_path)[1].lstrip(".")
         try:
             text = extract_text_from_file(file_path, ext)
+        except OcrUnavailableError as e:
+            # A transient OCR outage is worth waiting out: the retry runs
+            # minutes later, by which point the extraction task has usually
+            # written raw_text and this task never needs OCR at all. Only once
+            # retries are spent does it degrade to "nothing to validate" like
+            # any other read failure — see the catch-all below.
+            if self.request.retries < self.max_retries:
+                logger.warning(
+                    "OCR unavailable for validation of %s (attempt %d/%d) — retrying: %s",
+                    document_uuid, self.request.retries + 1, self.max_retries, e,
+                )
+                raise
+            logger.warning(
+                "OCR still unavailable for validation of %s after %d attempts; "
+                "validating empty text",
+                document_uuid, self.max_retries,
+            )
+            text = ""
         except Exception as e:
             # The extraction task owns reporting read failures (it marks the
             # document errored and notifies). For compliance validation a
