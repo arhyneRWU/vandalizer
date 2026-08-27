@@ -1147,22 +1147,51 @@ class DocumentRendererNode(Node):
         super().__init__("DocumentRenderer")
         self.data = data
 
+    # Formats the step advertises. PDF and Word go through the same renderers
+    # the run-export endpoint uses (markdown → styled document; dict / list of
+    # dicts → table), so a step output and an export of it look the same.
+    FORMATS = ("md", "txt", "pdf", "docx")
+
     def process(self, inputs):
-        fmt = self.data.get("format", "md")
-        filename = self.data.get("filename", "output")
+        fmt = (self.data.get("format") or "md").lower()
+        if fmt not in self.FORMATS:
+            fmt = "txt"
+        filename = (self.data.get("filename") or "").strip() or "output"
         input_data = inputs.get("output", "")
         self.report_progress(f"Rendering as {fmt}")
 
-        text = input_data if isinstance(input_data, str) else json.dumps(input_data, indent=2)
-        ext = "md" if fmt == "md" else "txt"
-        full_filename = f"{filename}.{ext}"
-        data_b64 = base64.b64encode(text.encode("utf-8")).decode("utf-8")
+        result = {"input": inputs.get("output"), "step_name": self.name}
+        if isinstance(input_data, dict) and input_data.get("type") == "file_download":
+            # Rendering a file's base64 into a document is never what anyone
+            # meant. Say so rather than shipping a .pdf full of base64.
+            result["output"] = ""
+            result["error"] = (
+                f"Document Renderer received a file ({input_data.get('filename') or 'output'}) "
+                "from the previous step, not text to render. Point this step at a step that "
+                "produces text, or remove it and download the file directly."
+            )
+            return result
 
-        return {
-            "output": {"type": "file_download", "data_b64": data_b64, "file_type": ext, "filename": full_filename},
-            "input": inputs.get("output"),
-            "step_name": self.name,
+        if fmt == "pdf":
+            from app.services.pdf_service import render_workflow_pdf
+
+            title = (self.data.get("title") or "").strip() or filename.replace("_", " ").replace("-", " ")
+            data = base64.b64encode(render_workflow_pdf(input_data, title=title, subtitle=""))
+        elif fmt == "docx":
+            from app.services.docx_service import data_to_docx_bytes
+
+            data = base64.b64encode(data_to_docx_bytes(input_data))
+        else:
+            text = input_data if isinstance(input_data, str) else json.dumps(input_data, indent=2)
+            data = base64.b64encode(text.encode("utf-8"))
+
+        result["output"] = {
+            "type": "file_download",
+            "data_b64": data.decode("ascii"),
+            "file_type": fmt,
+            "filename": f"{filename}.{fmt}",
         }
+        return result
 
 
 # ---------------------------------------------------------------------------
