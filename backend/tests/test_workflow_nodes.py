@@ -389,10 +389,32 @@ class TestWebsiteNode:
         assert result["output"] == "Page content"
         assert result["step_name"] == "AddWebsite"
 
-    def test_empty_url(self):
+    def test_empty_url_is_a_configuration_error(self):
+        """An Add Website step saved without a URL used to return "" and let
+        the run finish Completed. It now reports an error so the engine fails
+        the run naming the step."""
         node = WebsiteNode({"url": ""})
         result = node.process({"output": "prev"})
         assert result["output"] == ""
+        assert "not configured: no URL" in result["error"]
+
+    def test_missing_url_key_is_a_configuration_error(self):
+        result = WebsiteNode({}).process({"output": "prev"})
+        assert "not configured" in result["error"]
+
+    def test_whitespace_url_is_a_configuration_error(self):
+        result = WebsiteNode({"url": "   "}).process({"output": "prev"})
+        assert "not configured" in result["error"]
+
+    def test_empty_url_fails_the_run(self):
+        from app.services.workflow_engine import WorkflowEngine, WorkflowStepError
+
+        engine = WorkflowEngine()
+        engine.add_node(WebsiteNode({"url": ""}))
+        with pytest.raises(WorkflowStepError) as exc:
+            engine.execute()
+        assert exc.value.step_name == "AddWebsite"
+        assert "not configured" in str(exc.value)
 
     @patch("app.services.web_fetcher.fetch_url_sync", side_effect=ValueError("blocked"))
     def test_blocked_url(self, mock_fetch):
@@ -796,10 +818,10 @@ class TestResearchNode:
 # ---------------------------------------------------------------------------
 
 class TestAPICallNode:
-    def test_empty_url(self):
+    def test_empty_url_is_a_configuration_error(self):
         node = APICallNode({"url": ""})
         result = node.process({"output": "prev"})
-        assert result["output"] == ""
+        assert "not configured: no URL" in result["error"]
 
     @patch("app.utils.url_validation.validate_outbound_url", side_effect=ValueError("blocked"))
     def test_blocked_url(self, mock_validate):
