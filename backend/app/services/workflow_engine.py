@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 
 from app.services.extraction_engine import ExtractionEngine
 from app.services.llm_service import create_chat_agent
-from app.services.page_locator import locator_for_meta
+from app.services.page_locator import annotate_chunk_pages, cited_pages, format_page_range, locator_for_meta
 
 logger = logging.getLogger(__name__)
 
@@ -1621,17 +1621,21 @@ class KnowledgeBaseQueryNode(Node):
         sources: list[dict] = []
         for i, r in enumerate(results, 1):
             meta = r.get("metadata") or {}
+            content = r.get("content") or ""
             source_name = meta.get("source_name", "Unknown source")
-            page = meta.get("page")
             sheet = meta.get("sheet")
-            approximate = bool(meta.get("page_approximate"))
-            locator = locator_for_meta(meta)
+            # Cite the page of the passage that matches the query, or the
+            # range, for a chunk that crosses a page break (see page_locator).
+            cited = cited_pages(meta, content, query)
+            page, page_end, approximate = cited["page"], cited["page_end"], cited["page_approximate"]
+            locator = format_page_range(page, page_end, approximate) if page is not None else locator_for_meta(meta)
             label = f"{source_name} · {locator}" if locator else source_name
-            parts.append(f"[{i}] {label}\n{r['content']}")
+            parts.append(f"[{i}] {label}\n{annotate_chunk_pages(content, meta)}")
             sources.append({
                 "document_id": meta.get("source_id"),
                 "document_title": source_name,
-                "page": page if isinstance(page, int) else None,
+                "page": page,
+                "page_end": page_end,
                 "page_approximate": approximate,
                 "sheet": sheet if isinstance(sheet, str) else None,
                 "chunk_id": r.get("chunk_id"),
