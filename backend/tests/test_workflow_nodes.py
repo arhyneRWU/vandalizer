@@ -1911,3 +1911,91 @@ class TestNodePostProcess:
         result = {"output": ""}
         processed = node._apply_post_process(result)
         assert processed["output"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ResearchNode (Deep Analysis) — empty input must not fabricate a report
+# ---------------------------------------------------------------------------
+
+class TestResearchNodeEmptyInput:
+    """A Deep Analysis step with nothing to analyze used to run both passes in
+    the chat helper's standalone mode and hand back a confident, invented
+    report (figures, deadlines, regulation citations) marked Completed. With
+    no data it must not call the model at all, and must say so on the step."""
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_step_input_skips_model_and_warns(self, mock_llm):
+        node = ResearchNode({"question": "What are the risks?", "model": "gpt-4o"})
+        result = node.process({"output": "", "step_name": "Prev"})
+
+        mock_llm.assert_not_called()
+        assert result["step_name"] == "ResearchNode"
+        assert "no input data to analyze" in result["warning"]
+        assert "Previous Step Output" in result["warning"]
+        assert "no input data to analyze" in result["output"]
+        assert "Executive Summary" not in result["output"]
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_missing_output_key_skips_model_and_warns(self, mock_llm):
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "warning" in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_whitespace_only_input_skips_model(self, mock_llm):
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "   \n\t ", "step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "warning" in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_all_sources_empty_skips_model(self, mock_llm):
+        node = ResearchNode({
+            "question": "Q?",
+            "model": "gpt-4o",
+            "input_sources": ["step_input", "workflow_documents", "select_document"],
+            "doc_texts": [],
+            "selected_doc_text": "",
+        })
+        result = node.process({"output": None, "step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "Workflow Documents" in result["warning"]
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_step_input_but_document_present_still_runs(self, mock_llm):
+        """Only the *combined* context being empty is a skip — a document source
+        that has text is enough to analyze even if the previous step was blank."""
+        mock_llm.side_effect = ["findings", "report"]
+        node = ResearchNode({
+            "question": "Q?",
+            "model": "gpt-4o",
+            "input_sources": ["step_input", "workflow_documents"],
+            "doc_texts": ["award terms and conditions"],
+        })
+        result = node.process({"output": "", "step_name": "Prev"})
+        assert mock_llm.call_count == 2
+        assert result["output"] == "report"
+        assert "warning" not in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_input_surfaces_as_step_warning_in_engine(self, mock_llm):
+        """End to end through the engine: the skip lands on the step entry's
+        ``warning`` (what the run UI renders as the amber banner) and the run
+        does not fail."""
+        from app.services.workflow_engine import WorkflowEngine
+
+        first = PromptNode({"prompt": "say nothing", "model": "gpt-4o"})
+        research = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        mock_llm.side_effect = [""]  # Prompt step yields nothing; research must not call
+        engine = WorkflowEngine()
+        engine.add_node(first)
+        engine.add_node(research)
+        engine.connect(first, research)
+
+        final, steps = engine.execute()
+
+        assert mock_llm.call_count == 1
+        assert steps[-1]["name"] == "ResearchNode"
+        assert "no input data to analyze" in steps[-1]["warning"]
+        assert "no input data to analyze" in final

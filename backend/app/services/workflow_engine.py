@@ -853,6 +853,26 @@ class ResearchNode(Node):
         sources = _resolve_input_sources(self.data, prev_step_name)
         input_data = _build_combined_context(self.data, inputs, sources)
 
+        # No data means nothing to analyze — stop here, before any model call.
+        # Sent through anyway, the chat helper would drop into its standalone
+        # "draw on your own knowledge" framing and the two passes would
+        # produce a complete, confident, entirely invented report (different
+        # figures, deadlines and citations each run), marked Completed.
+        if _stringify_context(input_data).strip() == "":
+            labels = ", ".join(INPUT_SOURCE_LABELS.get(s, s) for s in sources)
+            warning = (
+                "Deep Analysis skipped: no input data to analyze. "
+                f"Its input source ({labels}) was empty, so no findings or report were generated. "
+                "Check that the preceding step produces output, or point this step at a document."
+            )
+            self.report_progress(warning)
+            return {
+                "output": f"({warning})",
+                "input": inputs.get("output"),
+                "step_name": self.name,
+                "warning": warning,
+            }
+
         self.report_progress("Pass 1: Analyzing data")
 
         analysis_prompt = (
