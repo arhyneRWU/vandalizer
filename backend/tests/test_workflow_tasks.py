@@ -1261,12 +1261,13 @@ class TestInputReadinessGate:
         )
         mock_get_db.return_value = db
 
-        result = execute_workflow_task(
-            workflow_result_id=str(result_id),
-            workflow_id=str(wf_id),
-            trigger_step_data={"doc_uuids": ["uuid1"]},
-            model="gpt-4o",
-        )
+        with patch("app.tasks.workflow_tasks.logger") as mock_logger:
+            result = execute_workflow_task(
+                workflow_result_id=str(result_id),
+                workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["uuid1"]},
+                model="gpt-4o",
+            )
 
         assert result is None
         mock_build.assert_not_called()
@@ -1274,6 +1275,12 @@ class TestInputReadinessGate:
         assert set_op["status"] == "error"
         assert "Bad.pdf" in set_op["error"]
         assert set_op["error_payload"]["code"] == "input_documents_unready"
+        # A handled, user-actionable abort must not page Sentry as a fault
+        # (VANDALIZER-BACKEND-1T) — same level as the oversize pre-flight.
+        mock_logger.error.assert_not_called()
+        assert any(
+            "aborted pre-flight" in str(c.args[0]) for c in mock_logger.warning.call_args_list
+        )
 
     @patch("app.tasks.workflow_tasks._get_db")
     @patch("app.services.workflow_engine.build_workflow_engine")
