@@ -38,6 +38,7 @@ import type { ValidationV2Result, QualityHistoryRun, ValidationSource, Extractio
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
 import { ExtractionAutovalidatePanel } from '../extractions/ExtractionAutovalidatePanel'
+import { ExtractionNeedsFieldsNotice } from '../extractions/ExtractionNeedsFieldsNotice'
 import { CrossFieldRulesSection } from '../extractions/CrossFieldRulesSection'
 import { CrossFieldViolationsPanel } from '../extractions/CrossFieldViolationsPanel'
 import { getModels } from '../../api/config'
@@ -886,6 +887,7 @@ export function ExtractionEditorPanel() {
             onSaveConfig={saveConfig}
             portability={searchSet?.validation_portability ?? null}
             canManage={searchSet?.can_manage !== false}
+            onAddFields={() => setActiveTab('design')}
           />
         </div>
       )}
@@ -2851,6 +2853,7 @@ function ValidateTab({
   onValidationComplete,
   portability,
   canManage = true,
+  onAddFields,
 }: {
   searchSetUuid: string
   itemTitle?: string
@@ -2861,6 +2864,8 @@ function ValidateTab({
   onSaveConfig?: (config: ExtractionConfig) => Promise<void>
   portability?: { test_case_count: number; text_count: number; document_count: number; missing_snapshot_count: number } | null
   canManage?: boolean
+  /** Where fields get added (the Design tab) — offered when there are none. */
+  onAddFields?: () => void
 }) {
   const { selectedDocUuids, viewDocument } = useWorkspace()
   const { toast } = useToast()
@@ -3130,6 +3135,32 @@ function ValidateTab({
   }
 
   const existingUuids = sources.filter(s => s.document_uuid).map(s => s.document_uuid!)
+
+  // No fields: every section on this tab scores fields, so tuning could only
+  // fail ("Optimization failed - No extraction fields defined", a few seconds
+  // in) and test cases / cross-field rules / detailed validation have nothing
+  // to work against. Say what to do first instead of showing the controls.
+  // (After the hooks above — the tab must not change its hook order when
+  // fields appear.)
+  if (items.length === 0) {
+    return (
+      <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#202124', marginBottom: 4 }}>
+            Validate & Improve
+          </div>
+          <div style={{ fontSize: 12, color: '#6b7280', lineHeight: 1.5 }}>
+            One click scores this extraction against your test cases and tries better settings.
+          </div>
+        </div>
+        <ExtractionNeedsFieldsNotice
+          savedTestCaseCount={loadingSources ? 0 : sources.length}
+          canManage={canManage}
+          onAddFields={onAddFields}
+        />
+      </div>
+    )
+  }
 
   return (
     <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
