@@ -3,6 +3,7 @@ import { ArrowLeft, FileText, Search, X } from 'lucide-react'
 import { FileBrowser } from '../files/FileBrowser'
 import type { ContentMatch } from '../files/FileBrowser'
 import { DocumentViewer } from '../files/DocumentViewer'
+import { DocumentUsageDialog } from '../files/DocumentUsageDialog'
 import { RawTextModal } from '../files/RawTextModal'
 import { ItemPickerModal } from './ItemPickerModal'
 import { KBPickerModal } from '../files/KBPickerModal'
@@ -14,7 +15,7 @@ import { addDocumentsToKB } from '../../api/knowledge'
 import type { Folder } from '../../types/document'
 
 export function LeftPanel() {
-  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, highlightPageApproximate, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId, workspaceMode, setOpenDocumentUuid } = useWorkspace()
+  const { setSelectedDocUuids, setSelectedDocNames, setSelectedFolderUuids, highlightTerms, highlightPage, highlightPageApproximate, setHighlightTerms, setProcessingDoc, setSelectedDocsProcessing, viewDocumentRequest, clearViewDocumentRequest, focusChat, openWorkflow, openExtraction, activateKB, activeProjectRootFolder, activeProjectTitle, activeProjectTeamId, workspaceMode, setOpenDocumentUuid } = useWorkspace()
   const { toast } = useToast()
   // Folder targeted by the workflow / KB picker modals (null = closed).
   const [workflowPickerFolder, setWorkflowPickerFolder] = useState<Folder | null>(null)
@@ -26,6 +27,7 @@ export function LeftPanel() {
     taskStatus?: string | null
   } | null>(null)
   const [showRawText, setShowRawText] = useState(false)
+  const [showUsage, setShowUsage] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [contentMatches, setContentMatches] = useState<ContentMatch[]>([])
@@ -299,15 +301,25 @@ export function LeftPanel() {
         </div>
 
         {/* Right controls */}
-        <div style={{ paddingRight: 15, width: 50, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
+        <div style={{ paddingRight: 15, minWidth: 50, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'flex-end' }}>
           {viewingDoc ? (
-            <button
-              onClick={() => setShowRawText(true)}
-              className="bg-transparent border-0 p-0 cursor-pointer"
-              title="View extracted text"
-            >
-              <FileText className="h-5 w-5 text-white" />
-            </button>
+            <>
+              <button
+                onClick={() => setShowUsage(true)}
+                className="bg-transparent border-0 p-0 cursor-pointer"
+                title="Where is this used?"
+                aria-label="Where is this used?"
+              >
+                <Link2 className="h-5 w-5 text-white" />
+              </button>
+              <button
+                onClick={() => setShowRawText(true)}
+                className="bg-transparent border-0 p-0 cursor-pointer"
+                title="View extracted text"
+              >
+                <FileText className="h-5 w-5 text-white" />
+              </button>
+            </>
           ) : !searchOpen ? (
             <button
               onClick={() => setSearchOpen(true)}
@@ -375,6 +387,16 @@ export function LeftPanel() {
         </div>
       )}
 
+      {showUsage && viewingDoc && (
+        <DocumentUsageDialog
+          docUuid={viewingDoc.uuid}
+          docTitle={viewingDoc.title}
+          onClose={() => setShowUsage(false)}
+          onOpenWorkflow={(id) => openWorkflow(id)}
+          onOpenExtraction={(uuid) => openExtraction(uuid)}
+          onOpenKnowledgeBase={(uuid, title) => activateKB(uuid, title)}
+        />
+      )}
       {showRawText && viewingDoc && (
         <RawTextModal docUuid={viewingDoc.uuid} onClose={() => setShowRawText(false)} />
       )}
