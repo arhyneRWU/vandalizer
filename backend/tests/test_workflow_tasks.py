@@ -1477,3 +1477,96 @@ class TestPreflightContextOverflow:
 
         assert result["status"] == "completed"
         mock_engine.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight: a fixed document deleted from Files fails the run by name
+# ---------------------------------------------------------------------------
+
+class TestMissingFixedDocuments:
+    def test_lists_deleted_and_soft_deleted_by_saved_title(self):
+        from app.tasks.workflow_tasks import _missing_fixed_documents
+
+        db = _mock_db(smart_docs=[
+            {"uuid": "ok", "title": "Present.pdf", "raw_text": "x"},
+            {"uuid": "soft", "title": "Retired.pdf", "raw_text": "x", "soft_deleted": True},
+        ])
+        wf = {"input_config": {"fixed_documents": [
+            {"uuid": "ok", "title": "Present.pdf"},
+            {"uuid": "gone", "title": "Award Terms.pdf"},
+            {"uuid": "soft", "title": "Retired.pdf"},
+            "bare-uuid-gone",
+        ]}}
+        assert _missing_fixed_documents(db, wf) == ["Award Terms.pdf", "Retired.pdf", "bare-uuid-gone"]
+
+    def test_no_input_mode_ignores_fixed_documents(self):
+        from app.tasks.workflow_tasks import _missing_fixed_documents
+
+        wf = {"input_config": {"trigger_type": "no_input", "fixed_documents": [{"uuid": "gone", "title": "x"}]}}
+        assert _missing_fixed_documents(_mock_db(), wf) == []
+
+    def test_message_wording(self):
+        from app.tasks.workflow_tasks import fixed_documents_missing_message
+
+        one = fixed_documents_missing_message(["Award Terms.pdf"])
+        assert one.startswith("1 fixed document configured on this workflow's Input tab no longer exists: Award Terms.pdf.")
+        assert "It was deleted from Files. Remove it from the Input tab" in one
+        two = fixed_documents_missing_message(["a", "b"])
+        assert two.startswith("2 fixed documents") and "They were deleted" in two
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_run_fails_before_building_when_a_fixed_document_is_gone(self, mock_build, mock_get_db):
+        """Before: the missing document was logged and skipped, the run covered
+        only the selected document and reported Completed."""
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id, result_id = _fake_oid(), _fake_oid()
+        wf = _make_workflow_doc(wf_id=wf_id)
+        wf["input_config"] = {"fixed_documents": [{"uuid": "fixed-gone", "title": "Award Terms.pdf"}]}
+        db = _mock_db(
+            workflow_doc=wf,
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            smart_docs=[{"uuid": "sel", "raw_text": "selected doc text", "processing": False, "title": "Selected.pdf"}],
+        )
+        mock_get_db.return_value = db
+
+        with patch("app.tasks.workflow_tasks.logger") as mock_logger:
+            result = execute_workflow_task(
+                workflow_result_id=str(result_id), workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["sel"]}, model="gpt-4o",
+            )
+
+        assert result is None
+        mock_build.assert_not_called()
+        set_op = db.workflow_result.update_one.call_args[0][1]["$set"]
+        assert set_op["status"] == "error"
+        assert "Award Terms.pdf" in set_op["error"]
+        assert set_op["error_payload"] == {
+            "code": "fixed_documents_missing", "missing_documents": ["Award Terms.pdf"],
+        }
+        mock_logger.error.assert_not_called()
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_run_proceeds_when_fixed_documents_exist(self, mock_build, mock_get_db):
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id, result_id = _fake_oid(), _fake_oid()
+        wf = _make_workflow_doc(wf_id=wf_id)
+        wf["input_config"] = {"fixed_documents": [{"uuid": "fixed", "title": "Award Terms.pdf"}]}
+        db = _mock_db(
+            workflow_doc=wf,
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            smart_docs=[
+                {"uuid": "sel", "raw_text": "selected", "processing": False, "title": "Selected.pdf"},
+                {"uuid": "fixed", "raw_text": "fixed", "processing": False, "title": "Award Terms.pdf"},
+            ],
+        )
+        mock_get_db.return_value = db
+        mock_build.return_value.execute.return_value = ("out", [])
+        execute_workflow_task(
+            workflow_result_id=str(result_id), workflow_id=str(wf_id),
+            trigger_step_data={"doc_uuids": ["sel"]}, model="gpt-4o",
+        )
+        mock_build.assert_called_once()

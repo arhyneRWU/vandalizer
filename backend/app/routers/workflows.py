@@ -769,6 +769,9 @@ async def get_workflow(
     wf = await svc.get_workflow(workflow_id, user=user, share_token=share_token)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    # The Input tab lists fixed documents by their saved title; tell it which
+    # ones have since been deleted from Files so it can say so.
+    wf = {**wf, "input_config": await svc.annotate_missing_fixed_documents(wf.get("input_config"))}
     return await _workflow_response_from_dict(wf)
 
 

@@ -442,6 +442,28 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
                 if fd_uuid and fd_uuid not in doc_uuids:
                     doc_uuids.append(fd_uuid)
 
+        # A fixed document deleted from Files is a configuration error: fail
+        # this run with the reason rather than covering fewer documents than
+        # the workflow was set up with (same check as manual runs).
+        from app.tasks.workflow_tasks import (
+            _missing_fixed_documents,
+            fixed_documents_missing_message,
+        )
+
+        missing_fixed = _missing_fixed_documents(db, workflow)
+        if missing_fixed:
+            msg = fixed_documents_missing_message(missing_fixed)
+            db.workflow_result.update_one(
+                {"_id": result_id},
+                {"$set": {"status": "error", "error": msg,
+                          "error_payload": {"code": "fixed_documents_missing",
+                                            "missing_documents": missing_fixed[:20]}}},
+            )
+            db.workflow_trigger_event.update_one(
+                {"_id": event["_id"]}, {"$set": {"status": "failed", "error": msg}},
+            )
+            return {"error": msg, "result_id": str(result_id)}
+
         # Build trigger step data
         trigger_step_data = {"doc_uuids": doc_uuids, "user_id": workflow.get("user_id")}
 
