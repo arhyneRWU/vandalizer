@@ -1003,7 +1003,9 @@ class APICallNode(Node):
         except templating.TemplateError as e:
             return self._error_result(str(e), inputs)
         body_raw = self.data.get("body", "")
-        if not url.strip():
+        # ``url`` may be None when the step was written through the API;
+        # ``render`` passes non-strings through unchanged.
+        if not (url or "").strip():
             # Same defect as Add Website: an unconfigured step must not pass
             # as a successful empty call.
             return self._error_result(

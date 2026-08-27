@@ -823,6 +823,10 @@ class TestAPICallNode:
         result = node.process({"output": "prev"})
         assert "not configured: no URL" in result["error"]
 
+    def test_null_url_is_a_configuration_error(self):
+        result = APICallNode({"url": None}).process({"output": "prev"})
+        assert "not configured: no URL" in result["error"]
+
     @patch("app.utils.url_validation.validate_outbound_url", side_effect=ValueError("blocked"))
     def test_blocked_url(self, mock_validate):
         node = APICallNode({"url": "http://internal"})
