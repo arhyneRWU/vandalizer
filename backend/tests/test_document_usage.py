@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.document_usage import build_workflow_entries, document_usage
+from app.services.access_control import TeamAccessContext
+from app.services.document_usage import build_workflow_entries, document_usage, in_caller_tenants
 
 
 def _wf(id_, name, *, steps=None, input_config=None):
@@ -52,7 +53,9 @@ class TestDocumentUsage:
     @pytest.mark.asyncio
     async def test_assembles_all_sections_and_total(self):
         doc = SimpleNamespace(uuid="DOC1", title="Award.pdf", folder="f2", team_id=None)
-        with patch("app.services.document_usage.access_control.get_authorized_document",
+        with patch("app.services.document_usage.access_control.get_team_access_context",
+                   new=AsyncMock(return_value=TeamAccessContext(team_uuids={"team-a"}))), \
+             patch("app.services.document_usage.access_control.get_authorized_document",
                    new=AsyncMock(return_value=doc)), \
              patch("app.services.document_usage._folder_path",
                    new=AsyncMock(return_value=[{"uuid": "f1", "title": "Grants"}, {"uuid": "f2", "title": "FY26"}])), \
@@ -74,7 +77,9 @@ class TestDocumentUsage:
 
     @pytest.mark.asyncio
     async def test_unauthorized_or_missing_document_is_none(self):
-        with patch("app.services.document_usage.access_control.get_authorized_document",
+        with patch("app.services.document_usage.access_control.get_team_access_context",
+                   new=AsyncMock(return_value=TeamAccessContext())), \
+             patch("app.services.document_usage.access_control.get_authorized_document",
                    new=AsyncMock(return_value=None)), \
              patch("app.services.document_usage._knowledge_bases_using", new=AsyncMock()) as kb:
             assert await document_usage("nope", user=MagicMock()) is None
@@ -96,6 +101,48 @@ class TestDocumentUsage:
             assert [f["title"] for f in await mod._folder_path("x")] == ["Loop2", "Loop1"]
             assert await mod._folder_path("0") == []
             assert await mod._folder_path(None) == []
+
+
+class TestTenantScope:
+    """Referencing objects from a team the caller is not in are another
+    tenant's: their titles must not surface through a shared document."""
+
+    def test_in_caller_tenants(self):
+        visible = {"team-a"}
+        assert in_caller_tenants(SimpleNamespace(team_id=None), visible)      # personal
+        assert in_caller_tenants(SimpleNamespace(team_id="team-a"), visible)  # own team
+        assert not in_caller_tenants(SimpleNamespace(team_id="team-b"), visible)
+        assert in_caller_tenants(SimpleNamespace(), set())                    # no team_id field
+
+    @pytest.mark.asyncio
+    async def test_other_tenants_objects_are_dropped(self):
+        from app.services import document_usage as mod
+
+        def _find(rows):
+            return lambda *a, **k: SimpleNamespace(to_list=AsyncMock(return_value=rows))
+
+        kb_sources = [SimpleNamespace(knowledge_base_uuid="kb-mine"), SimpleNamespace(knowledge_base_uuid="kb-theirs")]
+        kbs = [SimpleNamespace(uuid="kb-mine", title="Policies", team_id="team-a"),
+               SimpleNamespace(uuid="kb-theirs", title="Secret KB", team_id="team-b")]
+        cases = [SimpleNamespace(uuid="tc1", label="A", search_set_uuid="ss-personal"),
+                 SimpleNamespace(uuid="tc2", label="B", search_set_uuid="ss-theirs")]
+        sets = [SimpleNamespace(uuid="ss-personal", title="Budget", team_id=None),
+                SimpleNamespace(uuid="ss-theirs", title="Secret set", team_id="team-b")]
+        wfs = [_wf("w1", "Mine", input_config={"fixed_documents": ["DOC"]}),
+               _wf("w2", "Their workflow", input_config={"fixed_documents": ["DOC"]})]
+        wfs[0].team_id = "team-a"
+        wfs[1].team_id = "team-b"
+
+        with patch.object(mod.KnowledgeBaseSource, "find", new=_find(kb_sources)), \
+             patch.object(mod.KnowledgeBase, "find", new=_find(kbs)), \
+             patch.object(mod.ExtractionTestCase, "find", new=_find(cases)), \
+             patch.object(mod.SearchSet, "find", new=_find(sets)), \
+             patch.object(mod.Workflow, "find", new=_find(wfs)), \
+             patch.object(mod.WorkflowStepTask, "find", new=_find([])):
+            visible = {"team-a"}
+            assert [k["title"] for k in await mod._knowledge_bases_using("DOC", visible)] == ["Policies"]
+            assert [e["title"] for e in await mod._extractions_using("DOC", visible)] == ["Budget"]
+            assert [w["name"] for w in await mod._workflows_using("DOC", visible)] == ["Mine"]
 
 
 def _uuid_of(query) -> str:

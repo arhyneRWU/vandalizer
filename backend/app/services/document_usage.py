@@ -13,10 +13,12 @@ the rest of the code writes:
   ``.template_document_uuid``, resolved task → step → workflow
 
 Read-only. Authorization is the document's: whoever can open the document
-can see what references it. Referencing objects are listed by title even
-when the caller could not open them — a reference to a document you can
-read is itself a fact about your document, and hiding it would put the
-"what depends on this?" question right back where it was.
+can see what references it. Within the caller's own tenants, referencing
+objects are listed by title even when the caller could not open them — a
+reference to a document you can read is itself a fact about your document,
+and hiding it would put the "what depends on this?" question right back
+where it was. Objects belonging to a team the caller is not a member of are
+left out: a team's workflow and knowledge-base names are that team's.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from app.models.search_set import SearchSet
 from app.models.user import User
 from app.models.workflow import Workflow, WorkflowStep, WorkflowStepTask
 from app.services import access_control
+from app.services.access_control import TeamAccessContext
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +64,15 @@ async def _folder_path(folder_id: str | None) -> list[dict[str, str]]:
     return path
 
 
-async def _knowledge_bases_using(doc_uuid: str) -> list[dict[str, Any]]:
+def in_caller_tenants(obj: Any, visible_teams: set[str]) -> bool:
+    """A referencing object is shown if it is personal (no ``team_id`` — its
+    owner needed access to the document to reference it) or belongs to a
+    team the caller is a member of. Anything else is another tenant's."""
+    team_id = getattr(obj, "team_id", None)
+    return not team_id or team_id in visible_teams
+
+
+async def _knowledge_bases_using(doc_uuid: str, visible_teams: set[str]) -> list[dict[str, Any]]:
     sources = await KnowledgeBaseSource.find({"document_uuid": doc_uuid}).to_list()
     if not sources:
         return []
@@ -71,6 +82,8 @@ async def _knowledge_bases_using(doc_uuid: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for uuid in kb_uuids:
         kb = by_uuid.get(uuid)
+        if kb is not None and not in_caller_tenants(kb, visible_teams):
+            continue
         out.append({
             "uuid": uuid,
             "title": kb.title if kb else "(knowledge base no longer exists)",
@@ -79,7 +92,7 @@ async def _knowledge_bases_using(doc_uuid: str) -> list[dict[str, Any]]:
     return out
 
 
-async def _extractions_using(doc_uuid: str) -> list[dict[str, Any]]:
+async def _extractions_using(doc_uuid: str, visible_teams: set[str]) -> list[dict[str, Any]]:
     cases = await ExtractionTestCase.find({"document_uuid": doc_uuid}).to_list()
     if not cases:
         return []
@@ -89,6 +102,8 @@ async def _extractions_using(doc_uuid: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for uuid in set_uuids:
         ss = by_uuid.get(uuid)
+        if ss is not None and not in_caller_tenants(ss, visible_teams):
+            continue
         out.append({
             "uuid": uuid,
             "title": ss.title if ss else "(extraction no longer exists)",
@@ -161,7 +176,7 @@ def build_workflow_entries(
     return list(entries.values())
 
 
-async def _workflows_using(doc_uuid: str) -> list[dict[str, Any]]:
+async def _workflows_using(doc_uuid: str, visible_teams: set[str]) -> list[dict[str, Any]]:
     fixed_workflows = await Workflow.find({
         "$or": [
             {"input_config.fixed_documents.uuid": doc_uuid},
@@ -179,20 +194,26 @@ async def _workflows_using(doc_uuid: str) -> list[dict[str, Any]]:
         if steps:
             step_workflows = await Workflow.find({"steps": {"$in": [s.id for s in steps]}}).to_list()
 
+    fixed_workflows = [wf for wf in fixed_workflows if in_caller_tenants(wf, visible_teams)]
+    step_workflows = [wf for wf in step_workflows if in_caller_tenants(wf, visible_teams)]
     return build_workflow_entries(doc_uuid, fixed_workflows, step_workflows, steps, tasks)
 
 
 async def document_usage(doc_uuid: str, *, user: User) -> dict[str, Any] | None:
     """Everything that references *doc_uuid*, or None if the caller cannot
     open the document (or it does not exist)."""
-    doc: SmartDocument | None = await access_control.get_authorized_document(doc_uuid, user)
+    access: TeamAccessContext = await access_control.get_team_access_context(user)
+    doc: SmartDocument | None = await access_control.get_authorized_document(
+        doc_uuid, user, team_access=access
+    )
     if not doc:
         return None
 
+    visible_teams = access.team_uuids | access.team_object_ids
     folder_path = await _folder_path(doc.folder)
-    knowledge_bases = await _knowledge_bases_using(doc.uuid)
-    extractions = await _extractions_using(doc.uuid)
-    workflows = await _workflows_using(doc.uuid)
+    knowledge_bases = await _knowledge_bases_using(doc.uuid, visible_teams)
+    extractions = await _extractions_using(doc.uuid, visible_teams)
+    workflows = await _workflows_using(doc.uuid, visible_teams)
 
     return {
         "document": {"uuid": doc.uuid, "title": doc.title},
