@@ -236,3 +236,36 @@ class TestApprovalReviewerEmailInitialisesBeanie:
             )
 
         assert order == ["init_db(skip_indexes=True)", "send_email(r@x.edu,approval_request)"]
+
+    def test_init_db_runs_once_for_many_reviewers(self):
+        """One Beanie init per task, not per reviewer — each init_db builds a
+        Motor client, and a send failure for one reviewer must not skip the rest."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.tasks.workflow_tasks import _notify_approval_reviewers_sync
+
+        db = MagicMock()
+        db.user.find_one.side_effect = lambda q: {
+            "user_id": q["user_id"], "email": f"{q['user_id']}@x.edu", "name": q["user_id"],
+        }
+        order: list[str] = []
+
+        async def fake_init_db(settings, skip_indexes=False):
+            order.append("init_db")
+
+        async def fake_send_email(to, subject, html, settings, email_type=None):
+            order.append(f"send_email({to})")
+            if to == "u1@x.edu":
+                raise RuntimeError("smtp down")
+            return True
+
+        with patch("app.database.init_db", side_effect=fake_init_db), \
+             patch("app.services.email_service.send_email", side_effect=fake_send_email), \
+             patch("app.services.notification_service.create_notification_sync"), \
+             patch("app.services.llm_service.aclose_loop_http_client", new=AsyncMock()):
+            _notify_approval_reviewers_sync(
+                db, ["u1", "u2", "u3"], workflow_name="WF", step_name="Gate",
+                instructions="look", approval_uuid="abc",
+            )
+
+        assert order == ["init_db", "send_email(u1@x.edu)", "send_email(u2@x.edu)", "send_email(u3@x.edu)"]
