@@ -51,6 +51,8 @@ import { computeReorderedIds } from '../../utils/reorder'
 import { formatPageLocator } from '../../utils/pageLocator'
 import type { Workflow, WorkflowStep, WorkflowTask, WorkflowStatus, WorkflowCitation, ModelInfo, SearchSetItem } from '../../types/workflow'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
+import { FileOutputCard } from './FileOutputCard'
+import { summarizeFilePayload } from './outputFilePayload'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from 'recharts'
@@ -4359,13 +4361,21 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                     Download
                   </button>
                 </div>
-                <div style={{
-                  backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
-                  padding: 12, fontSize: 12, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
-                  maxHeight: 200, overflowY: 'auto', color: '#374151',
-                }}>
-                  {typeof testResult === 'string' ? testResult : JSON.stringify(testResult, null, 2)}
-                </div>
+                {(() => {
+                  // A file-producing step's test result is the same payload a
+                  // run ends with; show the file, not its base64.
+                  const file = summarizeFilePayload(testResult)
+                  if (file) return <FileOutputCard summary={file} onDownload={handleDownloadTestResult} maxHeight={200} />
+                  return (
+                    <div style={{
+                      backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
+                      padding: 12, fontSize: 12, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
+                      maxHeight: 200, overflowY: 'auto', color: '#374151',
+                    }}>
+                      {typeof testResult === 'string' ? testResult : JSON.stringify(testResult, null, 2)}
+                    </div>
+                  )
+                })()}
               </div>
             )}
 
@@ -4971,6 +4981,14 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
 
   const finalOutput = status?.final_output as Record<string, unknown> | null
   const output = finalOutput?.output ?? finalOutput
+  // A file-producing final step (Document Renderer, Data Export, Package
+  // Builder) hands back {type: "file_download", data_b64, …}. Rendered through
+  // the generic path that is a JSON block of internal fields and base64 shown
+  // as the user's result. Show it as a file instead; the server download
+  // route already returns the file's own bytes for this payload whatever
+  // format is asked for, so one direct link replaces the format picker.
+  const fileSummary = summarizeFilePayload(output)
+  const fileDownloadHref = fileSummary && sessionId ? downloadResults(sessionId, 'text', { shareToken }) : undefined
 
   // API nodes attach a redacted snapshot of the request they sent under
   // steps_output[step].request. Surface it so authors can debug what actually
@@ -5211,19 +5229,40 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
             <CheckCircle style={{ width: 16, height: 16 }} />
             Completed
           </div>
-          <div
-            className="chat-markdown"
-            style={{
-              backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
-              padding: 12, fontSize: 13, lineHeight: 1.6,
-              maxHeight: '60vh', overflowY: 'auto', overflowX: 'auto',
-              color: '#374151', wordBreak: 'break-word',
-            }}
-            dangerouslySetInnerHTML={{ __html: renderOutput(output) }}
-          />
+          {fileSummary ? (
+            <FileOutputCard summary={fileSummary} downloadHref={fileDownloadHref} />
+          ) : (
+            <div
+              className="chat-markdown"
+              style={{
+                backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
+                padding: 12, fontSize: 13, lineHeight: 1.6,
+                maxHeight: '60vh', overflowY: 'auto', overflowX: 'auto',
+                color: '#374151', wordBreak: 'break-word',
+              }}
+              dangerouslySetInnerHTML={{ __html: renderOutput(output) }}
+            />
+          )}
           {stepWarningsPanel}
           {apiRequestPanel}
           <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+          {fileSummary ? (
+            <a
+              href={fileDownloadHref}
+              download={fileSummary.filename}
+              aria-disabled={!fileDownloadHref}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
+                fontSize: 13, fontWeight: 600, fontFamily: 'inherit', textDecoration: 'none',
+                border: '1px solid #d1d5db', borderRadius: 6,
+                backgroundColor: '#fff', cursor: fileDownloadHref ? 'pointer' : 'not-allowed',
+                color: '#374151', opacity: fileDownloadHref ? 1 : 0.5,
+              }}
+            >
+              <Download style={{ width: 14, height: 14 }} />
+              Download {fileSummary.filename}
+            </a>
+          ) : (
           <div style={{ position: 'relative', display: 'inline-block' }}>
             <button
               onClick={() => setShowDownloadPopup(!showDownloadPopup)}
@@ -5273,6 +5312,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
               </div>
             )}
           </div>
+          )}
             <button
               onClick={() => setShowSaveToFolder(true)}
               disabled={!sessionId}
@@ -5644,9 +5684,13 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
                     color: '#374151', wordBreak: 'break-word',
                   }}
                 >
-                  <div dangerouslySetInnerHTML={{
-                    __html: renderOutput((item.final_output as Record<string, unknown>)?.output ?? item.final_output),
-                  }} />
+                  {(() => {
+                    const value = (item.final_output as Record<string, unknown>)?.output ?? item.final_output
+                    const file = summarizeFilePayload(value)
+                    return file
+                      ? <FileOutputCard summary={file} downloadHref={downloadResults(item.session_id, 'text', { shareToken })} maxHeight="40vh" />
+                      : <div dangerouslySetInnerHTML={{ __html: renderOutput(value) }} />
+                  })()}
                 </div>
               )}
             </div>
