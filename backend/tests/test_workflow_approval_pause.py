@@ -202,3 +202,37 @@ class _AsyncNoop:
     async def __call__(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return MagicMock()
+
+
+class TestApprovalReviewerEmailInitialisesBeanie:
+    """The reviewer email is sent from a sync Celery task on a throwaway event
+    loop. send_email uses Beanie (SystemConfig branding, EmailLog audit row),
+    and Motor is loop-bound, so that loop must run init_db first — otherwise
+    both raise CollectionWasNotInitialized (Sentry VANDALIZER-BACKEND-2V)."""
+
+    def test_init_db_runs_before_send_email_on_the_same_loop(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.tasks.workflow_tasks import _notify_approval_reviewers_sync
+
+        db = MagicMock()
+        db.user.find_one.return_value = {"user_id": "u1", "email": "r@x.edu", "name": "R"}
+        order: list[str] = []
+
+        async def fake_init_db(settings, skip_indexes=False):
+            order.append(f"init_db(skip_indexes={skip_indexes})")
+
+        async def fake_send_email(to, subject, html, settings, email_type=None):
+            order.append(f"send_email({to},{email_type})")
+            return True
+
+        with patch("app.database.init_db", side_effect=fake_init_db), \
+             patch("app.services.email_service.send_email", side_effect=fake_send_email), \
+             patch("app.services.notification_service.create_notification_sync"), \
+             patch("app.services.llm_service.aclose_loop_http_client", new=AsyncMock()):
+            _notify_approval_reviewers_sync(
+                db, ["u1"], workflow_name="WF", step_name="Gate",
+                instructions="look", approval_uuid="abc",
+            )
+
+        assert order == ["init_db(skip_indexes=True)", "send_email(r@x.edu,approval_request)"]

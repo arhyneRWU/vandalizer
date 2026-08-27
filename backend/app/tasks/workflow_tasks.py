@@ -83,7 +83,7 @@ def _notify_approval_reviewers_sync(
         user_doc = db.user.find_one({"user_id": user_id})
         if user_doc and user_doc.get("email"):
             from app.services.email_service import approval_request_email, send_email
-            import asyncio
+            from app.tasks import run_task_async
 
             subject, html = approval_request_email(
                 reviewer_name=user_doc.get("name", user_id),
@@ -93,10 +93,25 @@ def _notify_approval_reviewers_sync(
                 approval_uuid=approval_uuid,
                 frontend_url=settings.frontend_url,
             )
+
+            async def _send() -> None:
+                # send_email reaches Beanie twice — SystemConfig for the
+                # deployment's branding, EmailLog for the audit row — and a
+                # Motor client is bound to the loop it was created on. This
+                # sync task holds only a pymongo handle, so the fresh loop
+                # needs its own Beanie init or both calls raise
+                # CollectionWasNotInitialized: the mail still went out, but
+                # unbranded and unlogged, with two Sentry errors per reviewer.
+                from app.database import init_db
+
+                await init_db(settings, skip_indexes=True)
+                await send_email(
+                    user_doc["email"], subject, html, settings,
+                    email_type="approval_request",
+                )
+
             try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(send_email(user_doc["email"], subject, html, settings, email_type="approval_request"))
-                loop.close()
+                run_task_async(_send())
             except Exception:
                 logger.exception("Failed to send approval email to %s", user_id)
 
