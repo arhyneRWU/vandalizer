@@ -87,7 +87,17 @@ def _pymupdf_extract_with_pages(pdf_path: str) -> tuple[str, list[dict]]:
     markers: list[dict] = []
     cursor = 0
 
-    with pymupdf.open(pdf_path) as doc:
+    try:
+        doc = pymupdf.open(pdf_path)
+    except pymupdf.FileNotFoundError as e:
+        # PyMuPDF's FileNotFoundError is its own class (a RuntimeError), not
+        # the builtin, so ``except FileNotFoundError`` upstream — the task
+        # layer's "file vanished mid-processing, warn don't page" handler and
+        # extract_text_from_file's — silently never matched it. Re-raise as
+        # the builtin so a missing file looks like a missing file everywhere.
+        raise FileNotFoundError(str(e)) from e
+
+    with doc:
         for i, page in enumerate(doc, start=1):
             page_text = page.get_text("text")
             field_lines: list[str] = []

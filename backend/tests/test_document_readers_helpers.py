@@ -530,6 +530,33 @@ class TestExtractWithMarkersOcrFallback:
                           side_effect=FileNotFoundError("no such file: 'gone.pdf'")):
             assert dr.extract_text_from_file("gone.pdf", "pdf") == "short ocr text"
 
+class TestPymupdfMissingFileIsBuiltinError:
+    """PyMuPDF raises its *own* ``FileNotFoundError`` (a RuntimeError subclass),
+    not the builtin. Every upstream ``except FileNotFoundError`` — the task
+    layer's warn-don't-page handler included — was written against the builtin
+    and never matched it (Sentry VANDALIZER-BACKEND-1H). No mocks here on
+    purpose: the earlier tests mocked the builtin and so passed while the real
+    path stayed broken."""
+
+    def test_pymupdf_extract_raises_builtin_filenotfound(self, tmp_path):
+        import pymupdf
+        import app.services.document_readers as dr
+
+        gone = str(tmp_path / "gone.pdf")
+        with pytest.raises(FileNotFoundError) as excinfo:
+            dr._pymupdf_extract_with_pages(gone)
+        assert isinstance(excinfo.value.__cause__, pymupdf.FileNotFoundError)
+
+    def test_extract_text_with_markers_missing_pdf_raises_builtin(self, tmp_path):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        gone = str(tmp_path / "gone.pdf")
+        with patch.object(dr, "ocr_extract_text_from_pdf", return_value=""):
+            with pytest.raises(FileNotFoundError):
+                dr.extract_text_with_markers(gone, "pdf")
+
+
 class TestExtractTextFromFileMissingFile:
     """A missing source file (deleted mid-processing / stale path) is benign:
     return empty text and log at warning, never error -> Sentry, and never a
