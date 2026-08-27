@@ -1074,7 +1074,13 @@ class ExtractionEngine:
                 output = output.split("```")[1].split("```")[0].strip()
 
             try:
-                parsed = json.loads(output.strip())
+                # strict=False: accept raw control characters (literal
+                # newlines/tabs) inside string values. The prompt tells the
+                # model to copy each field's supporting passage character-
+                # for-character, and a passage that spans lines comes back
+                # with real newlines, which strict JSON rejects at the first
+                # one — turning a fully usable answer into a failed run.
+                parsed = json.loads(output.strip(), strict=False)
                 if isinstance(parsed, dict):
                     entity = {key: parsed.get(key) for key in keys}
                     if capture_sources and isinstance(parsed.get("_sources"), dict):

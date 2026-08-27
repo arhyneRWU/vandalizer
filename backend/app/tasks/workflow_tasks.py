@@ -68,6 +68,8 @@ def _notify_approval_reviewers_sync(
 
     settings = Settings()
 
+    emails: list[tuple[str, str, str, str]] = []  # (user_id, to, subject, html)
+
     for user_id in assigned_user_ids:
         # In-app notification
         create_notification_sync(
@@ -79,11 +81,10 @@ def _notify_approval_reviewers_sync(
             link=f"/reviews/{approval_uuid}",
         )
 
-        # Email
+        # Email — rendered here, sent below on one loop for all reviewers.
         user_doc = db.user.find_one({"user_id": user_id})
         if user_doc and user_doc.get("email"):
-            from app.services.email_service import approval_request_email, send_email
-            import asyncio
+            from app.services.email_service import approval_request_email
 
             subject, html = approval_request_email(
                 reviewer_name=user_doc.get("name", user_id),
@@ -93,12 +94,38 @@ def _notify_approval_reviewers_sync(
                 approval_uuid=approval_uuid,
                 frontend_url=settings.frontend_url,
             )
+            emails.append((user_id, user_doc["email"], subject, html))
+
+    if not emails:
+        return
+
+    from app.tasks import run_task_async
+
+    async def _send_all() -> None:
+        # send_email reaches Beanie twice — SystemConfig for the deployment's
+        # branding, EmailLog for the audit row — and a Motor client is bound to
+        # the loop it was created on. This sync task holds only a pymongo
+        # handle, so the fresh loop needs its own Beanie init or both calls
+        # raise CollectionWasNotInitialized: the mail still went out, but
+        # unbranded and unlogged, with two Sentry errors per reviewer.
+        # One init per task, not per reviewer — every init_db builds a Motor
+        # client, and the other tasks in this package initialise once.
+        from app.database import init_db
+        from app.services.email_service import send_email
+
+        await init_db(settings, skip_indexes=True)
+        for user_id, to, subject, html in emails:
             try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(send_email(user_doc["email"], subject, html, settings, email_type="approval_request"))
-                loop.close()
+                await send_email(
+                    to, subject, html, settings, email_type="approval_request",
+                )
             except Exception:
                 logger.exception("Failed to send approval email to %s", user_id)
+
+    try:
+        run_task_async(_send_all())
+    except Exception:
+        logger.exception("Failed to send approval emails for %s", approval_uuid)
 
 
 def _bson_safe(value):

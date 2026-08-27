@@ -1,8 +1,11 @@
 """LLM service  - provider classes and agent creation, ported from agents.py."""
 
 import asyncio
+import datetime
 import logging
+import random
 import weakref
+from email.utils import parsedate_to_datetime
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Iterator, Optional
@@ -81,6 +84,96 @@ _loop_http_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.
 )
 
 
+# ---------------------------------------------------------------------------
+# 429 backoff
+# ---------------------------------------------------------------------------
+# The gateway caps requests per minute per key, and that cap is shared by
+# everything on the deployment at once — interactive chat, extraction, and a
+# KB tuning run fanning out answer+judge calls. The OpenAI SDK's own retry is
+# built for momentary blips: two retries ~0.4s apart (Sentry
+# VANDALIZER-BACKEND-2T shows all three attempts inside 400ms), which against a
+# per-*minute* window is three knocks on the same closed door. This transport
+# sits under every provider's client (all of them share _get_loop_http_client)
+# and waits for the window to move instead: it honours Retry-After when the
+# gateway sends one, otherwise backs off exponentially with jitter, and on
+# exhaustion hands the *real* 429 back to the SDK — so callers still see
+# ModelHTTPError(429) and their existing handling, not a "Connection error".
+RATE_LIMIT_MAX_ATTEMPTS = 6
+RATE_LIMIT_BASE_WAIT_SECONDS = 2.0
+RATE_LIMIT_MAX_WAIT_SECONDS = 30.0      # cap on the exponential fallback
+RATE_LIMIT_MAX_RETRY_AFTER_SECONDS = 60.0  # cap on an honoured Retry-After
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Seconds the gateway asked us to wait, from Retry-After (delta or HTTP-date)."""
+    header = response.headers.get("retry-after")
+    if not header:
+        return None
+    try:
+        return max(0.0, float(header))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(header)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+
+
+class RateLimitRetryTransport(httpx.AsyncBaseTransport):
+    """Retry 429s with Retry-After / exponential backoff; pass everything else through.
+
+    Only 429 is handled here. 5xx and connection errors already get the SDK's
+    short retry, which is the right shape for them. The final attempt's 429 is
+    returned, not raised, so the SDK raises its own RateLimitError and
+    pydantic-ai its ModelHTTPError(429) exactly as before.
+    """
+
+    def __init__(
+        self,
+        wrapped: httpx.AsyncBaseTransport,
+        *,
+        max_attempts: int = RATE_LIMIT_MAX_ATTEMPTS,
+        base_wait: float = RATE_LIMIT_BASE_WAIT_SECONDS,
+        max_wait: float = RATE_LIMIT_MAX_WAIT_SECONDS,
+    ):
+        self.wrapped = wrapped
+        self.max_attempts = max(1, max_attempts)
+        self.base_wait = base_wait
+        self.max_wait = max_wait
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        for attempt in range(1, self.max_attempts + 1):
+            response = await self.wrapped.handle_async_request(request)
+            if response.status_code != 429 or attempt == self.max_attempts:
+                return response
+            wait = _retry_after_seconds(response)
+            if wait is None:
+                wait = min(self.max_wait, self.base_wait * 2 ** (attempt - 1))
+            else:
+                wait = min(RATE_LIMIT_MAX_RETRY_AFTER_SECONDS, wait)
+            wait += random.uniform(0, 1)  # de-synchronise concurrent callers
+            await response.aclose()
+            logger.warning(
+                "LLM gateway rate-limited (429) by %s — waiting %.1fs before attempt %d/%d",
+                request.url.host, wait, attempt + 1, self.max_attempts,
+            )
+            await asyncio.sleep(wait)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def aclose(self) -> None:
+        await self.wrapped.aclose()
+
+    async def __aenter__(self) -> "RateLimitRetryTransport":
+        await self.wrapped.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.wrapped.__aexit__(*exc_info)
+
+
 def _get_loop_http_client() -> httpx.AsyncClient:
     """Return the httpx.AsyncClient bound to the current event loop, creating it
     on first use. Reused across calls so we never leak a client per call."""
@@ -96,7 +189,10 @@ def _get_loop_http_client() -> httpx.AsyncClient:
         asyncio.set_event_loop(loop)
     client = _loop_http_clients.get(loop)
     if client is None or client.is_closed:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(read_timeout, connect=10.0))
+        client = httpx.AsyncClient(
+            transport=RateLimitRetryTransport(httpx.AsyncHTTPTransport()),
+            timeout=httpx.Timeout(read_timeout, connect=10.0),
+        )
         _loop_http_clients[loop] = client
     return client
 
