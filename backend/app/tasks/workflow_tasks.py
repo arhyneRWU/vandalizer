@@ -806,7 +806,12 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                     "encrypted, or a temporary OCR outage). Open the document to retry "
                     "extraction, or re-upload it, then run the workflow again."
                 )
-            logger.error(
+            # Warning, not error: this is a handled, user-actionable outcome —
+            # the run is marked failed with instructions and the bell fires —
+            # not a fault in the worker. The oversize pre-flight below logs at
+            # the same level; paging Sentry for every run against an
+            # unextracted document is noise (VANDALIZER-BACKEND-1T).
+            logger.warning(
                 "Workflow %s aborted pre-flight: no input document has raw_text "
                 "(processing=%d, failed=%d)",
                 workflow_id, len(processing), len(failed),
