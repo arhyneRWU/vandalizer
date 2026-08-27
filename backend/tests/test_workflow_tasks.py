@@ -8,7 +8,7 @@ Note: Celery tasks with bind=True receive `self` automatically. We call
 the underlying function directly via .__wrapped__ or the task object.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from bson import ObjectId
 
 import pytest
@@ -17,6 +17,17 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_real_beanie_or_smtp():
+    """The approval-pause path initialises Beanie on a throwaway loop and sends
+    mail. Neither has a server under pytest, and every unmocked attempt burns
+    the 5 s Mongo server-selection timeout per Beanie call — the four
+    approval tests went from well under a second to ~10 s each."""
+    with patch("app.database.init_db", new=AsyncMock()), \
+         patch("app.services.email_service.send_email", new=AsyncMock(return_value=True)):
+        yield
+
 
 def _fake_oid():
     return ObjectId()
