@@ -1460,7 +1460,7 @@ class TestFormFillerNode:
             "model": "gpt-4o",
         })
         result = node.process({"output": "Indirect rate 47% of MTDC"})
-        assert result["output"] == "Rate: 47%\nCap: [Not provided]\nBasis: [Not provided]\n\nNotes:"
+        assert result["output"] == "Rate: 47%\nCap: [Not provided: cap]\nBasis: [Not provided: basis]\n\nNotes:"
         assert result["warning"].startswith("2 fields not found in the input")
         assert "cap, basis" in result["warning"]
 
@@ -1545,6 +1545,72 @@ class TestFormFillerNode:
         assert "doc body" in prompt
 
 
+    @patch(SEAM)
+    def test_prose_non_answers_are_treated_as_missing(self, mock_model):
+        """Support ticket: the model answered "Not provided in context" as a
+        *value*; it went into the form as if filled in, with no warning, and
+        the run completed green."""
+        mock_model.return_value = (
+            '{"rate": "47%", "cap": "Not provided in context", '
+            '"basis": "The document does not mention a basis.", '
+            '"pi": "[Not provided]", "dept": "N/A"}'
+        )
+        node = FormFillerNode({
+            "template": "Rate: {{rate}}\nCap: {{cap}}\nBasis: {{basis}}\nPI: {{pi}}\nDept: {{dept}}",
+            "model": "gpt-4o",
+        })
+        result = node.process({"output": "Indirect rate 47% of MTDC"})
+        assert result["output"] == (
+            "Rate: 47%\nCap: [Not provided: cap]\nBasis: [Not provided: basis]\n"
+            "PI: [Not provided: pi]\nDept: [Not provided: dept]"
+        )
+        assert "Not provided in context" not in result["output"]
+        assert result["warning"].startswith("4 fields not found in the input")
+        assert "cap, basis, pi, dept" in result["warning"]
+        assert "[Not provided: <field>]" in result["warning"]
+
+    @patch(SEAM)
+    def test_real_values_that_start_like_a_sentinel_survive(self, mock_model):
+        mock_model.return_value = (
+            '{"a": "None of the above", "b": "Unknown Author", "c": "Not-for-profit", '
+            '"d": "No data was collected after 2020, per the PI"}'
+        )
+        node = FormFillerNode({"template": "{{a}}|{{b}}|{{c}}|{{d}}", "model": "m"})
+        # Every value is present in the input, so the post-fill check has
+        # nothing to flag either — the only question is the sentinel prefix.
+        result = node.process({"output": (
+            "Answer: None of the above. Author: Unknown Author. Status: Not-for-profit. "
+            "Note: No data was collected after 2020, per the PI."
+        )})
+        assert result["output"] == "None of the above|Unknown Author|Not-for-profit|No data was collected after 2020, per the PI"
+        assert "warning" not in result
+
+    @patch(SEAM)
+    def test_custom_missing_value_is_used_verbatim_for_prose_non_answers_too(self, mock_model):
+        mock_model.return_value = '{"a": "unknown", "b": null}'
+        node = FormFillerNode({"template": "A={{a}} B={{b}}", "model": "m", "missing_value": "___"})
+        result = node.process({"output": "x"})
+        assert result["output"] == "A=___ B=___"
+        assert "marked ___ in the form" in result["warning"]
+
+    @patch(SEAM)
+    def test_freeform_fill_counts_the_blanks_it_could_not_fill(self, mock_model):
+        mock_model.return_value = (
+            "Name: Alice\nDate: [Not provided]\nSponsor: Not provided in context\nAmount: $5"
+        )
+        node = FormFillerNode({"template": "Name: ___\nDate: ___\nSponsor: ___\nAmount: ___", "model": "m"})
+        result = node.process({"output": "Alice, $5"})
+        assert result["warning"].startswith("2 blanks could not be filled from the input")
+        assert "no {{placeholder}} markers" in result["warning"]
+
+    @patch(SEAM)
+    def test_freeform_fill_with_every_blank_filled_only_warns_about_markers(self, mock_model):
+        mock_model.return_value = "Name: Alice\nAmount: $5"
+        node = FormFillerNode({"template": "Name: ___\nAmount: ___", "model": "m"})
+        result = node.process({"output": "Alice, $5"})
+        assert result["warning"].startswith("This template has no {{placeholder}} markers")
+
+
 class TestFormFillerHelpers:
     def test_placeholders_are_deduplicated_in_order(self):
         from app.services.workflow_engine import template_placeholders
@@ -1553,7 +1619,7 @@ class TestFormFillerHelpers:
     def test_render_substitutes_and_reports_missing(self):
         from app.services.workflow_engine import render_filled_template
         text, missing = render_filled_template("{{a}}-{{b}}-{{a}}", {"a": "1"})
-        assert text == "1-[Not provided]-1"
+        assert text == "1-[Not provided: b]-1"
         assert missing == ["b"]
 
     def test_render_keeps_values_verbatim(self):
@@ -1566,6 +1632,41 @@ class TestFormFillerHelpers:
 # ---------------------------------------------------------------------------
 # PackageBuilderNode
 # ---------------------------------------------------------------------------
+
+
+    @pytest.mark.parametrize("value", [
+        None, "", "   ", "N/A", "n/a", "N.A.", "none", "Null", "unknown", "—", "--", "TBD",
+        "Not provided", "Not provided.", "Not provided in context", "Not provided in the context.",
+        "not specified in the document", "Not available", "Not found in the input",
+        "[Not provided]", "[Not provided: cap]", "(not stated)", "No information available",
+        "The context does not contain this information.", "The document doesn't mention it",
+        "Information does not specify a rate", "Not applicable", "Missing", "Not in the document",
+    ])
+    def test_form_value_is_missing_for_nullish_values(self, value):
+        from app.services.workflow_engine import form_value_is_missing
+        assert form_value_is_missing(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "47%", "0", "None of the above", "Unknown Author", "Not-for-profit",
+        "Nonesuch Ltd", "Not less than 10%", "No data was collected after 2020, per the PI",
+        "Blankenship", "Missing Persons Act", "N/A-123", "TBD Holdings LLC",
+    ])
+    def test_form_value_is_missing_leaves_real_values_alone(self, value):
+        from app.services.workflow_engine import form_value_is_missing
+        assert form_value_is_missing(value) is False
+
+    def test_form_missing_marker_names_the_field_unless_overridden(self):
+        from app.services.workflow_engine import form_missing_marker
+        assert form_missing_marker("applicant_name") == "[Not provided: applicant_name]"
+        assert form_missing_marker("applicant_name", "N/A") == "N/A"
+
+    def test_count_unfilled_freeform(self):
+        from app.services.workflow_engine import count_unfilled_freeform
+        assert count_unfilled_freeform("") == 0
+        assert count_unfilled_freeform("A: x\nB: y") == 0
+        assert count_unfilled_freeform("A: [Not provided]\nB: not specified in the document\nC: ___") == 2
+        assert count_unfilled_freeform("A: ___\nB: [Not provided]", "___") == 2
+
 
 class TestPackageBuilderNode:
     def test_builds_zip(self):
@@ -1965,8 +2066,8 @@ class TestFormFillerFillReport:
         assert (by["pi"]["document_uuid"], by["pi"]["page"]) == ("D1", 2)
         assert by["eur"]["status"] == "unsupported"
         assert by["cap"]["status"] == "missing"
-        assert result["output"] == "Rate 47.5% PI Dr. Ada Lovelace EUR EUR 4,000 Cap [Not provided]"
-        assert "1 field not found in the input and filled with [Not provided]: cap" in result["warning"]
+        assert result["output"] == "Rate 47.5% PI Dr. Ada Lovelace EUR EUR 4,000 Cap [Not provided: cap]"
+        assert "1 field not found in the input and marked [Not provided: <field>] in the form — fill in or remove before using it: cap" in result["warning"]
         assert "eur ('EUR 4,000')" in result["warning"]
         assert "may be invented or reformatted" in result["warning"]
 
@@ -1985,7 +2086,7 @@ class TestFormFillerFillReport:
         mock_model.return_value = '{"a": "Not provided", "b": "n/a"}'
         node = FormFillerNode({"template": "{{a}}|{{b}}", "model": "m"})
         result = node.process({"output": "x", "step_name": "Prev"})
-        assert result["output"] == "[Not provided]|[Not provided]"
+        assert result["output"] == "[Not provided: a]|[Not provided: b]"
         assert result["warning"].startswith("2 fields not found")
 
     @patch(SEAM)
@@ -2061,7 +2162,7 @@ class TestFormFillerPdfTemplate:
         mock_model.return_value = '{"pi_name": null, "human_subjects": null, "rate": "47.5%"}'
         node = FormFillerNode({"template_source": "pdf", "template_pdf_b64": _fillable_pdf_b64(), "model": "m"})
         result = node.process({"output": "Rate 47.5%", "step_name": "Prev"})
-        assert "2 fields not found in the input and left blank: pi_name, human_subjects" in result["warning"]
+        assert "2 fields not found in the input and left blank in the form — fill in before using it: pi_name, human_subjects" in result["warning"]
         assert "[Not provided]" not in json.dumps(result["fill_report"])
 
     @patch(SEAM)

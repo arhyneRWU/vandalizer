@@ -31,7 +31,6 @@ from typing import Any, Optional
 
 from app.services.extraction_sources import (
     _DATE_IN_TEXT_RE,
-    _NOT_FOUND_VARIANTS,
     _NUMBER_IN_TEXT_RE,
     _as_date,
     _number_with_pct,
@@ -69,15 +68,59 @@ def _squash(text: str) -> str:
     return " ".join(text.split())
 
 
-def value_is_missing(value: Any) -> bool:
-    """True for null, blank, or a "not found"-style sentinel."""
+# What the model says when it has nothing, written as a value instead of
+# null: "Not provided in context", "The document does not mention this",
+# "N/A", "unknown". Rendered as-is these read as filled-in answers — a form
+# with failure notes baked into it, marked Completed with no warning (support
+# ticket). Anything matching here is a missing value: it gets the missing
+# marker and the field is listed on the step's warning. Bare sentinels are
+# the same set extraction treats as not-found (extraction_sources
+# ._NOT_FOUND_VARIANTS); the phrase forms add the "in the context" tail and
+# the "the context does not …" sentence. A value that merely *starts* with
+# one of these words ("None of the above", "Unknown Author", "Not-for-profit")
+# does not match: the tail must be a locating clause or nothing at all.
+_FORM_NULLISH_HEAD = (
+    r"(?:n/?a|n\.a\.|none|null|nil|unknown|unavailable|missing|empty|blank|tbd|"
+    r"to be determined|-{1,3}|—|"
+    r"no (?:data|value|information|info|entry)(?: (?:available|provided|given|found|supplied))?|"
+    r"not (?:provided|specified|available|found|stated|mentioned|given|present|"
+    r"applicable|listed|included|supplied|indicated|determined|"
+    r"in (?:the )?(?:context|document|input|source|text)))"
+)
+_FORM_NULLISH_SENTENCE = (
+    r"(?:the )?(?:context|document|input|source|text|information)s? "
+    r"(?:does not|doesn't|did not|didn't|do not|don't) "
+    r"(?:contain|mention|state|provide|specify|include|list|give|say|indicate).*"
+)
+_FORM_NULLISH_RE = re.compile(
+    r"^\W*(?:" + _FORM_NULLISH_SENTENCE + r"|" + _FORM_NULLISH_HEAD +
+    r"(?:\s*:\s*.*|\s+[\-–—]\s+.*|\s+(?:in|from|within|by|for|per|on)\b.*)?)\W*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# Phrases in freehand output (a template with no {{markers}}) that mean a
+# blank went unfilled. Counted, not parsed: the model wrote the form itself,
+# so the count feeds the warning and nothing else.
+_FORM_FREEFORM_UNFILLED_RE = re.compile(
+    r"\bnot (?:provided|specified|available|found|stated|mentioned|given|supplied)"
+    r"(?:\s+in\s+(?:the\s+)?(?:context|document|input|source|text))?\b|"
+    r"\bno information (?:provided|available|given)\b|"
+    r"\b(?:the )?(?:context|document|input) (?:does not|doesn't) (?:contain|mention|state|provide|specify)\b",
+    re.IGNORECASE,
+)
+
+
+def form_value_is_missing(value) -> bool:
+    """True for null, blank, and prose that says there is no value."""
     if value is None:
         return True
-    if isinstance(value, bool):
+    if not isinstance(value, str):
         return False
-    if isinstance(value, (int, float)):
-        return False
-    return str(value).strip().lower() in _NOT_FOUND_VARIANTS
+    stripped = value.strip()
+    return not stripped or bool(_FORM_NULLISH_RE.match(stripped))
+
+
+# Back-compat alias for callers/tests written against the first name.
+value_is_missing = form_value_is_missing
 
 
 def _value_text(value: Any) -> str:
@@ -238,7 +281,10 @@ def describe_fill_report(report: list[dict], *, missing_token: str | None) -> li
     unsupported = [e for e in report if e.get("status") == "unsupported"]
     if missing:
         n = len(missing)
-        how = f"filled with {missing_token}" if missing_token else "left blank"
+        how = (
+            f"marked {missing_token} in the form — fill in or remove before using it"
+            if missing_token else "left blank in the form — fill in before using it"
+        )
         warnings.append(
             f"{n} field{'s' if n != 1 else ''} not found in the input and {how}: "
             + ", ".join(missing)

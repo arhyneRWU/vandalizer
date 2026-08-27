@@ -102,14 +102,14 @@ class TestDescribeFillReport:
     def test_unfilled_then_unsupported(self):
         report = resolve_fill({"a": None, "b": "nope", "c": "47.5%"}, SOURCES)
         warnings = describe_fill_report(report, missing_token="[Not provided]")
-        assert warnings[0] == "1 field not found in the input and filled with [Not provided]: a"
+        assert warnings[0] == "1 field not found in the input and marked [Not provided] in the form — fill in or remove before using it: a"
         assert warnings[1].startswith("1 value does not appear anywhere in the input data")
         assert "b ('nope')" in warnings[1]
 
     def test_blank_wording_for_pdf_mode_and_plural(self):
         report = resolve_fill({"a": None, "b": None}, SOURCES)
         [w] = describe_fill_report(report, missing_token=None)
-        assert w == "2 fields not found in the input and left blank: a, b"
+        assert w == "2 fields not found in the input and left blank in the form — fill in before using it: a, b"
 
     def test_clean_fill_has_no_warnings(self):
         assert describe_fill_report(resolve_fill({"c": "47.5%"}, SOURCES), missing_token="x") == []

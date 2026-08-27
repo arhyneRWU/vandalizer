@@ -22,6 +22,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.services.extraction_engine import ExtractionEngine
+from app.services.form_fill import (  # noqa: F401  (form_value_is_missing is re-exported)
+    _FORM_FREEFORM_UNFILLED_RE,
+    form_value_is_missing,
+)
 from app.services.llm_service import create_chat_agent
 from app.services.page_locator import locator_for_meta
 
@@ -1198,13 +1202,37 @@ class DocumentRendererNode(Node):
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 FORM_FILLER_MISSING = "[Not provided]"
 
+def form_missing_marker(name: str, missing_token: str | None = None) -> str:
+    """What goes in the form for a field with no value. The default names
+    the field — ``[Not provided: applicant_name]`` — so a gap is unmistakable
+    even to someone reading the form on its own; a per-step ``missing_value``
+    is used verbatim."""
+    return missing_token if missing_token else f"{FORM_FILLER_MISSING[:-1]}: {name}]"
+
+
+def count_unfilled_freeform(text: str, missing_token: str | None = None) -> int:
+    """Blanks a freehand fill left unfilled: the missing marker the
+    instructions ask for, plus the prose forms of "no value"."""
+    if not text:
+        return 0
+    token = missing_token or FORM_FILLER_MISSING
+    count = text.count(token)
+    rest = text.replace(token, "")
+    if token != FORM_FILLER_MISSING:
+        count += rest.count(FORM_FILLER_MISSING)
+        rest = rest.replace(FORM_FILLER_MISSING, "")
+    # Markers are removed before the prose scan so "[Not provided]" is not
+    # counted twice.
+    return count + len(_FORM_FREEFORM_UNFILLED_RE.findall(rest))
+
 FORM_FILLER_VALUES_INSTRUCTIONS = (
     "You fill form templates for a document-processing workflow. You are given the "
     "placeholder names from a template and a CONTEXT block. Return ONE JSON object "
     "whose keys are exactly the placeholder names and whose values are strings copied "
     "verbatim from the CONTEXT — the same digits, units, punctuation and capitalisation "
     "as the source; never reformatted, rounded, expanded, abbreviated or summarised. "
-    "When the CONTEXT does not state a value for a placeholder, use JSON null. Do not "
+    "When the CONTEXT does not state a value for a placeholder, use JSON null — never "
+    "a sentence such as \"Not provided\" or \"The context does not mention this\". Do not "
     "guess, do not use outside knowledge, do not add keys, and write nothing before or "
     "after the JSON object."
 )
@@ -1220,7 +1248,8 @@ FORM_FILLER_PDF_VALUES_INSTRUCTIONS = (
     "checkbox the value is true or false, and only when the CONTEXT clearly settles it. "
     "For a combobox, listbox or radiobutton the value is one of the listed options, "
     "exactly as written. When the CONTEXT does not state a value for a field, use JSON "
-    "null. Do not guess, do not use outside knowledge, do not add keys, and write "
+    "null — never a sentence such as \"Not provided\" or \"The context does not mention "
+    "this\". Do not guess, do not use outside knowledge, do not add keys, and write "
     "nothing before or after the JSON object."
 )
 
@@ -1271,20 +1300,23 @@ def template_placeholders(template: str) -> list[str]:
 
 
 def render_filled_template(
-    template: str, values: dict, missing_token: str = FORM_FILLER_MISSING,
+    template: str, values: dict, missing_token: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Substitute placeholders; return (text, names that had no value)."""
-    missing: list[str] = []
+    """Substitute placeholders; return (text, names that had no value).
 
-    from app.services.form_fill import value_is_missing
+    A value that is null, blank, or prose meaning "no value" (see
+    ``form_value_is_missing``) is rendered as the missing marker — by default
+    ``[Not provided: <name>]`` — never as the prose.
+    """
+    missing: list[str] = []
 
     def _sub(m: "re.Match[str]") -> str:
         name = m.group(1)
         value = values.get(name)
-        if value_is_missing(value):
+        if form_value_is_missing(value):
             if name not in missing:
                 missing.append(name)
-            return missing_token
+            return form_missing_marker(name, missing_token)
         return value if isinstance(value, str) else json.dumps(value, default=str)
 
     return _PLACEHOLDER_RE.sub(_sub, template or ""), missing
@@ -1368,7 +1400,7 @@ class FormFillerNode(Node):
 
     def process(self, inputs):
         template = self.data.get("template", "")
-        missing_token = (self.data.get("missing_value") or "").strip() or FORM_FILLER_MISSING
+        missing_token = (self.data.get("missing_value") or "").strip() or None
         prev_step_name = inputs.get("step_name")
 
         sources = _resolve_input_sources(self.data, prev_step_name)
@@ -1392,12 +1424,21 @@ class FormFillerNode(Node):
                 self.model, FORM_FILLER_FREEFORM_INSTRUCTIONS, prompt,
                 system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
             ).strip()
-            result["warning"] = (
+            warnings = []
+            unfilled = count_unfilled_freeform(result["output"], missing_token)
+            if unfilled:
+                warnings.append(
+                    f"{unfilled} blank{'s' if unfilled != 1 else ''} could not be filled "
+                    "from the input — check the form before using it"
+                )
+            warnings.append(
                 "This template has no {{placeholder}} markers, so the model filled "
                 "its blanks freehand and the values could not be checked against the "
-                "input. Mark each blank as {{name}} to get the same layout and the "
-                "same missing-value text on every run, and a per-field source check."
+                "input. Mark each blank as {{name}} to get the same layout, the same "
+                "missing-value marker, a list of the fields that were not found, and "
+                "a per-field source check on every run."
             )
+            result["warning"] = " | ".join(warnings)
             return result
 
         from app.services.form_fill import describe_fill_report, resolve_fill
@@ -1418,7 +1459,9 @@ class FormFillerNode(Node):
             values, self._attribution_sources(inputs, sources), field_order=placeholders,
         )
         result["fill_report"] = report
-        warnings = describe_fill_report(report, missing_token=missing_token)
+        warnings = describe_fill_report(
+            report, missing_token=missing_token or f"{FORM_FILLER_MISSING[:-1]}: <field>]",
+        )
         if warnings:
             result["warning"] = " | ".join(warnings)
         return result
@@ -1432,7 +1475,6 @@ class FormFillerNode(Node):
             filled_pdf_filename,
             pdf_form_fields,
             resolve_fill,
-            value_is_missing,
         )
 
         def _fail(message: str) -> dict:
@@ -1491,7 +1533,7 @@ class FormFillerNode(Node):
             "filename": filled_pdf_filename(title),
         }
         result["filled_values"] = {
-            name: values.get(name) for name in applied if not value_is_missing(values.get(name))
+            name: values.get(name) for name in applied if not form_value_is_missing(values.get(name))
         }
         result["fill_report"] = report
 
