@@ -970,7 +970,7 @@ export function WorkflowEditorPanel() {
           </>
         )}
 
-        {activeTab === 'input' && <InputTab workflow={workflow} openWorkflowId={openWorkflowId} onRefresh={refresh} />}
+        {activeTab === 'input' && <InputTab workflow={workflow} openWorkflowId={openWorkflowId} canManage={canManage} onRefresh={refresh} />}
         {activeTab === 'validate' && (
           hasSteps ? (
             <ValidateTab
@@ -2416,6 +2416,17 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // Task edit modal (with Design/Input/Output sub-tabs + test step)
 // ---------------------------------------------------------------------------
 
+// Explain a failed input/output-config save. The backend answers PATCH on a
+// workflow the viewer can see but not manage (shared or verified) with a 404,
+// so surfacing the raw "Workflow not found" would read as if the workflow
+// vanished — say what actually happened instead.
+function describeConfigSaveError(err: unknown, what: string): string {
+  if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+    return `Couldn't save ${what} — you don't have permission to edit this workflow. Save a copy to your library to make an editable version.`
+  }
+  return err instanceof Error && err.message ? err.message : `Couldn't save ${what}. Please try again.`
+}
+
 function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, onSave, onRefreshWorkflow, canManage }: {
   task: WorkflowTask
   selectedDocUuids: string[]
@@ -2427,6 +2438,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   canManage: boolean
 }) {
   const { user } = useAuth()
+  const { toast } = useToast()
   const { selectedDocNames } = useWorkspace()
   const [taskData, setTaskData] = useState<Record<string, unknown>>({ ...task.data })
   const [saving, setSaving] = useState(false)
@@ -2517,22 +2529,27 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
 
   // Save fixed documents to workflow input_config
   const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
-    setFixedDocs(docs)
-    if (workflowId) {
+    const previous = fixedDocs
+    setFixedDocs(docs)  // optimistic — refresh reconciles on success
+    if (!workflowId) return
+    try {
       await updateWorkflow(workflowId, {
         input_config: { ...inputCfg, fixed_documents: docs },
       })
       onRefreshWorkflow()
+    } catch (err) {
+      setFixedDocs(previous)
+      toast(describeConfigSaveError(err, 'fixed documents'), 'error')
     }
   }
 
   const addFixedDoc = (doc: { uuid: string; title: string }) => {
     if (fixedDocs.some(d => d.uuid === doc.uuid)) return
-    saveFixedDocs([...fixedDocs, doc])
+    void saveFixedDocs([...fixedDocs, doc])
   }
 
   const removeFixedDoc = (uuid: string) => {
-    saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
+    void saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
   }
 
   const handleFileUpload = async (file: File) => {
@@ -4046,7 +4063,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 />
                 <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
                   Use <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>{'{{placeholder}}'}</code> syntax.
-                  AI will fill placeholders from the input data.
+                  Values are copied verbatim from the input and everything outside the placeholders is kept exactly as written.
+                  A placeholder the input doesn&apos;t answer is filled with <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided]</code> and listed in the step&apos;s warning.
                 </div>
               </div>
             )}
@@ -5921,9 +5939,12 @@ function BrowserAutomationDesign({ taskData, setTextValue, getTextValue, setTask
 // ---------------------------------------------------------------------------
 
 
-function InputTab({ workflow, openWorkflowId, onRefresh }: {
+const VIEW_ONLY_HINT = 'This workflow is view-only. Save a copy to your library to change its input and output settings.'
+
+function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
   workflow: Workflow
   openWorkflowId: string | null
+  canManage: boolean
   onRefresh: () => void
 }) {
   const { toast } = useToast()
@@ -5957,24 +5978,26 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
     try {
       await persistInputConfig({ trigger_type: value })
     } catch (err) {
-      // Roll the dropdown back so it reflects what's actually saved, and say
-      // why. The usual cause is editing a verified/shared workflow you don't
-      // have manage rights on — duplicate it first to get an editable copy.
+      // Roll the dropdown back so it reflects what's actually saved, and say why.
       setTriggerType(previous)
-      toast(
-        err instanceof Error && err.message
-          ? err.message
-          : "Couldn't change the input type — you may not have permission to edit this workflow. Duplicate it to make an editable copy.",
-        'error',
-      )
+      toast(describeConfigSaveError(err, 'the input type'), 'error')
     } finally {
       setSaving(false)
     }
   }
 
   const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
-    setFixedDocs(docs)
-    await persistInputConfig({ fixed_documents: docs })
+    const previous = fixedDocs
+    setFixedDocs(docs)  // optimistic — refresh() reconciles on success
+    try {
+      await persistInputConfig({ fixed_documents: docs })
+    } catch (err) {
+      // Roll back so the list only shows what's actually saved. Without this
+      // the rejection escaped every caller (add-selected button, remove ×,
+      // drop zone) as an unhandled promise rejection.
+      setFixedDocs(previous)
+      toast(describeConfigSaveError(err, 'fixed documents'), 'error')
+    }
   }
 
   const addFixedDocs = async (docs: { uuid: string; title: string }[]) => {
@@ -5990,7 +6013,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
   }
 
   const removeFixedDoc = (uuid: string) => {
-    saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
+    void saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
   }
 
   return (
@@ -5998,6 +6021,17 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
       <div style={{ fontSize: 14, fontWeight: 600, color: '#202124', marginBottom: 16 }}>
         Input Configuration
       </div>
+      {!canManage && (
+        <div
+          role="note"
+          style={{
+            fontSize: 12, color: '#6b7280', marginBottom: 16, padding: '8px 12px',
+            border: '1px solid #e5e7eb', borderRadius: 6, backgroundColor: '#f9fafb',
+          }}
+        >
+          {VIEW_ONLY_HINT}
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {/* Input type selector */}
         <div>
@@ -6006,7 +6040,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
             aria-label="Input type"
             value={triggerType}
             onChange={e => handleTriggerChange(e.target.value)}
-            disabled={saving}
+            disabled={saving || !canManage}
             style={{
               width: '100%', fontSize: 13, fontFamily: 'inherit',
               border: '1px solid #d1d5db', borderRadius: 6, padding: '8px 12px',
@@ -6034,6 +6068,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
               fixedDocs={fixedDocs}
               onAddDocs={addFixedDocs}
               onRemoveDoc={removeFixedDoc}
+              readOnly={!canManage}
             />
           </div>
         )}
@@ -6065,6 +6100,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
                 fixedDocs={fixedDocs}
                 onAddDocs={addFixedDocs}
                 onRemoveDoc={removeFixedDoc}
+                readOnly={!canManage}
               />
             </div>
           </>
@@ -6094,6 +6130,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
       <OutputConfigCard
         workflow={workflow}
         openWorkflowId={openWorkflowId}
+        canManage={canManage}
         onRefresh={onRefresh}
       />
     </div>
@@ -6108,12 +6145,15 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
 function OutputConfigCard({
   workflow,
   openWorkflowId,
+  canManage,
   onRefresh,
 }: {
   workflow: Workflow
   openWorkflowId: string | null
+  canManage: boolean
   onRefresh: () => void
 }) {
+  const { toast } = useToast()
   const oc = (workflow as unknown as Record<string, unknown>)?.output_config as Record<string, unknown> | undefined
   const storage = (oc?.storage || {}) as Record<string, unknown>
   const enabled = (storage.enabled as boolean) || false
@@ -6135,14 +6175,20 @@ function OutputConfigCard({
     if (!openWorkflowId) return
     const current = (workflow as unknown as Record<string, unknown>)?.output_config as Record<string, unknown> | undefined
     const nextStorage = { ...storage, ...patch }
-    await updateWorkflow(openWorkflowId, {
-      output_config: { ...(current || {}), storage: nextStorage },
-    })
-    onRefresh()
+    try {
+      await updateWorkflow(openWorkflowId, {
+        output_config: { ...(current || {}), storage: nextStorage },
+      })
+      onRefresh()
+    } catch (err) {
+      // Controls render from the persisted workflow, so there's nothing to roll
+      // back — just say why the change didn't stick.
+      toast(describeConfigSaveError(err, 'the output settings'), 'error')
+    }
   }
 
   return (
-    <div style={{ padding: 16, backgroundColor: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+    <fieldset disabled={!canManage} style={{ padding: 16, backgroundColor: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb', margin: 0, minWidth: 0 }}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: enabled ? 12 : 0 }}>
         <input
           type="checkbox"
@@ -6268,7 +6314,7 @@ function OutputConfigCard({
           </label>
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }
 
@@ -6279,10 +6325,13 @@ function FixedDocumentsZone({
   fixedDocs,
   onAddDocs,
   onRemoveDoc,
+  readOnly = false,
 }: {
   fixedDocs: { uuid: string; title: string }[]
   onAddDocs: (docs: { uuid: string; title: string }[]) => Promise<void> | void
   onRemoveDoc: (uuid: string) => void
+  // View-only workflows: list the pinned documents, hide every way to change them.
+  readOnly?: boolean
 }) {
   const { selectedDocUuids, selectedDocNames } = useWorkspace()
   const [dragOver, setDragOver] = useState(false)
@@ -6346,23 +6395,29 @@ function FixedDocumentsZone({
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {doc.title}
               </span>
-              <button
-                type="button"
-                onClick={() => onRemoveDoc(doc.uuid)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer', padding: 2,
-                  color: '#6b7280', display: 'flex',
-                }}
-                aria-label={`Remove ${doc.title}`}
-              >
-                <X style={{ width: 14, height: 14 }} />
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveDoc(doc.uuid)}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+                    color: '#6b7280', display: 'flex',
+                  }}
+                  aria-label={`Remove ${doc.title}`}
+                >
+                  <X style={{ width: 14, height: 14 }} />
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      <div
+      {readOnly && fixedDocs.length === 0 && (
+        <div style={{ fontSize: 12, color: '#9ca3af' }}>No fixed documents.</div>
+      )}
+
+      {!readOnly && <div
         onDragOver={e => {
           e.preventDefault()
           e.stopPropagation()
@@ -6406,9 +6461,9 @@ function FixedDocumentsZone({
             <div>Drag documents here or click to browse</div>
           </>
         )}
-      </div>
+      </div>}
 
-      {addableSelected.length > 0 && (
+      {!readOnly && addableSelected.length > 0 && (
         <button
           onClick={async () => {
             const docs = addableSelected.map(uuid => ({

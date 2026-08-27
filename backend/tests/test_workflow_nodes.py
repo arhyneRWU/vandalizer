@@ -1408,9 +1408,14 @@ class TestAPICallNode:
 # ---------------------------------------------------------------------------
 
 class TestFormFillerNode:
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_basic_fill(self, mock_llm):
-        mock_llm.return_value = "Dear Alice, your order #123 is ready."
+    """The form is rendered in Python from a JSON object of values, so the
+    template's layout and the missing-value token cannot vary between runs."""
+
+    SEAM = "app.services.workflow_engine._run_form_filler_model"
+
+    @patch(SEAM)
+    def test_basic_fill_renders_template_from_values(self, mock_model):
+        mock_model.return_value = '{"name": "Alice", "order_id": "123"}'
         node = FormFillerNode({
             "template": "Dear {{name}}, your order #{{order_id}} is ready.",
             "model": "gpt-4o",
@@ -1418,19 +1423,75 @@ class TestFormFillerNode:
         result = node.process({"output": {"name": "Alice", "order_id": "123"}})
         assert result["output"] == "Dear Alice, your order #123 is ready."
         assert result["step_name"] == "FormFiller"
+        assert "warning" not in result
+        # The model is asked for values only — it never sees the template.
+        instructions, prompt = mock_model.call_args.args[1], mock_model.call_args.args[2]
+        assert "JSON object" in instructions
+        assert '["name", "order_id"]' in prompt
+        assert "Dear" not in prompt
 
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_reports_progress(self, mock_llm):
-        mock_llm.return_value = "filled"
+    @patch(SEAM)
+    def test_missing_values_use_one_token_and_are_listed_on_the_warning(self, mock_model):
+        mock_model.return_value = '{"rate": "47%", "cap": null, "basis": ""}'
+        node = FormFillerNode({
+            "template": "Rate: {{rate}}\nCap: {{cap}}\nBasis: {{basis}}\n\nNotes:",
+            "model": "gpt-4o",
+        })
+        result = node.process({"output": "Indirect rate 47% of MTDC"})
+        assert result["output"] == "Rate: 47%\nCap: [Not provided]\nBasis: [Not provided]\n\nNotes:"
+        assert result["warning"].startswith("2 fields not found in the input")
+        assert "cap, basis" in result["warning"]
+
+    @patch(SEAM)
+    def test_missing_token_is_configurable_per_step(self, mock_model):
+        mock_model.return_value = '{"a": null}'
+        node = FormFillerNode({"template": "A={{a}}", "model": "m", "missing_value": "N/A"})
+        result = node.process({"output": "x"})
+        assert result["output"] == "A=N/A"
+        assert "N/A" in result["warning"]
+
+    @patch(SEAM)
+    def test_layout_is_preserved_whatever_the_model_returns(self, mock_model):
+        # Extra keys, markdown fences and a repeated placeholder: the template
+        # still comes back byte-for-byte except at the placeholders.
+        mock_model.return_value = '```json\n{"pi": "Dr. Ada", "extra": "ignored"}\n```'
+        template = "# Award\n\nPI: {{ pi }}\n- signed by {{pi}}\n| col | {{pi}} |"
+        node = FormFillerNode({"template": template, "model": "m"})
+        result = node.process({"output": "PI Dr. Ada"})
+        assert result["output"] == "# Award\n\nPI: Dr. Ada\n- signed by Dr. Ada\n| col | Dr. Ada |"
+
+    @patch(SEAM)
+    def test_non_json_reply_is_retried_once_then_fails_loudly(self, mock_model):
+        mock_model.side_effect = ["Here are the missing fields: rate", "Sorry, still no JSON"]
+        node = FormFillerNode({"template": "{{rate}}", "model": "m"})
+        with pytest.raises(ValueError, match="did not return placeholder values as JSON"):
+            node.process({"output": "x"})
+        assert mock_model.call_count == 2
+        assert "not a JSON object" in mock_model.call_args.args[2]
+
+    @patch(SEAM)
+    def test_template_without_placeholders_fills_freehand_and_warns(self, mock_model):
+        mock_model.return_value = "Name: ____ Alice"
+        node = FormFillerNode({"template": "Name: ____", "model": "m"})
+        result = node.process({"output": "Alice"})
+        assert result["output"] == "Name: ____ Alice"
+        assert "no {{placeholder}} markers" in result["warning"]
+        instructions, prompt = mock_model.call_args.args[1], mock_model.call_args.args[2]
+        assert "[Not provided]" in instructions
+        assert "TEMPLATE:\nName: ____" in prompt
+
+    @patch(SEAM)
+    def test_reports_progress(self, mock_model):
+        mock_model.return_value = "filled"
         node = FormFillerNode({"template": "test", "model": "gpt-4o"})
         progress = []
         node.progress_reporter = lambda d=None, p=None: progress.append(d)
         node.process({"output": {}})
         assert any("Filling" in str(p) for p in progress)
 
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_document_trigger_uses_doc_texts_not_uuids(self, mock_llm):
-        mock_llm.return_value = "filled"
+    @patch(SEAM)
+    def test_document_trigger_uses_doc_texts_not_uuids(self, mock_model):
+        mock_model.return_value = '{"title": "AI Safety Initiative"}'
         node = FormFillerNode({
             "template": "Project: {{title}}",
             "model": "gpt-4o",
@@ -1440,12 +1501,14 @@ class TestFormFillerNode:
             "step_name": "Document",
             "output": ["d41d8cd98f00b204e9800998ecf8427e"],
         })
-        assert mock_llm.call_args.kwargs["data"] == "Project title: AI Safety Initiative."
+        prompt = mock_model.call_args.args[2]
+        assert "Project title: AI Safety Initiative." in prompt
+        assert "d41d8cd98f00b204e9800998ecf8427e" not in prompt
 
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_form_filler_multi_source(self, mock_llm):
+    @patch(SEAM)
+    def test_form_filler_multi_source(self, mock_model):
         """FormFillerNode combines step_input and selected document into labeled context."""
-        mock_llm.return_value = "filled"
+        mock_model.return_value = '{"x": "1"}'
         node = FormFillerNode({
             "template": "{{x}}",
             "model": "gpt-4o",
@@ -1453,11 +1516,29 @@ class TestFormFillerNode:
             "selected_doc_text": "doc body",
         })
         node.process({"output": "step output", "step_name": "Prev"})
-        data = mock_llm.call_args.kwargs["data"]
-        assert "Previous Step Output" in data
-        assert "Selected Document" in data
-        assert "step output" in data
-        assert "doc body" in data
+        prompt = mock_model.call_args.args[2]
+        assert "Previous Step Output" in prompt
+        assert "Selected Document" in prompt
+        assert "step output" in prompt
+        assert "doc body" in prompt
+
+
+class TestFormFillerHelpers:
+    def test_placeholders_are_deduplicated_in_order(self):
+        from app.services.workflow_engine import template_placeholders
+        assert template_placeholders("{{b}} {{ a }} {{b}} {{c}}") == ["b", "a", "c"]
+
+    def test_render_substitutes_and_reports_missing(self):
+        from app.services.workflow_engine import render_filled_template
+        text, missing = render_filled_template("{{a}}-{{b}}-{{a}}", {"a": "1"})
+        assert text == "1-[Not provided]-1"
+        assert missing == ["b"]
+
+    def test_render_keeps_values_verbatim(self):
+        from app.services.workflow_engine import render_filled_template
+        text, _ = render_filled_template("{{v}}", {"v": "47 % of modified total direct costs"})
+        assert text == "47 % of modified total direct costs"
+
 
 
 # ---------------------------------------------------------------------------
