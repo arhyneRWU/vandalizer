@@ -1999,3 +1999,55 @@ class TestResearchNodeEmptyInput:
         assert steps[-1]["name"] == "ResearchNode"
         assert "no input data to analyze" in steps[-1]["warning"]
         assert "no input data to analyze" in final
+
+
+class TestResearchNodeNoRelevantFindings:
+    """Pass 1 is asked to lead with NO_RELEVANT_FINDINGS when the input has
+    nothing on the question. That must stop the step before pass 2 — which,
+    asked for a four-section report, would fill the sections regardless."""
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_skips_pass_two_and_warns(self, mock_llm):
+        mock_llm.side_effect = [
+            "NO_RELEVANT_FINDINGS\nThe data is a parking permit application and says nothing about award finances."
+        ]
+        node = ResearchNode({"question": "What are the budget risks?", "model": "gpt-4o"})
+        result = node.process({"output": "Parking permit application ...", "step_name": "Prev"})
+
+        assert mock_llm.call_count == 1
+        assert "nothing in its input relevant to the question" in result["warning"]
+        assert "parking permit" in result["warning"]
+        assert "Executive Summary" not in result["output"]
+        assert result["output"].startswith("(")
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_wrapped_in_markdown_still_detected(self, mock_llm):
+        mock_llm.side_effect = ["**NO_RELEVANT_FINDINGS** — nothing here."]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert mock_llm.call_count == 1
+        assert result["warning"].endswith("nothing here.")
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_mid_text_is_not_a_declaration(self, mock_llm):
+        mock_llm.side_effect = [
+            "Finding 1: budget is $2M. (Would have said NO_RELEVANT_FINDINGS otherwise.)",
+            "report",
+        ]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert mock_llm.call_count == 2
+        assert result["output"] == "report"
+        assert "warning" not in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_prompts_carry_grounding_instructions(self, mock_llm):
+        mock_llm.side_effect = ["findings", "report"]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        node.process({"output": "x", "step_name": "Prev"})
+        pass1 = mock_llm.call_args_list[0].kwargs["prompt"]
+        pass2 = mock_llm.call_args_list[1].kwargs["prompt"]
+        assert "NO_RELEVANT_FINDINGS" in pass1
+        assert "general knowledge" in pass1
+        assert "must come from the Findings below or the CONTEXT" in pass2
+        assert "Findings:\nfindings" in pass2

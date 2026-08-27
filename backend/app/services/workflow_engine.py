@@ -840,6 +840,25 @@ class CrawlerNode(Node):
         return {"output": output, "input": inputs.get("output"), "step_name": self.name}
 
 
+# Token the Deep Analysis pass-1 prompt asks the model to lead with when the
+# input has nothing relevant to the question. Checked after stripping any
+# markdown the model wraps it in (``**NO_RELEVANT_FINDINGS**``, a heading).
+RESEARCH_NO_FINDINGS = "NO_RELEVANT_FINDINGS"
+
+
+def _research_no_findings_reason(findings) -> str | None:
+    """Return the model's reason (possibly "") if pass 1 declared no findings,
+    else None. Only a leading token counts — the word appearing mid-analysis
+    is not a declaration."""
+    if not isinstance(findings, str):
+        return None
+    head = findings.strip().lstrip("#*_` \t")
+    if not head.startswith(RESEARCH_NO_FINDINGS):
+        return None
+    rest = head[len(RESEARCH_NO_FINDINGS):].lstrip("*_` \t:.-—\n").rstrip("*_` \t\n")
+    return " ".join(rest.split())
+
+
 class ResearchNode(Node):
     def __init__(self, data: dict) -> None:
         super().__init__("ResearchNode")
@@ -877,7 +896,11 @@ class ResearchNode(Node):
 
         analysis_prompt = (
             f"Analyze the following data and generate structured findings related to this question: {question}\n\n"
-            "Provide your analysis as a structured list of key findings, evidence, and observations."
+            "Provide your analysis as a structured list of key findings, evidence, and observations. "
+            "Every finding must be supported by the data; quote or reference the supporting passage.\n\n"
+            f"If the data contains nothing relevant to the question, reply with the exact token "
+            f"{RESEARCH_NO_FINDINGS} on the first line, followed by one sentence saying what the data "
+            "does contain. Do not produce findings from general knowledge."
         )
         findings = llm_chat_model(
             model=self.model, prompt=analysis_prompt, data=input_data,
@@ -885,11 +908,34 @@ class ResearchNode(Node):
             usage_acc=self._usage_acc,
         )
 
+        # Pass 1 said the data has nothing on the question. Stop before pass 2:
+        # asked to "create a comprehensive report" with those four section
+        # headings, the synthesis pass would fill them anyway.
+        no_findings_reason = _research_no_findings_reason(findings)
+        if no_findings_reason is not None:
+            warning = (
+                "Deep Analysis found nothing in its input relevant to the question "
+                f"{question!r}, so no report was generated."
+            )
+            if no_findings_reason:
+                warning += f" {no_findings_reason}"
+            self.report_progress(warning)
+            return {
+                "output": f"({warning})",
+                "input": inputs.get("output"),
+                "step_name": self.name,
+                "warning": warning,
+            }
+
         self.report_progress("Pass 2: Synthesizing report")
         synthesis_prompt = (
             f"Based on the following analysis findings, create a comprehensive research report about: {question}\n\n"
             "Structure the report with clear sections: Executive Summary, Key Findings, "
             "Detailed Analysis, and Conclusions.\n\n"
+            "Every statement, figure, date, deadline, citation, and regulation reference in the "
+            "report must come from the Findings below or the CONTEXT. Where the findings say the "
+            "data does not cover something, the report says so in that section — do not fill a "
+            "section from general knowledge or with examples of what similar cases typically show.\n\n"
             f"Findings:\n{findings}"
         )
         report = llm_chat_model(
