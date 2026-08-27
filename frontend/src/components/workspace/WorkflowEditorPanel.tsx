@@ -1775,6 +1775,7 @@ function StepLastRunOutput({ step, stepsOutput, lastRunMeta }: {
   // (mirror backend _step_output_value: formatted_output || output).
   const value = entry ? (entry.formatted_output ?? entry.output) : undefined
   const warning = entry && typeof entry.warning === 'string' ? (entry.warning as string) : null
+  const fillReport = entry && Array.isArray(entry.fill_report) ? (entry.fill_report as FillReportField[]) : null
   const hasValue = value !== undefined && value !== null && value !== ''
   const taskCount = step.tasks.length
 
@@ -1817,7 +1818,9 @@ function StepLastRunOutput({ step, stepsOutput, lastRunMeta }: {
           )}
 
           {hasValue ? (
-            typeof value === 'string' ? (
+            isFileDownloadPayload(value) ? (
+              <FileOutputChip payload={value} />
+            ) : typeof value === 'string' ? (
               <div
                 style={{ fontSize: 13, color: '#202124', lineHeight: 1.6, wordBreak: 'break-word' }}
                 dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(value) as string) }}
@@ -1838,6 +1841,7 @@ function StepLastRunOutput({ step, stepsOutput, lastRunMeta }: {
                 : "This step hasn't produced output yet. Run the workflow to see its last output here."}
             </div>
           )}
+          {fillReport && fillReport.length > 0 && <FillReportTable fields={fillReport} />}
         </div>
       )}
     </div>
@@ -2443,7 +2447,241 @@ export function requiredFieldMessage(taskName: string, data: Record<string, unkn
   if (taskName === 'APINode' && !text('url')) {
     return 'Enter the endpoint URL before saving this step.'
   }
+  if (taskName === 'FormFiller') {
+    const source = text('template_source') || 'text'
+    if (source === 'pdf' && !text('template_document_uuid')) {
+      return 'Choose the fillable PDF form to use as the template before saving this step.'
+    }
+    if (source === 'text' && !text('template')) {
+      return 'Enter the template text before saving this step.'
+    }
+  }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Form Filler: fill report + file outputs
+// ---------------------------------------------------------------------------
+
+/** One row of a Form Filler step's `fill_report` (see backend form_fill.py). */
+export interface FillReportField {
+  name: string
+  value?: unknown
+  status: 'supported' | 'unsupported' | 'missing' | 'not_written'
+  method?: string
+  document_uuid?: string | null
+  document_title?: string | null
+  page?: number | null
+  page_approximate?: boolean
+  quote?: string
+  label?: string
+  reason?: string
+}
+
+export function isFileDownloadPayload(value: unknown): value is {
+  type: 'file_download'; filename?: string; file_type?: string; data_b64?: string
+} {
+  return !!value && typeof value === 'object' && (value as Record<string, unknown>).type === 'file_download'
+}
+
+/** "budget-filled.pdf (PDF, 41 KB)" — what to show instead of a base64 blob. */
+export function fileDownloadSummary(payload: { filename?: string; file_type?: string; data_b64?: string }): string {
+  const name = payload.filename || 'output'
+  const kind = (payload.file_type || name.split('.').pop() || 'file').toUpperCase()
+  const bytes = Math.round(((payload.data_b64 ?? '').length * 3) / 4)
+  const size = bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${name} (${kind}, ${size})`
+}
+
+export function fillReportSummary(fields: FillReportField[]): string {
+  const filled = fields.filter(f => f.status !== 'missing')
+  const supported = fields.filter(f => f.status === 'supported').length
+  const unsupported = fields.filter(f => f.status === 'unsupported').length
+  const notWritten = fields.filter(f => f.status === 'not_written').length
+  const missing = fields.length - filled.length
+  const parts = [`${supported} of ${filled.length} filled value${filled.length !== 1 ? 's' : ''} found in the input`]
+  if (unsupported) parts.push(`${unsupported} not in the input`)
+  if (notWritten) parts.push(`${notWritten} not written`)
+  if (missing) parts.push(`${missing} unfilled`)
+  return parts.join(' · ')
+}
+
+function fillValueText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'string') return value
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+
+const FILL_STATUS_STYLE: Record<FillReportField['status'], { label: string; color: string; bg: string; border: string }> = {
+  supported: { label: 'Found in input', color: '#166534', bg: '#f0fdf4', border: '#bbf7d0' },
+  unsupported: { label: 'Not in input', color: '#991b1b', bg: '#fef2f2', border: '#fecaca' },
+  missing: { label: 'Not provided', color: '#4b5563', bg: '#f3f4f6', border: '#e5e7eb' },
+  not_written: { label: 'Not written', color: '#92400e', bg: '#fffbeb', border: '#fde68a' },
+}
+
+/**
+ * Per-field table for a Form Filler step: the value written, where it came
+ * from (document · page, with the surrounding passage on hover), and whether
+ * it was actually found in the input. A value the check could not find is
+ * the step's hallucination signal and is the row to look at first.
+ */
+function FillReportTable({ fields }: { fields: FillReportField[] }) {
+  if (!fields.length) return null
+  const hasSource = fields.some(f => f.document_title)
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 6 }}>{fillReportSummary(fields)}</div>
+      <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 6, backgroundColor: '#fff' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ backgroundColor: '#f9fafb', color: '#6b7280', textAlign: 'left' }}>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>Field</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>Value</th>
+              {hasSource && <th style={{ padding: '6px 10px', fontWeight: 600 }}>Source</th>}
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>Check</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fields.map(f => {
+              const style = FILL_STATUS_STYLE[f.status] ?? FILL_STATUS_STYLE.missing
+              const locator = formatPageLocator(f.page, f.page_approximate)
+              const source = f.document_title ? (locator ? `${f.document_title} · ${locator}` : f.document_title) : ''
+              const check = f.status === 'not_written' && f.reason ? `${style.label} — ${f.reason}` : style.label
+              return (
+                <tr key={f.name} style={{ borderTop: '1px solid #f3f4f6', verticalAlign: 'top' }}>
+                  <td style={{ padding: '6px 10px', color: '#111827', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', whiteSpace: 'nowrap' }}>
+                    {f.name}
+                    {f.label && <div style={{ fontFamily: 'inherit', fontSize: 11, color: '#6b7280', whiteSpace: 'normal' }}>{f.label}</div>}
+                  </td>
+                  <td style={{ padding: '6px 10px', color: '#374151', wordBreak: 'break-word', maxWidth: 320 }}>
+                    {f.status === 'missing' ? <span style={{ color: '#9ca3af' }}>—</span> : fillValueText(f.value)}
+                  </td>
+                  {hasSource && (
+                    <td style={{ padding: '6px 10px', color: '#374151', whiteSpace: 'nowrap' }} title={f.quote || undefined}>
+                      {source || <span style={{ color: '#9ca3af' }}>—</span>}
+                    </td>
+                  )}
+                  <td style={{ padding: '6px 10px' }}>
+                    <span style={{
+                      display: 'inline-block', padding: '1px 8px', borderRadius: 999, fontSize: 11, fontWeight: 600,
+                      color: style.color, backgroundColor: style.bg, border: `1px solid ${style.border}`,
+                    }}>
+                      {check}
+                    </span>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function FileOutputChip({ payload }: { payload: { filename?: string; file_type?: string; data_b64?: string } }) {
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+      border: '1px solid #e5e7eb', borderRadius: 6, backgroundColor: '#fff', fontSize: 13, color: '#374151',
+    }}>
+      <FileText style={{ width: 16, height: 16, color: '#6b7280', flexShrink: 0 }} />
+      <span style={{ fontWeight: 600 }}>{fileDownloadSummary(payload)}</span>
+      <span style={{ color: '#6b7280', fontSize: 12 }}>— use Download to save it</span>
+    </div>
+  )
+}
+
+/** Library search narrowed to PDFs, for choosing a fillable form as a Form Filler template. */
+function PdfTemplatePicker({ value, onChange }: {
+  value: { uuid: string; title: string }
+  onChange: (doc: { uuid: string; title: string } | null) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<{ uuid: string; title: string }[]>([])
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    const q = query.trim()
+    const t = setTimeout(async () => {
+      try {
+        const res = await searchDocuments(q, 20)
+        setResults(res.items
+          .filter(d => (d.extension || '').toLowerCase() === 'pdf')
+          .map(d => ({ uuid: d.uuid, title: d.title })))
+      } catch (err) {
+        console.error('Document search failed', err)
+        setResults([])
+      }
+    }, q ? 250 : 0)
+    return () => clearTimeout(t)
+  }, [query, open])
+
+  return (
+    <div>
+      {value.uuid ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+          backgroundColor: '#f3f4f6', borderRadius: 6, fontSize: 13, color: '#374151',
+        }}>
+          <FileText style={{ width: 14, height: 14, color: '#6b7280', flexShrink: 0 }} />
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+            {value.title || value.uuid}
+          </span>
+          <button
+            type="button"
+            aria-label="Change template PDF"
+            onClick={() => { onChange(null); setOpen(true) }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#2563eb', fontFamily: 'inherit', padding: 0 }}
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <div style={{ position: 'relative' }}>
+          <input
+            aria-label="Template PDF"
+            aria-required="true"
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 200)}
+            placeholder="Search your library for a fillable PDF form…"
+            style={{
+              width: '100%', padding: '8px 12px', fontSize: 13, fontFamily: 'inherit',
+              border: '1px solid #d1d5db', borderRadius: 6, outline: 'none', boxSizing: 'border-box',
+            }}
+          />
+          {open && (
+            <div role="listbox" aria-label="PDF documents" style={{
+              position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4,
+              backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: 6,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 10, maxHeight: 200, overflowY: 'auto',
+            }}>
+              {results.length === 0 ? (
+                <div style={{ padding: '8px 12px', fontSize: 13, color: '#6b7280' }}>No PDF documents found</div>
+              ) : results.map(doc => (
+                <div
+                  key={doc.uuid}
+                  role="option"
+                  aria-selected={false}
+                  onMouseDown={() => { onChange(doc); setOpen(false); setQuery('') }}
+                  style={{ padding: '8px 12px', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+                >
+                  <FileText style={{ width: 14, height: 14, color: '#6b7280', flexShrink: 0 }} />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, onSave, onRefreshWorkflow, canManage }: {
@@ -4078,23 +4316,66 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
                   Template
                 </label>
-                <textarea
-                  aria-label="Template"
-                  value={getTextValue('template')}
-                  onChange={e => setTextValue('template', e.target.value)}
-                  placeholder={'Dear {{name}},\n\nThank you for your {{item}}.\n\nBest regards,\n{{sender}}'}
-                  rows={10}
-                  style={{
-                    width: '100%', padding: '10px 12px', fontSize: 14,
-                    fontFamily: 'inherit', border: '1px solid #d1d5db', borderRadius: 6,
-                    outline: 'none', resize: 'vertical', boxSizing: 'border-box', lineHeight: 1.5,
-                  }}
-                />
-                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
-                  Use <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>{'{{placeholder}}'}</code> syntax.
-                  Values are copied verbatim from the input and everything outside the placeholders is kept exactly as written.
-                  A placeholder the input doesn&apos;t answer is filled with <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided]</code> and listed in the step&apos;s warning.
+                <div role="radiogroup" aria-label="Template source" style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+                  {([['text', 'Text template'], ['pdf', 'Fillable PDF form']] as const).map(([v, label]) => {
+                    const active = (getTextValue('template_source') || 'text') === v
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => setTextValue('template_source', v)}
+                        style={{
+                          padding: '6px 12px', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                          border: `1px solid ${active ? 'var(--highlight-color, #eab308)' : '#d1d5db'}`,
+                          borderRadius: 6, cursor: 'pointer',
+                          backgroundColor: active ? '#fefce8' : '#fff', color: '#374151',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
                 </div>
+                {(getTextValue('template_source') || 'text') === 'pdf' ? (
+                  <div>
+                    <PdfTemplatePicker
+                      value={{ uuid: getTextValue('template_document_uuid'), title: getTextValue('template_document_title') }}
+                      onChange={doc => setTaskData(prev => ({
+                        ...prev,
+                        template_document_uuid: doc?.uuid ?? '',
+                        template_document_title: doc?.title ?? '',
+                      }))}
+                    />
+                    <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
+                      The form&apos;s own fields are filled and the step&apos;s output is the filled PDF.
+                      Values are copied verbatim from the input; a field the input doesn&apos;t answer is left blank.
+                      Every value is checked against the input and listed with its source document and page on the run result.
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <textarea
+                      aria-label="Template"
+                      value={getTextValue('template')}
+                      onChange={e => setTextValue('template', e.target.value)}
+                      placeholder={'Dear {{name}},\n\nThank you for your {{item}}.\n\nBest regards,\n{{sender}}'}
+                      rows={10}
+                      style={{
+                        width: '100%', padding: '10px 12px', fontSize: 14,
+                        fontFamily: 'inherit', border: '1px solid #d1d5db', borderRadius: 6,
+                        outline: 'none', resize: 'vertical', boxSizing: 'border-box', lineHeight: 1.5,
+                      }}
+                    />
+                    <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
+                      Use <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>{'{{placeholder}}'}</code> syntax.
+                      Values are copied verbatim from the input and everything outside the placeholders is kept exactly as written.
+                      A placeholder the input doesn&apos;t answer is filled with <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided]</code> and listed in the step&apos;s warning.
+                      Every value is checked against the input and listed with its source document and page on the run result.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -4393,7 +4674,11 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                   padding: 12, fontSize: 12, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
                   maxHeight: 200, overflowY: 'auto', color: '#374151',
                 }}>
-                  {typeof testResult === 'string' ? testResult : JSON.stringify(testResult, null, 2)}
+                  {typeof testResult === 'string'
+                    ? testResult
+                    : isFileDownloadPayload(testResult)
+                      ? fileDownloadSummary(testResult)
+                      : JSON.stringify(testResult, null, 2)}
                 </div>
               </div>
             )}
@@ -5061,6 +5346,30 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
     </div>
   ) : null
 
+  // A Form Filler step attaches steps_output[step].fill_report: every value
+  // it wrote, where it came from, and whether it was found in the input.
+  const fillReports = Object.entries((status?.steps_output ?? {}) as Record<string, unknown>)
+    .map(([step, val]) => {
+      const report = val && typeof val === 'object' ? (val as Record<string, unknown>).fill_report : undefined
+      return Array.isArray(report) && report.length > 0 ? { step, fields: report as FillReportField[] } : null
+    })
+    .filter((x): x is { step: string; fields: FillReportField[] } => x !== null)
+
+  const fillReportPanel = fillReports.length > 0 ? (
+    <div style={{ marginTop: 12 }}>
+      {fillReports.map(({ step, fields }) => (
+        <details key={step} open style={{
+          border: '1px solid #e5e7eb', borderRadius: 6, padding: '8px 12px', marginBottom: 8, backgroundColor: '#fff',
+        }}>
+          <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#374151' }}>
+            Filled values — {step}
+          </summary>
+          <FillReportTable fields={fields} />
+        </details>
+      ))}
+    </div>
+  ) : null
+
   const apiRequestPanel = apiRequests.length > 0 ? (
     <div style={{ marginTop: 12 }}>
       {apiRequests.map(({ step, req }) => (
@@ -5092,6 +5401,8 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
     let md: string
     if (typeof data === 'string') {
       md = data
+    } else if (isFileDownloadPayload(data)) {
+      md = `**${fileDownloadSummary(data)}** — use Download to save it.`
     } else {
       try { md = '```json\n' + JSON.stringify(data, null, 2) + '\n```' } catch { md = String(data) }
     }
@@ -5261,6 +5572,7 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
             dangerouslySetInnerHTML={{ __html: renderOutput(output) }}
           />
           {stepWarningsPanel}
+          {fillReportPanel}
           {apiRequestPanel}
           <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
           <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -5563,6 +5875,8 @@ function BatchOutputCard({ batchId, batchStatus, running, runElapsed }: {
     let md: string
     if (typeof data === 'string') {
       md = data
+    } else if (isFileDownloadPayload(data)) {
+      md = `**${fileDownloadSummary(data)}** — use Download to save it.`
     } else {
       try { md = '```json\n' + JSON.stringify(data, null, 2) + '\n```' } catch { md = String(data) }
     }
