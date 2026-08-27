@@ -1149,8 +1149,12 @@ _CODE_REF_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{5,}\b")
 # digits, the run starts with a letter, and at least one token has three
 # letters, so "US" alone, "I AM", and an acronym mid-sentence ("the NSF
 # policy") never pin. Ordinary hyphenated capitals ("ABC-DEF") don't form a
-# run because the hyphen is not whitespace.
-_SHOUTED_PHRASE_RE = re.compile(r"\b[A-Z][A-Z0-9]+(?:[ \t]+[A-Z0-9]{2,}){1,7}\b")
+# run because the hyphen is not whitespace. A regulation citation is not a
+# run either: "2 CFR 200.313" / "45 CFR 46" must not yield "CFR 200", so a run
+# never ends on the part of a dotted section number (the citation itself is
+# pinned by _SECTION_REF_RE) and a run led by a code-title word is dropped.
+_SHOUTED_PHRASE_RE = re.compile(r"\b[A-Z][A-Z0-9]+(?:[ \t]+[A-Z0-9]{2,}){1,7}\b(?!\.\d)")
+_CITATION_TITLE_WORDS = frozenset({"CFR", "USC"})
 
 # A phrase the user put in double quotes — an explicit "find me this string".
 # Apostrophes are deliberately excluded so ordinary contractions can't pair up
@@ -1270,18 +1274,26 @@ def _extract_pin_terms(message: str) -> list[str]:
     message = message or ""
     for m in _SECTION_REF_RE.finditer(message):
         add(m.group(1), cited=True)
+    identifier_spans: list[tuple[int, int]] = []
     for m in _IDENTIFIER_REF_RE.finditer(message):
         token = m.group(0)
         if any(c.isdigit() for c in token):
             add(token)
+            identifier_spans.append(m.span())
     for m in _CODE_REF_RE.finditer(message):
+        # "R01CA123456-01A1" already pinned the whole award number; its
+        # hyphenless stem is the same lookup and must not spend a second slot.
+        if any(s <= m.start() and m.end() <= e for s, e in identifier_spans):
+            continue
         add(m.group(0))
     for m in _QUOTED_PHRASE_RE.finditer(message):
         add(" ".join(m.group(1).split()))
     for m in _SHOUTED_PHRASE_RE.finditer(message):
-        run = m.group(0)
-        if any(sum(ch.isalpha() for ch in tok) >= 3 for tok in run.split()):
-            add(" ".join(run.split()))
+        tokens = m.group(0).split()
+        if tokens[0] in _CITATION_TITLE_WORDS:
+            continue
+        if any(sum(ch.isalpha() for ch in tok) >= 3 for tok in tokens):
+            add(" ".join(tokens))
     for m in _ASKED_PHRASE_RE.finditer(message):
         add(_questioned_phrase(m.group(1)))
     return terms

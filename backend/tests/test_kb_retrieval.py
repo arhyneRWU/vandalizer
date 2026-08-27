@@ -654,6 +654,10 @@ def test_extract_pin_terms_shouted_phrase_and_hyphenless_code():
     ) == ["SPC-0500", "SCARLET ALBATROSS CLOSEOUT 9928"]
     # A shouted run that wraps an already-pinned code is not pinned twice.
     assert chat_service._extract_pin_terms("SPC0500 CLOSEOUT") == ["SPC0500"]
+    # Nor is the hyphenless stem of a hyphenated award number.
+    assert chat_service._extract_pin_terms("Find R01CA123456-01A1 budget") == [
+        "R01CA123456-01A1"
+    ]
 
 
 def test_extract_pin_terms_shouted_phrase_negatives():
@@ -671,8 +675,12 @@ def test_extract_pin_terms_shouted_phrase_negatives():
         # quoting is for.
         "where does scarlet albatross closeout 9928 appear?",
         "Where does Scarlet Albatross Closeout 9928 appear?",
+        # A regulation citation is not a shouted run ("CFR 200" / "CFR 46").
+        "What does 2 CFR 200 say about equipment?",
+        "Is 45 CFR 46 the Common Rule?",
     ):
         assert chat_service._extract_pin_terms(prose) == [], prose
+    assert chat_service._extract_pin_terms("What does 2 CFR 200.313 say?") == ["200.313"]
     # An acronym pair is a run by shape; it is harmless (the hit cap bounds
     # it) and deliberately not special-cased.
     assert chat_service._extract_pin_terms("NSF NIH policies") == ["NSF NIH"]
