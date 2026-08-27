@@ -908,7 +908,19 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
 
             # Prefer OCR when available — it handles scanned pages,
             # complex layouts, and image-heavy PDFs far better than PyPDF2.
-            ocr_text = ocr_extract_text_from_pdf(file_path)
+            from app.services import ocr_client
+
+            try:
+                ocr_text = ocr_extract_text_from_pdf(file_path)
+            except ocr_client.OcrUnavailableError:
+                # Same contract as ``extract_text_with_markers``: a transient
+                # outage is for the task layer to retry, not a reader crash.
+                # Without this the catch-all below logged it at error and
+                # re-wrapped it as ``DocumentReadError`` — a RuntimeError the
+                # task's ``autoretry_for`` never matches — so the outage was
+                # paged to Sentry and the retry the log line promised never
+                # happened (VANDALIZER-BACKEND-1F).
+                raise
             if ocr_text and len(ocr_text.strip()) >= MIN_PDF_TEXT_LENGTH:
                 return ocr_text
             # Fall back to PyMuPDF if OCR unavailable or returned nothing.
@@ -967,6 +979,11 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
         # and log at warning so it doesn't page Sentry as a fault.
         logger.warning("Source file not found for extraction: %s", file_path)
         return ""
+
+    except ConnectionError:
+        # ``OcrUnavailableError`` (a ConnectionError subclass) re-raised above
+        # must reach the task layer as itself, not as a DocumentReadError.
+        raise
 
     except Exception as e:
         # Raise instead of returning an error string: a returned
