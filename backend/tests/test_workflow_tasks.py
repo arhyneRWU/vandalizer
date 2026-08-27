@@ -1477,3 +1477,56 @@ class TestPreflightContextOverflow:
 
         assert result["status"] == "completed"
         mock_engine.execute.assert_called_once()
+
+
+class TestBuildStepsDataFormFiller:
+    """Form Filler tasks carry document metadata (for per-field sources) and
+    their fillable-PDF template; other tasks are untouched."""
+
+    def _db(self, task_name, task_data):
+        step_id, task_id = _fake_oid(), _fake_oid()
+        db = _mock_db(
+            step_docs=[{"_id": step_id, "name": "Fill", "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": task_name, "data": task_data}],
+        )
+        db.smart_document.find_one.side_effect = lambda q, *a, **k: {
+            "uuid": q.get("uuid"), "title": f"{q.get('uuid')}.pdf", "raw_text": f"text-{q.get('uuid')}",
+            "text_markers": [{"char_offset": 0, "kind": "page", "value": 1}],
+            "extension": "pdf", "path": f"u/{q.get('uuid')}.pdf",
+        }
+        return db, step_id
+
+    def test_form_filler_gets_doc_metas_aligned_with_doc_texts(self):
+        from app.tasks.workflow_tasks import _build_steps_data
+
+        db, step_id = self._db("FormFiller", {"template": "{{a}}", "input_sources": ["workflow_documents", "select_document"], "selected_document_uuid": "S"})
+        wf = _make_workflow_doc(step_ids=[step_id])
+        steps_data, _ = _build_steps_data(db, wf, str(wf["_id"]), {"doc_uuids": ["u1", "u2"]})
+
+        data = steps_data[1]["tasks"][0]["data"]
+        assert data["doc_texts"] == ["text-u1", "text-u2"]
+        assert [m["uuid"] for m in data["doc_metas"]] == ["u1", "u2"]
+        assert data["doc_metas"][0]["title"] == "u1.pdf"
+        assert data["doc_metas"][0]["text_markers"] == [{"char_offset": 0, "kind": "page", "value": 1}]
+        assert data["selected_doc_meta"]["uuid"] == "S"
+        assert "template_pdf_b64" not in data  # text mode
+
+    def test_other_tasks_do_not_get_metas(self):
+        from app.tasks.workflow_tasks import _build_steps_data
+
+        db, step_id = self._db("Prompt", {"prompt": "x"})
+        wf = _make_workflow_doc(step_ids=[step_id])
+        steps_data, _ = _build_steps_data(db, wf, str(wf["_id"]), {"doc_uuids": ["u1"]})
+        data = steps_data[1]["tasks"][0]["data"]
+        assert data["doc_texts"] == ["text-u1"]
+        assert "doc_metas" not in data
+
+    @patch("app.tasks.workflow_tasks._preload_form_filler_template")
+    def test_pdf_template_preload_is_called_for_form_filler(self, mock_preload):
+        from app.tasks.workflow_tasks import _build_steps_data
+
+        db, step_id = self._db("FormFiller", {"template_source": "pdf", "template_document_uuid": "T"})
+        wf = _make_workflow_doc(step_ids=[step_id])
+        _build_steps_data(db, wf, str(wf["_id"]), {"doc_uuids": []})
+        mock_preload.assert_called_once()
+        assert mock_preload.call_args.args[1]["template_document_uuid"] == "T"

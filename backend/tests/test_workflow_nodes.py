@@ -1911,3 +1911,178 @@ class TestNodePostProcess:
         result = {"output": ""}
         processed = node._apply_post_process(result)
         assert processed["output"] == ""
+
+
+# ---------------------------------------------------------------------------
+# FormFillerNode — fill check, sources, and fillable PDF templates
+# ---------------------------------------------------------------------------
+
+class TestFormFillerFillReport:
+    """After filling, every value is checked against the inputs and attributed
+    to a document and page; unfilled or unsupported values become warnings."""
+
+    SEAM = "app.services.workflow_engine._run_form_filler_model"
+    DOC = "Indirect cost rate: 47.5% of MTDC.\n\fPI: Dr. Ada Lovelace"
+    MARKERS = [{"char_offset": 0, "kind": "page", "value": 1},
+               {"char_offset": DOC.index("\f"), "kind": "page", "value": 2}]
+
+    @patch(SEAM)
+    def test_report_attributes_values_to_document_and_page(self, mock_model):
+        mock_model.return_value = '{"rate": "47.5%", "pi": "Dr. Ada Lovelace", "eur": "EUR 4,000", "cap": null}'
+        node = FormFillerNode({
+            "template": "Rate {{rate}} PI {{pi}} EUR {{eur}} Cap {{cap}}",
+            "model": "m",
+            "doc_texts": [self.DOC],
+            "doc_metas": [{"uuid": "D1", "title": "Award.pdf", "text_markers": self.MARKERS}],
+        })
+        result = node.process({"step_name": "Document", "output": ["D1"]})
+
+        by = {e["name"]: e for e in result["fill_report"]}
+        assert by["rate"]["status"] == "supported"
+        assert (by["rate"]["document_title"], by["rate"]["page"]) == ("Award.pdf", 1)
+        assert (by["pi"]["document_uuid"], by["pi"]["page"]) == ("D1", 2)
+        assert by["eur"]["status"] == "unsupported"
+        assert by["cap"]["status"] == "missing"
+        assert result["output"] == "Rate 47.5% PI Dr. Ada Lovelace EUR EUR 4,000 Cap [Not provided]"
+        assert "1 field not found in the input and filled with [Not provided]: cap" in result["warning"]
+        assert "eur ('EUR 4,000')" in result["warning"]
+        assert "may be invented or reformatted" in result["warning"]
+
+    @patch(SEAM)
+    def test_clean_fill_has_report_but_no_warning(self, mock_model):
+        mock_model.return_value = '{"rate": "47.5%"}'
+        node = FormFillerNode({"template": "{{rate}}", "model": "m"})
+        result = node.process({"output": "The rate is 47.5% of MTDC", "step_name": "Prev"})
+        assert "warning" not in result
+        [entry] = result["fill_report"]
+        assert entry["status"] == "supported"
+        assert entry["document_title"] == "Previous Step Output"
+
+    @patch(SEAM)
+    def test_sentinel_from_model_is_rendered_as_missing_token(self, mock_model):
+        mock_model.return_value = '{"a": "Not provided", "b": "n/a"}'
+        node = FormFillerNode({"template": "{{a}}|{{b}}", "model": "m"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert result["output"] == "[Not provided]|[Not provided]"
+        assert result["warning"].startswith("2 fields not found")
+
+    @patch(SEAM)
+    def test_selected_document_meta_is_used_for_attribution(self, mock_model):
+        mock_model.return_value = '{"pi": "Dr. Ada Lovelace"}'
+        node = FormFillerNode({
+            "template": "{{pi}}", "model": "m",
+            "input_sources": ["select_document"],
+            "selected_doc_text": self.DOC,
+            "selected_doc_meta": {"uuid": "S1", "title": "Selected.pdf", "text_markers": self.MARKERS},
+        })
+        result = node.process({"output": "ignored", "step_name": "Prev"})
+        [entry] = result["fill_report"]
+        assert (entry["document_uuid"], entry["document_title"], entry["page"]) == ("S1", "Selected.pdf", 2)
+
+
+def _fillable_pdf_b64() -> str:
+    import base64
+
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((20, 25), "Principal Investigator")
+    w = fitz.Widget(); w.field_name = "pi_name"; w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    w.rect = fitz.Rect(150, 10, 400, 30); page.add_widget(w)
+    w = fitz.Widget(); w.field_name = "human_subjects"; w.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+    w.rect = fitz.Rect(150, 40, 170, 60); page.add_widget(w)
+    w = fitz.Widget(); w.field_name = "rate"; w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    w.rect = fitz.Rect(150, 70, 400, 90); page.add_widget(w)
+    return base64.b64encode(doc.tobytes()).decode("ascii")
+
+
+class TestFormFillerPdfTemplate:
+    SEAM = "app.services.workflow_engine._run_form_filler_model"
+
+    @patch(SEAM)
+    def test_fills_the_pdf_fields_and_returns_the_file(self, mock_model):
+        import base64
+
+        import fitz
+
+        mock_model.return_value = '{"pi_name": "Dr. Ada Lovelace", "human_subjects": true, "rate": "99%"}'
+        node = FormFillerNode({
+            "template_source": "pdf",
+            "template_pdf_b64": _fillable_pdf_b64(),
+            "template_document_title": "NSF Cover.pdf",
+            "model": "m",
+        })
+        result = node.process({"output": "PI: Dr. Ada Lovelace. Rate 47.5%.", "step_name": "Prev"})
+
+        out = result["output"]
+        assert out["type"] == "file_download" and out["file_type"] == "pdf"
+        assert out["filename"] == "NSF Cover-filled.pdf"
+        filled = fitz.open(stream=base64.b64decode(out["data_b64"]), filetype="pdf")
+        values = {w.field_name: w.field_value for w in filled[0].widgets()}
+        assert values == {"pi_name": "Dr. Ada Lovelace", "human_subjects": "Yes", "rate": "99%"}
+
+        # The model got the fields with their labels, never a template.
+        instructions, prompt = mock_model.call_args.args[1], mock_model.call_args.args[2]
+        assert "PDF forms" in instructions
+        assert '"label": "Principal Investigator"' in prompt
+        assert "CONTEXT:\nPI: Dr. Ada Lovelace" in prompt
+
+        by = {e["name"]: e for e in result["fill_report"]}
+        assert by["pi_name"]["status"] == "supported" and by["pi_name"]["label"] == "Principal Investigator"
+        assert by["rate"]["status"] == "unsupported"
+        assert result["filled_values"] == {"pi_name": "Dr. Ada Lovelace", "human_subjects": True, "rate": "99%"}
+        assert "rate ('99%')" in result["warning"]
+
+    @patch(SEAM)
+    def test_missing_values_leave_fields_blank_and_warn(self, mock_model):
+        mock_model.return_value = '{"pi_name": null, "human_subjects": null, "rate": "47.5%"}'
+        node = FormFillerNode({"template_source": "pdf", "template_pdf_b64": _fillable_pdf_b64(), "model": "m"})
+        result = node.process({"output": "Rate 47.5%", "step_name": "Prev"})
+        assert "2 fields not found in the input and left blank: pi_name, human_subjects" in result["warning"]
+        assert "[Not provided]" not in json.dumps(result["fill_report"])
+
+    @patch(SEAM)
+    def test_unwritable_value_is_reported_not_written(self, mock_model):
+        mock_model.return_value = '{"pi_name": "Ada", "human_subjects": "maybe", "rate": null}'
+        node = FormFillerNode({"template_source": "pdf", "template_pdf_b64": _fillable_pdf_b64(), "model": "m"})
+        result = node.process({"output": "PI Ada", "step_name": "Prev"})
+        by = {e["name"]: e for e in result["fill_report"]}
+        assert by["human_subjects"]["status"] == "not_written"
+        assert "checkbox needs true/false" in by["human_subjects"]["reason"]
+        assert "1 form field could not be set: human_subjects" in result["warning"]
+
+    @patch(SEAM)
+    def test_template_load_error_fails_the_step_without_calling_the_model(self, mock_model):
+        node = FormFillerNode({
+            "template_source": "pdf",
+            "template_load_error": "The template document 'x' is not a PDF (.docx).",
+            "model": "m",
+        })
+        result = node.process({"output": "x", "step_name": "Prev"})
+        mock_model.assert_not_called()
+        assert result["error"] == "Form Filler: The template document 'x' is not a PDF (.docx)."
+        assert result["output"] == ""
+
+    @patch(SEAM)
+    def test_pdf_without_form_fields_fails_the_step(self, mock_model):
+        import base64
+
+        import fitz
+
+        doc = fitz.open(); doc.new_page().insert_text((20, 20), "flat scan")
+        node = FormFillerNode({
+            "template_source": "pdf",
+            "template_pdf_b64": base64.b64encode(doc.tobytes()).decode(),
+            "template_document_title": "scan.pdf",
+            "model": "m",
+        })
+        result = node.process({"output": "x", "step_name": "Prev"})
+        mock_model.assert_not_called()
+        assert "'scan.pdf' has no fillable form fields" in result["error"]
+
+    @patch(SEAM)
+    def test_pdf_mode_without_loaded_template_fails(self, mock_model):
+        node = FormFillerNode({"template_source": "pdf", "model": "m"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert "no template PDF was loaded" in result["error"]
