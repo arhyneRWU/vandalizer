@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { ArrowLeft, FileText, Search, X } from 'lucide-react'
+import { ArrowLeft, FileText, Link2, Search, X } from 'lucide-react'
 import { FileBrowser } from '../files/FileBrowser'
 import type { ContentMatch } from '../files/FileBrowser'
 import { DocumentViewer } from '../files/DocumentViewer'
