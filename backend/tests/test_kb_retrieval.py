@@ -630,6 +630,83 @@ def test_questioned_phrase_stops_at_the_first_function_word():
     ) == ["correct form"]
 
 
+def test_extract_pin_terms_shouted_phrase_and_hyphenless_code():
+    """Support ticket: "SCARLET ALBATROSS CLOSEOUT 9928" appears once in an
+    indexed document and could not be found, while "SPC-0500" in the same
+    document was found at once. The hyphenated code pinned; the shouted
+    marker did not, so it went to semantic search alone, which scores such
+    a string as noise."""
+    assert chat_service._extract_pin_terms(
+        "Where does SCARLET ALBATROSS CLOSEOUT 9928 appear?"
+    ) == ["SCARLET ALBATROSS CLOSEOUT 9928"]
+    assert chat_service._extract_pin_terms("SCARLET ALBATROSS CLOSEOUT 9928") == [
+        "SCARLET ALBATROSS CLOSEOUT 9928"
+    ]
+    assert chat_service._extract_pin_terms(
+        "find the PHASE II FINAL REPORT section"
+    ) == ["PHASE II FINAL REPORT"]
+    # Hyphenless codes: letters + digits, five or more characters.
+    assert chat_service._extract_pin_terms("What is SPC0500?") == ["SPC0500"]
+    assert chat_service._extract_pin_terms("look up R01CA123456 please") == ["R01CA123456"]
+    # Both shapes in one message, both pinned, in message order.
+    assert chat_service._extract_pin_terms(
+        "Is SPC-0500 near SCARLET ALBATROSS CLOSEOUT 9928?"
+    ) == ["SPC-0500", "SCARLET ALBATROSS CLOSEOUT 9928"]
+    # A shouted run that wraps an already-pinned code is not pinned twice.
+    assert chat_service._extract_pin_terms("SPC0500 CLOSEOUT") == ["SPC0500"]
+
+
+def test_extract_pin_terms_shouted_phrase_negatives():
+    """Capitals in ordinary prose — an acronym, a two-letter word, a single
+    shouted word, a year, a dollar amount — must not form a run."""
+    for prose in (
+        "What did the CHIPS and Science Act require?",
+        "Does NSF allow this?",
+        "I AM not sure about the PI.",
+        "Compare the ABC-DEF and GHI-JKL sections.",
+        "The budget was 2024 dollars, about $5000.",
+        "Is the US a party to it?",
+        "READ this carefully",
+        # Lower / mixed case is out of scope for this channel — that is what
+        # quoting is for.
+        "where does scarlet albatross closeout 9928 appear?",
+        "Where does Scarlet Albatross Closeout 9928 appear?",
+    ):
+        assert chat_service._extract_pin_terms(prose) == [], prose
+    # An acronym pair is a run by shape; it is harmless (the hit cap bounds
+    # it) and deliberately not special-cased.
+    assert chat_service._extract_pin_terms("NSF NIH policies") == ["NSF NIH"]
+    # Four-character mixes stay out: "R01" fragments and form stems are too
+    # common to spend lane slots on.
+    assert chat_service._extract_pin_terms("the R01 mechanism and SF42") == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_pinned_chunks_tries_upper_case_variant_for_phrases():
+    """``$contains`` is case-sensitive and a marker line is usually in
+    capitals on the page, so a phrase is also looked up upper-cased."""
+    fake_dm = MagicMock()
+    fake_dm.get_kb_chunks_containing = MagicMock(return_value=[])
+    with patch("app.services.document_manager.get_document_manager", return_value=fake_dm):
+        await chat_service._retrieve_pinned_chunks("kb-1", ["scarlet albatross closeout 9928"])
+    tried = [c.args[1] for c in fake_dm.get_kb_chunks_containing.call_args_list]
+    assert "SCARLET ALBATROSS CLOSEOUT 9928" in tried
+    assert "scarlet albatross closeout 9928" in tried
+
+
+def test_project_kb_empty_prompt_forbids_claiming_text_is_not_indexed():
+    """The assistant told a user the marker line "is not part of the
+    searchable content". It was. Retrieval returning nothing is a fact about
+    the search; the prompt must say that and forbid the stronger claim."""
+    from app.services.llm_service import build_project_kb_empty_prompt
+
+    prompt = build_project_kb_empty_prompt()
+    assert "Never claim that a phrase, line, or fact is absent" in prompt
+    assert "not part of the searchable content" in prompt  # named as the forbidden phrasing
+    assert "double quotes" in prompt
+    assert "no relevant content" not in prompt
+
+
 def test_extract_pin_terms_drops_a_phrase_wrapping_a_pinned_term():
     """One concept must not spend two of the four slots — and four extra
     case-variant lookups — just because the question names it twice."""

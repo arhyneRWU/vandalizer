@@ -1133,6 +1133,25 @@ _SECTION_REF_RE = re.compile(
 # prose ("cost-sharing", "NSF-funded") never pin.
 _IDENTIFIER_REF_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b")
 
+# An identifier written without hyphens: one upper-case run of at least five
+# characters carrying both a letter and a digit — "SPC0500", "R01CA123456",
+# "SF424". The letter rules out years and amounts, the digit rules out
+# acronyms, the length rules out "R01"-style fragments that are common words
+# in this domain and would flood the lane.
+_CODE_REF_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{5,}\b")
+
+# A run of two or more shouted tokens — "SCARLET ALBATROSS CLOSEOUT 9928",
+# "PHASE II FINAL REPORT", a heading or a marker written in capitals. Nobody
+# types a run of capitals by accident: it is the user reproducing a string
+# from the page, and the embedding scores such a string as noise (support
+# ticket: a unique marker line was unreachable while a hyphenated code in the
+# same document was found at once). Each token is two or more capitals /
+# digits, the run starts with a letter, and at least one token has three
+# letters, so "US" alone, "I AM", and an acronym mid-sentence ("the NSF
+# policy") never pin. Ordinary hyphenated capitals ("ABC-DEF") don't form a
+# run because the hyphen is not whitespace.
+_SHOUTED_PHRASE_RE = re.compile(r"\b[A-Z][A-Z0-9]+(?:[ \t]+[A-Z0-9]{2,}){1,7}\b")
+
 # A phrase the user put in double quotes — an explicit "find me this string".
 # Apostrophes are deliberately excluded so ordinary contractions can't pair up
 # into a bogus quoted span.
@@ -1213,12 +1232,14 @@ _PIN_FETCH_POOL = _MAX_PIN_TERM_HITS * 4 + 1
 def _extract_pin_terms(message: str) -> list[str]:
     """Pull the literal strings worth a lexical lookup out of the message.
 
-    Three shapes, in priority order:
+    Five shapes, in priority order:
 
     * CFR-style section numbers — "§ 200.1", "section 200.1", a bare "200.1";
-    * identifier-shaped tokens — "CSU-PI-001", "NSF-2024-117";
-    * a short phrase the user quoted, or the noun phrase a "what is/are …"
-      question asks about.
+    * identifier-shaped tokens — "CSU-PI-001", "NSF-2024-117" — and hyphenless
+      codes — "SPC0500", "R01CA123456";
+    * a short phrase the user quoted;
+    * a run of shouted tokens — "SCARLET ALBATROSS CLOSEOUT 9928";
+    * the noun phrase a "what is/are …" question asks about.
 
     All three name something the embedding barely represents: a bi-encoder
     scores an identifier or a rare bigram as near-noise, so the chunk that
@@ -1253,8 +1274,14 @@ def _extract_pin_terms(message: str) -> list[str]:
         token = m.group(0)
         if any(c.isdigit() for c in token):
             add(token)
+    for m in _CODE_REF_RE.finditer(message):
+        add(m.group(0))
     for m in _QUOTED_PHRASE_RE.finditer(message):
         add(" ".join(m.group(1).split()))
+    for m in _SHOUTED_PHRASE_RE.finditer(message):
+        run = m.group(0)
+        if any(sum(ch.isalpha() for ch in tok) >= 3 for tok in run.split()):
+            add(" ".join(run.split()))
     for m in _ASKED_PHRASE_RE.finditer(message):
         add(_questioned_phrase(m.group(1)))
     return terms
@@ -1331,7 +1358,9 @@ async def _retrieve_pinned_chunks(
         exact = re.compile(rf"(?<!\d){re.escape(term)}(?!\d)", flags)
         variants = [term]
         if is_phrase:
-            variants += [term.lower(), term.lower().capitalize(), term.title()]
+            # A marker line or heading is usually in capitals on the page;
+            # a user who types it in lower case must still reach it.
+            variants += [term.lower(), term.lower().capitalize(), term.title(), term.upper()]
         candidates: list[dict] = []
         pooled: set = set()
         for variant in dict.fromkeys(variants):
