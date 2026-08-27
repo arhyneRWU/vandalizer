@@ -466,6 +466,8 @@ class MultiTaskNode(Node):
         warnings: list[str] = []
         errors: list[str] = []
         request_preview = None
+        fill_report: list[dict] = []
+        filled_values: dict = {}
         for result in results:
             if result.get("_approval_pause"):
                 return result
@@ -475,6 +477,13 @@ class MultiTaskNode(Node):
             sources = result.get("retrieved_sources")
             if isinstance(sources, list):
                 merged_sources.extend(sources)
+            # Form Filler's per-field check/source table and the values it
+            # wrote: persisted under steps_output and read by the run UI.
+            report = result.get("fill_report")
+            if isinstance(report, list):
+                fill_report.extend(report)
+            if isinstance(result.get("filled_values"), dict):
+                filled_values.update(result["filled_values"])
             warning = result.get("warning")
             if isinstance(warning, str) and warning:
                 warnings.append(warning)
@@ -506,6 +515,10 @@ class MultiTaskNode(Node):
             out["error"] = " | ".join(errors)
         if request_preview is not None:
             out["request"] = request_preview
+        if fill_report:
+            out["fill_report"] = fill_report
+        if filled_values:
+            out["filled_values"] = filled_values
         return out
 
 

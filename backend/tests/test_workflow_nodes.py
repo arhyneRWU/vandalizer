@@ -2209,3 +2209,36 @@ class TestFormFillerPdfTemplate:
         node = FormFillerNode({"template_source": "pdf", "model": "m"})
         result = node.process({"output": "x", "step_name": "Prev"})
         assert "no template PDF was loaded" in result["error"]
+
+
+class TestFormFillerReportSurvivesTheStepWrapper:
+    """Every node runs inside a MultiTaskNode, and the engine persists that
+    wrapper's result under ``steps_output`` — which is where the run UI reads
+    ``fill_report``. The wrapper used to keep only output/warning/sources, so
+    the per-field table never reached the client."""
+
+    SEAM = "app.services.workflow_engine._run_form_filler_model"
+
+    @patch(SEAM)
+    def test_fill_report_reaches_steps_output(self, mock_model):
+        from app.services.workflow_engine import WorkflowEngine
+
+        mock_model.return_value = '{"rate": "47.5%", "cap": null}'
+        node = FormFillerNode({"template": "{{rate}} {{cap}}", "model": "m"})
+        wrapper = MultiTaskNode("Fill")
+        wrapper.add_task(node)
+
+        wrapped = wrapper.process({"output": "The rate is 47.5% of MTDC", "step_name": "Prev"})
+        assert [e["status"] for e in wrapped["fill_report"]] == ["supported", "missing"]
+        assert wrapped["warning"].startswith("1 field not found")
+
+        engine = WorkflowEngine()
+        engine.add_node(wrapper)
+        persisted: dict = {}
+        engine.execute(
+            initial_output={"output": "The rate is 47.5% of MTDC", "step_name": "Prev"},
+            workflow_result_updater=persisted.update,
+        )
+        step_outputs = [v for k, v in persisted.items() if k.startswith("steps_output.")]
+        assert step_outputs and isinstance(step_outputs[-1].get("fill_report"), list)
+        assert step_outputs[-1]["fill_report"][0]["document_title"] == "Previous Step Output"
