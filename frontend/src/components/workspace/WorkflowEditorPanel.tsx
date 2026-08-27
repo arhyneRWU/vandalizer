@@ -561,9 +561,7 @@ export function WorkflowEditorPanel() {
   // the project's files.
   // Fixed documents (Input tab) are merged into every run by the loader, so
   // they satisfy the selection on their own; a project does the same.
-  const fixedDocCount = Array.isArray(workflow?.input_config?.fixed_documents)
-    ? (workflow!.input_config!.fixed_documents as unknown[]).length
-    : 0
+  const fixedDocCount = workflow?.input_config?.fixed_documents?.length ?? 0
   const runInput = describeRunInput({
     triggerType: workflow?.input_config?.trigger_type as string | undefined,
     selectedCount: selectedDocUuids.length,
@@ -2433,10 +2431,6 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // Task edit modal (with Design/Input/Output sub-tabs + test step)
 // ---------------------------------------------------------------------------
 
-// Explain a failed input/output-config save. The backend answers PATCH on a
-// workflow the viewer can see but not manage (shared or verified) with a 404,
-// so surfacing the raw "Workflow not found" would read as if the workflow
-// vanished — say what actually happened instead.
 /**
  * Whether a run has the input it needs, and the hint to show when it doesn't.
  *
@@ -2466,6 +2460,10 @@ export function describeRunInput(input: {
   return { missing: true, hint: 'Select a document to run this workflow' }
 }
 
+// Explain a failed input/output-config save. The backend answers PATCH on a
+// workflow the viewer can see but not manage (shared or verified) with a 404,
+// so surfacing the raw "Workflow not found" would read as if the workflow
+// vanished — say what actually happened instead.
 function describeConfigSaveError(err: unknown, what: string): string {
   if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
     return `Couldn't save ${what} — you don't have permission to edit this workflow. Save a copy to your library to make an editable version.`
