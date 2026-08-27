@@ -1224,7 +1224,7 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
         engine.connect(nodes[i - 1], nodes[i])
 
     try:
-        final_output, _ = engine.execute()
+        final_output, steps = engine.execute()
     except WorkflowStepError as e:
         # Deterministic config/user error (blocked URL, HTTP failure, bad
         # headers…). Return a structured failure instead of raising: the task
@@ -1238,6 +1238,16 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
             "error": str(e),
             "output": e.step_output,
         }
+    # A step can complete with a warning (fields a Form Filler could not
+    # fill, an empty input, …). The run UI shows those on the step; Test
+    # Step used to drop them and show a clean "Test Completed" over output
+    # that needed checking. Wrap so the poll endpoint can hand it through.
+    warnings = [
+        s["warning"] for s in steps
+        if isinstance(s, dict) and isinstance(s.get("warning"), str) and s["warning"]
+    ]
+    if warnings:
+        return {"step_test_warning": " | ".join(warnings), "output": final_output}
     return final_output
 
 

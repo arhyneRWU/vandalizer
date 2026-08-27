@@ -1183,13 +1183,88 @@ class DocumentRendererNode(Node):
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 FORM_FILLER_MISSING = "[Not provided]"
 
+# What the model says when it has nothing, written as a value instead of
+# null: "Not provided in context", "The document does not mention this",
+# "N/A", "unknown". Rendered as-is these read as filled-in answers — a form
+# with failure notes baked into it, marked Completed with no warning (support
+# ticket). Anything matching here is a missing value: it gets the missing
+# marker and the field is listed on the step's warning. Bare sentinels are
+# the same set extraction treats as not-found (extraction_sources
+# ._NOT_FOUND_VARIANTS); the phrase forms add the "in the context" tail and
+# the "the context does not …" sentence. A value that merely *starts* with
+# one of these words ("None of the above", "Unknown Author", "Not-for-profit")
+# does not match: the tail must be a locating clause or nothing at all.
+_FORM_NULLISH_HEAD = (
+    r"(?:n/?a|n\.a\.|none|null|nil|unknown|unavailable|missing|empty|blank|tbd|"
+    r"to be determined|-{1,3}|—|"
+    r"no (?:data|value|information|info|entry)(?: (?:available|provided|given|found|supplied))?|"
+    r"not (?:provided|specified|available|found|stated|mentioned|given|present|"
+    r"applicable|listed|included|supplied|indicated|determined|"
+    r"in (?:the )?(?:context|document|input|source|text)))"
+)
+_FORM_NULLISH_SENTENCE = (
+    r"(?:the )?(?:context|document|input|source|text|information)s? "
+    r"(?:does not|doesn't|did not|didn't|do not|don't) "
+    r"(?:contain|mention|state|provide|specify|include|list|give|say|indicate).*"
+)
+_FORM_NULLISH_RE = re.compile(
+    r"^\W*(?:" + _FORM_NULLISH_SENTENCE + r"|" + _FORM_NULLISH_HEAD +
+    r"(?:\s*:\s*.*|\s+[\-–—]\s+.*|\s+(?:in|from|within|by|for|per|on)\b.*)?)\W*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# Phrases in freehand output (a template with no {{markers}}) that mean a
+# blank went unfilled. Counted, not parsed: the model wrote the form itself,
+# so the count feeds the warning and nothing else.
+_FORM_FREEFORM_UNFILLED_RE = re.compile(
+    r"\bnot (?:provided|specified|available|found|stated|mentioned|given|supplied)"
+    r"(?:\s+in\s+(?:the\s+)?(?:context|document|input|source|text))?\b|"
+    r"\bno information (?:provided|available|given)\b|"
+    r"\b(?:the )?(?:context|document|input) (?:does not|doesn't) (?:contain|mention|state|provide|specify)\b",
+    re.IGNORECASE,
+)
+
+
+def form_value_is_missing(value) -> bool:
+    """True for null, blank, and prose that says there is no value."""
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return not stripped or bool(_FORM_NULLISH_RE.match(stripped))
+
+
+def form_missing_marker(name: str, missing_token: str | None = None) -> str:
+    """What goes in the form for a field with no value. The default names
+    the field — ``[Not provided: applicant_name]`` — so a gap is unmistakable
+    even to someone reading the form on its own; a per-step ``missing_value``
+    is used verbatim."""
+    return missing_token if missing_token else f"{FORM_FILLER_MISSING[:-1]}: {name}]"
+
+
+def count_unfilled_freeform(text: str, missing_token: str | None = None) -> int:
+    """Blanks a freehand fill left unfilled: the missing marker the
+    instructions ask for, plus the prose forms of "no value"."""
+    if not text:
+        return 0
+    token = missing_token or FORM_FILLER_MISSING
+    count = text.count(token)
+    rest = text.replace(token, "")
+    if token != FORM_FILLER_MISSING:
+        count += rest.count(FORM_FILLER_MISSING)
+        rest = rest.replace(FORM_FILLER_MISSING, "")
+    # Markers are removed before the prose scan so "[Not provided]" is not
+    # counted twice.
+    return count + len(_FORM_FREEFORM_UNFILLED_RE.findall(rest))
+
 FORM_FILLER_VALUES_INSTRUCTIONS = (
     "You fill form templates for a document-processing workflow. You are given the "
     "placeholder names from a template and a CONTEXT block. Return ONE JSON object "
     "whose keys are exactly the placeholder names and whose values are strings copied "
     "verbatim from the CONTEXT — the same digits, units, punctuation and capitalisation "
     "as the source; never reformatted, rounded, expanded, abbreviated or summarised. "
-    "When the CONTEXT does not state a value for a placeholder, use JSON null. Do not "
+    "When the CONTEXT does not state a value for a placeholder, use JSON null — never "
+    "a sentence such as \"Not provided\" or \"The context does not mention this\". Do not "
     "guess, do not use outside knowledge, do not add keys, and write nothing before or "
     "after the JSON object."
 )
@@ -1241,18 +1316,23 @@ def template_placeholders(template: str) -> list[str]:
 
 
 def render_filled_template(
-    template: str, values: dict, missing_token: str = FORM_FILLER_MISSING,
+    template: str, values: dict, missing_token: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Substitute placeholders; return (text, names that had no value)."""
+    """Substitute placeholders; return (text, names that had no value).
+
+    A value that is null, blank, or prose meaning "no value" (see
+    ``form_value_is_missing``) is rendered as the missing marker — by default
+    ``[Not provided: <name>]`` — never as the prose.
+    """
     missing: list[str] = []
 
     def _sub(m: "re.Match[str]") -> str:
         name = m.group(1)
         value = values.get(name)
-        if value is None or (isinstance(value, str) and not value.strip()):
+        if form_value_is_missing(value):
             if name not in missing:
                 missing.append(name)
-            return missing_token
+            return form_missing_marker(name, missing_token)
         return value if isinstance(value, str) else json.dumps(value, default=str)
 
     return _PLACEHOLDER_RE.sub(_sub, template or ""), missing
@@ -1275,7 +1355,7 @@ class FormFillerNode(Node):
 
     def process(self, inputs):
         template = self.data.get("template", "")
-        missing_token = (self.data.get("missing_value") or "").strip() or FORM_FILLER_MISSING
+        missing_token = (self.data.get("missing_value") or "").strip() or None
         prev_step_name = inputs.get("step_name")
 
         sources = _resolve_input_sources(self.data, prev_step_name)
@@ -1294,11 +1374,20 @@ class FormFillerNode(Node):
                 self.model, FORM_FILLER_FREEFORM_INSTRUCTIONS, prompt,
                 system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
             ).strip()
-            result["warning"] = (
+            warnings = []
+            unfilled = count_unfilled_freeform(result["output"], missing_token)
+            if unfilled:
+                warnings.append(
+                    f"{unfilled} blank{'s' if unfilled != 1 else ''} could not be filled "
+                    "from the input — check the form before using it"
+                )
+            warnings.append(
                 "This template has no {{placeholder}} markers, so the model filled "
                 "its blanks freehand. Mark each blank as {{name}} to get the same "
-                "layout and the same missing-value text on every run."
+                "layout, the same missing-value marker, and a list of the fields "
+                "that were not found on every run."
             )
+            result["warning"] = " | ".join(warnings)
             return result
 
         prompt = (
@@ -1330,9 +1419,11 @@ class FormFillerNode(Node):
         filled, missing = render_filled_template(template, values, missing_token)
         result["output"] = filled
         if missing:
+            marker = missing_token or f"{FORM_FILLER_MISSING[:-1]}: <field>]"
             result["warning"] = (
                 f"{len(missing)} field{'s' if len(missing) != 1 else ''} not found in "
-                f"the input and filled with {missing_token}: {', '.join(missing)}"
+                f"the input and marked {marker} in the form — fill in or remove before "
+                f"using it: {', '.join(missing)}"
             )
         return result
 
