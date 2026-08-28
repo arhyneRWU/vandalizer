@@ -145,5 +145,46 @@ class TestTenantScope:
             assert [w["name"] for w in await mod._workflows_using("DOC", visible)] == ["Mine"]
 
 
+class TestLookupGrouping:
+    """Several references to one object are one entry, and a workflow step
+    lookup is skipped when no task names the document."""
+
+    @pytest.mark.asyncio
+    async def test_kb_sources_group_per_knowledge_base_and_name_missing_ones(self):
+        from app.services import document_usage as mod
+
+        def _find(rows):
+            return lambda *a, **k: SimpleNamespace(to_list=AsyncMock(return_value=rows))
+
+        sources = [SimpleNamespace(knowledge_base_uuid="kb1"), SimpleNamespace(knowledge_base_uuid="kb1"),
+                   SimpleNamespace(knowledge_base_uuid="kb-gone")]
+        kbs = [SimpleNamespace(uuid="kb1", title="Policies", team_id=None)]
+        cases = [SimpleNamespace(uuid="tc1", label="A", search_set_uuid="ss1"),
+                 SimpleNamespace(uuid="tc2", label="B", search_set_uuid="ss1")]
+        sets = [SimpleNamespace(uuid="ss1", title="Budget", team_id=None)]
+        with patch.object(mod.KnowledgeBaseSource, "find", new=_find(sources)), \
+             patch.object(mod.KnowledgeBase, "find", new=_find(kbs)), \
+             patch.object(mod.ExtractionTestCase, "find", new=_find(cases)), \
+             patch.object(mod.SearchSet, "find", new=_find(sets)):
+            kb_out = await mod._knowledge_bases_using("DOC", set())
+            ex_out = await mod._extractions_using("DOC", set())
+        assert [(k["uuid"], k["exists"]) for k in kb_out] == [("kb1", True), ("kb-gone", False)]
+        assert [tc["label"] for tc in ex_out[0]["test_cases"]] == ["A", "B"]
+        assert len(ex_out) == 1
+
+    @pytest.mark.asyncio
+    async def test_step_lookups_skipped_when_no_task_names_the_document(self):
+        from app.services import document_usage as mod
+
+        wf_find = MagicMock(return_value=SimpleNamespace(to_list=AsyncMock(return_value=[])))
+        with patch.object(mod.Workflow, "find", new=wf_find), \
+             patch.object(mod.WorkflowStepTask, "find",
+                          new=MagicMock(return_value=SimpleNamespace(to_list=AsyncMock(return_value=[])))), \
+             patch.object(mod.WorkflowStep, "find", new=MagicMock()) as step_find:
+            assert await mod._workflows_using("DOC", set()) == []
+        step_find.assert_not_called()
+        assert wf_find.call_count == 1
+
+
 def _uuid_of(query) -> str:
     return str(query["uuid"])
