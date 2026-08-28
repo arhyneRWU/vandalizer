@@ -12,6 +12,7 @@ import {
   updateCredential,
 } from '../api/credentials'
 import { CredentialTestPanel } from '../components/credentials/CredentialTestPanel'
+import { useToast } from '../contexts/ToastContext'
 import type { Credential, CredentialType } from '../types/credential'
 
 const TYPE_LABELS: Record<CredentialType, string> = {
@@ -110,6 +111,7 @@ function nonSecretChanged(form: FormState, original: Credential): boolean {
 
 export default function Credentials() {
   const confirm = useConfirm()
+  const { toast } = useToast()
   const [creds, setCreds] = useState<Credential[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -176,18 +178,25 @@ export default function Credentials() {
     setError(null)
     try {
       if (editingId) {
-        const original = creds.find(c => c.id === editingId)
         const secretEntered = form.type === 'static_header' ? !!form.header_value : !!form.private_key
-        const data: { name?: string; description?: string; payload?: Record<string, string> } = {
+        const data: { name?: string; description?: string; payload?: Record<string, string>; type?: CredentialType } = {
           name: form.name,
           description: form.description,
         }
-        // Only resend the payload when something in it actually changed, so a
-        // pure rename doesn't drop the cached OAuth token.
-        if (original && (secretEntered || nonSecretChanged(form, original))) {
+        if (typeChanged) {
+          // A type change is a fresh credential under the same id: send the
+          // new type and its complete payload.
+          data.type = form.type
+          data.payload = buildPayload(form)
+        } else if (original && (secretEntered || nonSecretChanged(form, original))) {
+          // Only resend the payload when something in it actually changed, so
+          // a pure rename doesn't drop the cached OAuth token.
           data.payload = buildUpdatePayload(form)
         }
-        await updateCredential(editingId, data)
+        const updated = await updateCredential(editingId, data)
+        if (typeChanged && updated.steps_updated) {
+          toast(`Credential type changed; ${updated.steps_updated} API step${updated.steps_updated === 1 ? '' : 's'} updated to match`, 'info')
+        }
       } else {
         await createCredential({
           name: form.name,
@@ -237,15 +246,21 @@ export default function Credentials() {
     }
   }
 
+  // Editing a credential into another type: the stored secrets belong to the
+  // old type, so the new type's fields — secret included — are all required,
+  // exactly as when creating.
+  const original = editingId ? creds.find(c => c.id === editingId) : undefined
+  const typeChanged = !!original && original.type !== form.type
   const formValid = useMemo(() => {
     if (!form.name.trim()) return false
-    // On edit, the secret may be left blank to keep the stored one.
-    const editing = editingId !== null
+    // On edit, the secret may be left blank to keep the stored one — unless
+    // the type changed, in which case there is nothing stored to keep.
+    const editing = editingId !== null && !typeChanged
     if (form.type === 'static_header') {
       return !!form.header_name && (editing || !!form.header_value)
     }
     return !!form.client_id && !!form.token_endpoint && (editing || !!form.private_key)
-  }, [form, editingId])
+  }, [form, editingId, typeChanged])
 
   return (
     <PageLayout>
@@ -295,15 +310,19 @@ export default function Credentials() {
                   id="cred-type"
                   value={form.type}
                   onChange={e => setForm({ ...form, type: e.target.value as CredentialType })}
-                  disabled={editingId !== null}
-                  title={editingId ? 'Type cannot be changed; delete and recreate to switch types' : undefined}
-                  className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-highlight focus:outline-none focus:ring-1 focus:ring-highlight disabled:bg-gray-100 disabled:text-gray-500"
+                  className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-highlight focus:outline-none focus:ring-1 focus:ring-highlight"
                 >
                   <option value="static_header">{TYPE_LABELS.static_header}</option>
                   <option value="oauth_client_credentials">
                     {TYPE_LABELS.oauth_client_credentials}
                   </option>
                 </select>
+                {typeChanged && (
+                  <p role="note" className="mt-1 text-xs text-amber-700">
+                    Changing the type replaces the stored secrets — enter the {TYPE_LABELS[form.type]} details in full.
+                    API steps that use this credential will be switched to the new type when you save.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -345,7 +364,7 @@ export default function Credentials() {
                     value={form.header_value}
                     onChange={e => setForm({ ...form, header_value: e.target.value })}
                     className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm font-mono focus:border-highlight focus:outline-none focus:ring-1 focus:ring-highlight"
-                    placeholder={editingId ? 'Leave blank to keep current' : 'secret'}
+                    placeholder={editingId && !typeChanged ? 'Leave blank to keep current' : 'secret'}
                   />
                 </div>
               </div>
@@ -440,7 +459,7 @@ export default function Credentials() {
                 testUrl={form.test_url}
                 onTestUrlChange={url => setForm(f => ({ ...f, test_url: url }))}
                 disabled={!formValid}
-                run={testUrl => editingId
+                run={testUrl => editingId && !typeChanged
                   ? testCredential(editingId, { payload: buildUpdatePayload(form), test_url: testUrl || undefined })
                   : testCredentialDraft({ type: form.type, payload: buildPayload(form), test_url: testUrl || undefined })}
               />

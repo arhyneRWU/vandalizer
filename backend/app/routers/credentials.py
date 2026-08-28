@@ -241,7 +241,28 @@ async def update_credential(
         cred.name = req.name
     if req.description is not None:
         cred.description = req.description
-    if req.payload is not None:
+    steps_updated: int | None = None
+    if req.type is not None and req.type != cred.type:
+        # The stored secrets belong to the old type, so a type change is a
+        # fresh credential under the same id: the new type's payload must be
+        # complete, nothing is merged, and the old secrets are gone.
+        if req.payload is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Changing the credential type requires the complete payload for the new type.",
+            )
+        try:
+            credentials_service.validate_payload(req.type, req.payload)
+        except credentials_service.CredentialError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cred.type = req.type
+        cred.payload = credentials_service.encrypt_payload(req.type, req.payload)
+        credentials_service.invalidate_cached_token(str(cred.id))
+        # An API Node step stores auth_strategy alongside credential_id and
+        # the run refuses a mismatch — re-point every step that uses this
+        # credential so the workflows keep running.
+        steps_updated = await _repoint_api_steps(str(cred.id), req.type)
+    elif req.payload is not None:
         # Merge over the stored payload so a caller can rotate just the private
         # key (or change one field) without resending the others — secrets are
         # never returned, so the client can't echo them back.
@@ -257,7 +278,28 @@ async def update_credential(
         credentials_service.invalidate_cached_token(str(cred.id))
     cred.updated_at = _now()
     await cred.save()
-    return _to_response(cred)
+    resp = _to_response(cred)
+    if steps_updated is not None:
+        resp.steps_updated = steps_updated
+    return resp
+
+
+async def _repoint_api_steps(credential_id: str, new_type: str) -> int:
+    """Set ``auth_strategy`` to *new_type* on every API Node step task that
+    uses this credential. Returns how many were changed."""
+    from app.models.workflow import WorkflowStepTask
+
+    tasks = await WorkflowStepTask.find({"data.credential_id": credential_id}).to_list()
+    changed = 0
+    for task in tasks:
+        data = dict(task.data or {})
+        if data.get("auth_strategy") == new_type:
+            continue
+        data["auth_strategy"] = new_type
+        task.data = data
+        await task.save()
+        changed += 1
+    return changed
 
 
 @router.delete("/{credential_id}")
