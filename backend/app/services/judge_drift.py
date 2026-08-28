@@ -13,7 +13,18 @@ the trailing-30-run median for the same surface — catching silent drift
 between an explicit gate violation and the previous baseline.
 
 File format: JSON-Lines at ``backend/tests/fixtures/judge_drift_history.jsonl``.
-Each line is one entry; the file is checked in and appended to in CI.
+Each line is one entry; the file is checked in and appended to in CI — which
+required a commit-back step in ``integration-llm.yaml``, because the tier-3 job
+runs on an ephemeral GitHub Actions disk. Without it every run wrote one line
+and threw it away, ``trailing_median`` never reached its three-entry minimum,
+and drift detection was structurally incapable of ever firing.
+
+**A κ measured in CI belongs to the model CI measured it on.** The tier-3 job
+runs against ``INTEGRATION_LLM_MODEL``; a deployment whose judge is a local 8B
+has no claim on that number. :func:`calibration_for` returns a figure only for
+the exact model it was measured on, and returns None otherwise, so the honest
+answer — "κ unmeasured for this model" — is the one a caller gets by default
+rather than one it has to remember to ask for.
 """
 
 from __future__ import annotations
@@ -204,3 +215,81 @@ def assert_no_regression(
             "Either revert the change, or — if intentional — update the "
             "ledger by appending the new entry and reviewing the trend."
         )
+
+
+def calibration_for(
+    surface: str,
+    judge_model: str,
+    path: Path | None = None,
+) -> dict | None:
+    """The measured agreement for ``judge_model`` on ``surface``, or None.
+
+    None means exactly one thing: nobody has ever measured this model on this
+    surface. It must not be filled in with another model's figure — that is the
+    substitution this function exists to prevent. A customer running a local 8B
+    as their judge would otherwise inherit an agreement number established
+    against a frontier model in someone else's CI, and the whole point of a
+    published κ is that it was measured on the thing doing the judging.
+
+    Returns ``{judge_model, kappa, accuracy, measured_at, n_runs}`` using the
+    most recent entry for the model, with ``n_runs`` counting how many times it
+    has been measured — one run is a data point, not a baseline.
+    """
+    entries = [e for e in load_history(surface=surface, path=path)
+               if e.judge_model == judge_model]
+    if not entries:
+        return None
+    latest = entries[-1]
+    return {
+        "judge_model": judge_model,
+        "kappa": latest.kappa,
+        "accuracy": latest.accuracy,
+        "measured_at": latest.timestamp,
+        "n_runs": len(entries),
+    }
+
+
+def measured_models(surface: str, path: Path | None = None) -> list[str]:
+    """Judge models this surface has ever been calibrated against, newest last."""
+    seen: list[str] = []
+    for entry in load_history(surface=surface, path=path):
+        if entry.judge_model and entry.judge_model not in seen:
+            seen.append(entry.judge_model)
+    return seen
+
+
+def calibration_status(
+    surface: str,
+    judge_models: list[str],
+    *,
+    published_floor: float | None = None,
+    path: Path | None = None,
+) -> dict:
+    """What can honestly be said about this surface's judge agreement here.
+
+    ``judge_models`` are the models this deployment could actually judge with.
+    The result names, per model, whether κ was measured *for that model* — never
+    borrowing another's — plus the ledger-wide context a reader needs to
+    interpret it: the published floor, which models have ever been measured,
+    and whether the ledger has enough history for drift detection to fire at all.
+    """
+    history = load_history(surface=surface, path=path)
+    models = []
+    for model in judge_models:
+        measured = calibration_for(surface, model, path=path)
+        models.append({
+            "judge_model": model,
+            "calibrated": measured is not None,
+            **(measured or {"kappa": None, "accuracy": None,
+                            "measured_at": None, "n_runs": 0}),
+        })
+    return {
+        "surface": surface,
+        "published_floor": published_floor,
+        "models": models,
+        "measured_models": measured_models(surface, path=path),
+        "ledger_entries": len(history),
+        # trailing_median needs three entries; below that a regression cannot
+        # be detected no matter how far κ moves.
+        "drift_detectable": len(history) >= 3,
+    }

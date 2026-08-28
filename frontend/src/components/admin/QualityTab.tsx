@@ -8,8 +8,10 @@ import {
 } from 'recharts'
 
 import {
-  acknowledgeAlert, getQualityAlerts, getQualityItemDetail, getQualityItems,
-  getQualitySummary, getQualityTimeline, getSystemConfig, runRegressionSuite,
+  acknowledgeAlert, getJudgeCalibration, getQualityAlerts, getQualityItemDetail,
+  getQualityItems, getQualitySummary, getQualityTimeline, getSystemConfig,
+  runRegressionSuite,
+  type JudgeSurfaceCalibration,
   type QualityAlert, type QualityItem, type QualityItemDetail, type QualitySummary,
   type QualityTimelinePoint, type RegressionResult, type SystemConfigData,
 } from '../../api/admin'
@@ -35,6 +37,7 @@ export function QualityTab() {
 
   // Per-item quality state
   const [qualityItems, setQualityItems] = useState<QualityItem[]>([])
+  const [judgeCalibration, setJudgeCalibration] = useState<JudgeSurfaceCalibration[]>([])
   const [expandedItem, setExpandedItem] = useState<{ kind: string; id: string } | null>(null)
   const [itemDetail, setItemDetail] = useState<QualityItemDetail | null>(null)
   const [itemSort, setItemSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'score', dir: 'asc' })
@@ -60,6 +63,16 @@ export function QualityTab() {
   }, [days])
 
   useEffect(() => load(), [load])
+
+  // Judge calibration is fetched separately for the same reason config is: it
+  // is an independent panel, and a failure there must not blank the tab.
+  useEffect(() => {
+    let cancelled = false
+    getJudgeCalibration()
+      .then(d => { if (!cancelled) setJudgeCalibration(d.surfaces) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   // Config is fetched separately and tolerantly: it's superadmin-only
   // (`GET /api/admin/config` calls `_require_superadmin`), so staff users
@@ -532,6 +545,63 @@ export function QualityTab() {
           </div>
         )}
       </div>
+
+      {/* Judge Calibration */}
+      {judgeCalibration.length > 0 && (
+        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', padding: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Judge Calibration</h3>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 16px' }}>
+            Every quality score here is produced by an LLM judge. The published agreement
+            floors were measured against the model this project&apos;s weekly integration job
+            runs on — <strong>not</strong> against your models. A model shown as unmeasured
+            carries no agreement figure at all, rather than borrowing one.
+          </p>
+          {judgeCalibration.map(surface => (
+            <div key={surface.surface} style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, textTransform: 'capitalize' }}>
+                  {surface.surface}
+                </span>
+                {surface.published_floor != null && (
+                  <span style={{ fontSize: 12, color: '#6b7280', fontFamily: 'ui-monospace, monospace' }}>
+                    published floor κ ≥ {surface.published_floor.toFixed(2)}
+                  </span>
+                )}
+                {!surface.drift_detectable && (
+                  <span style={{
+                    fontSize: 11, padding: '1px 6px', borderRadius: 4,
+                    background: '#fffbeb', border: '1px solid #fde68a', color: '#a16207',
+                  }}>
+                    drift undetectable — {surface.ledger_entries} of 3 ledger entries
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {surface.models.length === 0 && (
+                  <span style={{ fontSize: 12, color: '#6b7280' }}>No models configured.</span>
+                )}
+                {surface.models.map(m => (
+                  <span
+                    key={m.judge_model}
+                    title={m.calibrated
+                      ? `κ ${m.kappa?.toFixed(3)} over ${m.n_runs} run(s), last measured ${m.measured_at}`
+                      : 'This model has never been measured against human-labeled cases on this surface.'}
+                    style={{
+                      fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                      border: `1px solid ${m.calibrated ? '#bbf7d0' : '#e5e7eb'}`,
+                      background: m.calibrated ? '#f0fdf4' : '#f9fafb',
+                      color: m.calibrated ? '#15803d' : '#6b7280',
+                      fontFamily: 'ui-monospace, monospace',
+                    }}
+                  >
+                    {m.judge_model}: {m.calibrated ? `κ ${m.kappa?.toFixed(2)}` : 'κ unmeasured'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Monitoring Status */}
       <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', padding: 20 }}>

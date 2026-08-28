@@ -8,6 +8,10 @@ on:
 jobs:
   llm-tests:
     runs-on: ubuntu-latest
+    # The ledger entry is committed back below; the default read-only token
+    # cannot push.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -29,3 +33,27 @@ jobs:
           INTEGRATION_LLM_ENDPOINT: ${{ secrets.INTEGRATION_LLM_ENDPOINT }}
           INTEGRATION_LLM_PROTOCOL: ${{ secrets.INTEGRATION_LLM_PROTOCOL }}
         run: make backend-test-integration-t3
+
+      # The κ-drift ledger is the point of running this weekly, and the runner
+      # disk is thrown away when the job ends. Without this step every run
+      # appended one line to nothing: `trailing_median` never reached its
+      # three-entry minimum, so drift detection could never fire no matter how
+      # far agreement moved. Runs on failure too — a run that tripped the
+      # absolute κ floor is exactly the history a later median wants.
+      - name: Commit the drift-ledger entry
+        if: always()
+        run: |
+          set -euo pipefail
+          LEDGER=backend/tests/fixtures/judge_drift_history.jsonl
+          if git diff --quiet -- "$LEDGER"; then
+            echo "No new ledger entry to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$LEDGER"
+          git commit -m "chore(judge): record κ-drift ledger entry [skip ci]"
+          # Another weekly run (or a push to main) may have landed since
+          # checkout; rebase rather than fail the job on a non-fast-forward.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
