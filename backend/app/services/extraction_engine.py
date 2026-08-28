@@ -7,6 +7,7 @@ The caller must pre-fetch any async data (SystemConfig, document texts) and pass
 import json
 import logging
 import os
+import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -993,6 +994,81 @@ class ExtractionEngine:
             logger.exception("Extraction LLM call failed")
             raise ExtractionError(f"Extraction failed: {error_msg}") from e
 
+    # ------------------------------------------------------------------
+    # Key reconciliation for the JSON-fallback path
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fold_key(key: object) -> str:
+        """Case/punctuation/whitespace-insensitive form of a field name."""
+        return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+    @classmethod
+    def _remap_to_requested_keys(
+        cls, parsed: dict, keys: list[str],
+    ) -> tuple[dict, int, set]:
+        """Project a parsed JSON object onto the requested keys.
+
+        Returns ``(entity, matched, consumed)`` where *entity* has exactly the
+        requested keys, *matched* counts how many of them the model actually
+        answered (present in the payload, whatever its value), and *consumed*
+        names the payload keys that were used.
+
+        Exact ``parsed.get(key)`` was the previous behaviour, and it is the
+        default pass-1 strategy (``two_pass.pass_1.structured`` is False), so a
+        model that answered "Award Amount" for the requested key
+        "Award amount" produced an entity of all-nulls. Downstream that is
+        indistinguishable from "none of these fields appear in the document" —
+        the run is recorded, displayed, and exported as a set of confident
+        "not found" answers that were never actually looked for.
+        """
+        folded: dict[str, tuple[str, object]] = {}
+        for raw_key, value in parsed.items():
+            folded.setdefault(cls._fold_key(raw_key), (raw_key, value))
+
+        entity: dict = {}
+        consumed: set = set()
+        matched = 0
+        for key in keys:
+            if key in parsed:
+                entity[key] = parsed[key]
+                consumed.add(key)
+                matched += 1
+                continue
+            hit = folded.get(cls._fold_key(key))
+            if hit is not None:
+                raw_key, value = hit
+                entity[key] = value
+                consumed.add(raw_key)
+                matched += 1
+            else:
+                entity[key] = None
+        return entity, matched, consumed
+
+    @classmethod
+    def _fallback_sources_sidecar(cls, parsed: dict, entity: dict) -> dict:
+        """Per-field quote sidecar from a fallback payload's ``_sources`` block.
+
+        The block's field names drift exactly like the value keys do, so they
+        are reconciled the same way — otherwise a correctly-quoted extraction
+        silently loses every source and each value renders as untraced.
+        """
+        raw = parsed.get("_sources")
+        if not isinstance(raw, dict):
+            raw = parsed.get("sources")
+        if not isinstance(raw, dict):
+            return {}
+        by_folded = {}
+        for field, quote in raw.items():
+            if isinstance(quote, str) and quote.strip():
+                by_folded.setdefault(cls._fold_key(field), quote.strip())
+        sidecar = {}
+        for field in entity:
+            quote = by_folded.get(cls._fold_key(field))
+            if quote:
+                sidecar[field] = {"quote": quote}
+        return sidecar
+
     @staticmethod
     def _attach_source_quotes(entities: list, sources: list) -> None:
         """Attach raw per-field quotes as the SOURCE_KEY sidecar, index-aligned."""
@@ -1082,18 +1158,45 @@ class ExtractionEngine:
                 # one — turning a fully usable answer into a failed run.
                 parsed = json.loads(output.strip(), strict=False)
                 if isinstance(parsed, dict):
-                    entity = {key: parsed.get(key) for key in keys}
-                    if capture_sources and isinstance(parsed.get("_sources"), dict):
-                        sidecar = {
-                            field: {"quote": quote.strip()}
-                            for field, quote in parsed["_sources"].items()
-                            if isinstance(quote, str) and quote.strip() and field in entity
-                        }
+                    entity, matched, _ = self._remap_to_requested_keys(parsed, keys)
+                    if keys and not matched:
+                        # The model answered, but about something else: not one
+                        # requested field is present under any spelling. An
+                        # all-null entity here would be reported as "none of
+                        # these fields are in the document", which is the most
+                        # dangerous possible misreport for this product.
+                        raise ExtractionError(
+                            "Model returned a JSON object with none of the "
+                            f"requested fields (got: {list(parsed)[:10]})"
+                        )
+                    if capture_sources:
+                        sidecar = self._fallback_sources_sidecar(parsed, entity)
                         if sidecar:
                             entity[SOURCE_KEY] = sidecar
                     return [entity]
                 elif isinstance(parsed, list):
-                    return parsed
+                    entities = []
+                    total_matched = 0
+                    for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
+                        mapped, matched, consumed = self._remap_to_requested_keys(
+                            item, keys,
+                        )
+                        total_matched += matched
+                        # Keep anything the model volunteered beyond the
+                        # requested set — exports and downstream merges have
+                        # always carried it.
+                        for raw_key, value in item.items():
+                            if raw_key not in consumed and raw_key not in mapped:
+                                mapped[raw_key] = value
+                        entities.append(mapped)
+                    if keys and entities and not total_matched:
+                        raise ExtractionError(
+                            "Model returned a JSON list with none of the "
+                            "requested fields"
+                        )
+                    return entities
                 return []
             except json.JSONDecodeError as e:
                 logger.error(

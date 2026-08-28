@@ -954,6 +954,27 @@ EXTRACTION_NO_VALUES_ERROR = (
 )
 
 
+def _entity_has_values(entity) -> bool:
+    """Whether an extracted entity carries at least one real value.
+
+    A dict of nothing but nulls is not a result. Testing the dict for
+    truthiness (the previous check) passed it, so a run where every field came
+    back null — a key-mismatched fallback parse, a document whose text never
+    loaded — was recorded as completed and rendered as a confident set of
+    "not found" answers. The source sidecar is skipped: it is metadata about
+    the values, not a value.
+    """
+    from app.services.extraction_sources import SOURCE_KEY
+
+    if not isinstance(entity, dict):
+        return False
+    return any(
+        value not in (None, "", [], {})
+        for key, value in entity.items()
+        if key != SOURCE_KEY
+    )
+
+
 @router.post("/run-sync")
 @limiter.limit("30/minute")
 async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, user: User = Depends(get_current_user)) -> dict:
@@ -999,12 +1020,13 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 combined_context=req.combined_context,
                 capture_sources=True,
             )
-        # A run that produced no entities at all extracted nothing; recording
+        # A run that produced no values at all extracted nothing; recording
         # it as completed gives History a green tick with nothing behind it.
         # It is finished as failed with the reason, and the client is told
         # so on the response rather than being pointed at details that
-        # don't exist.
-        no_values = not any(isinstance(e, dict) and e for e in results)
+        # don't exist. "No values" covers both shapes: no entities, and
+        # entities whose every field is null.
+        no_values = not any(_entity_has_values(e) for e in results)
         if no_values:
             await activity_service.activity_finish(
                 activity.id, ActivityStatus.FAILED, error=EXTRACTION_NO_VALUES_ERROR,
