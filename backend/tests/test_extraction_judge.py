@@ -199,8 +199,9 @@ async def test_judge_field_value_deterministic_router_fails_missing_actual():
 
 
 @pytest.mark.asyncio
-async def test_judge_field_value_swallows_exceptions_returns_fail():
-    """Judge failure shouldn't crash the surrounding optimizer trial loop."""
+async def test_judge_field_value_swallows_exceptions_returns_unavailable():
+    """Judge failure shouldn't crash the surrounding optimizer trial loop — and
+    must not be recorded as a measured failure either."""
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(side_effect=RuntimeError("network down"))
 
@@ -212,9 +213,10 @@ async def test_judge_field_value_swallows_exceptions_returns_fail():
             field_name="X", expected="y", actual="z", model_name="m",
         )
 
-    assert out["verdict"] == "FAIL"
-    assert out["score"] == 0.0
-    assert "judge error" in out["reasoning"]
+    assert out["verdict"] == extraction_judge.JUDGE_UNAVAILABLE
+    assert out["score"] is None
+    assert extraction_judge.is_judge_unavailable(out)
+    assert "judge unavailable" in out["reasoning"]
 
 
 # ---------------------------------------------------------------------------

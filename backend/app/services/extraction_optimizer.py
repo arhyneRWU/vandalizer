@@ -77,6 +77,15 @@ CONVERGENCE_PATIENCE = 4
 # instant; large enough not to hammer Mongo.
 CANCEL_POLL_INTERVAL_SECONDS = 5.0
 
+# Judged-field coverage floor. A trial whose judge answered for less than this
+# fraction of the fields it was asked about is describing the judge's uptime,
+# not the config's quality: its score is discarded and the trial is recorded
+# ``judge_unavailable`` so it can never win, never set the headline score, and
+# never write a false regression into the quality history. Set high because the
+# cost of discarding a trial is one wasted config; the cost of keeping a
+# degraded one is a permanent wrong number.
+MIN_JUDGE_COVERAGE = 0.8
+
 # Per-config wall-clock ceiling. A single hung / rate-limited LLM call must not
 # wedge the whole run past this — we cancel that config, record it failed, and
 # move on. Generous enough that a legitimately slow judged config (many cases ×
@@ -309,7 +318,7 @@ async def run_optimization(
             )
         except _TrialCancelled:
             return await _finalize_cancelled(run_doc)
-        run_doc.baseline_no_tool_score = _score_to_unit(no_tool_result.get("score"))
+        run_doc.baseline_no_tool_score = _covered_score_to_unit(no_tool_result, "baseline-no-tool")
         run_doc.tokens_used += int(no_tool_result.get("judge_tokens", 0) or 0)
         await run_doc.save()
 
@@ -332,7 +341,7 @@ async def run_optimization(
             )
         except _TrialCancelled:
             return await _finalize_cancelled(run_doc)
-        run_doc.baseline_default_score = _score_to_unit(default_result.get("score"))
+        run_doc.baseline_default_score = _covered_score_to_unit(default_result, "baseline-default")
         run_doc.tokens_used += int(default_result.get("judge_tokens", 0) or 0)
         await run_doc.save()
 
@@ -354,7 +363,10 @@ async def run_optimization(
                     DEFAULT_VARIANCE_SAMPLES,
                     sample_judge_variance,
                 )
-                from app.services.extraction_judge import judge_field_value
+                from app.services.extraction_judge import (
+                    is_judge_unavailable,
+                    judge_field_value,
+                )
 
                 async def _rejudge(sample: dict) -> tuple[float, int]:
                     v = await judge_field_value(
@@ -364,6 +376,12 @@ async def run_optimization(
                         model_name=judge_model,
                         field_metadata=sample.get("field_metadata"),
                     )
+                    if is_judge_unavailable(v):
+                        # sample_judge_variance drops a raising sample. Scoring
+                        # an outage as 0.0 instead would contribute a delta of
+                        # -original and inflate σ, widening the significance
+                        # gate on evidence that does not exist.
+                        raise RuntimeError(v.get("reasoning") or "judge unavailable")
                     return float(v["score"]), int(v.get("tokens_used", 0) or 0)
 
                 # Default selector (boundary-band bias) makes σ reflect the
@@ -633,7 +651,7 @@ async def run_optimization(
                             ),
                             timeout=PER_TRIAL_TIMEOUT_SECONDS,
                         )
-                        holdout_winner_score = _score_to_unit(holdout_winner.get("score"))
+                        holdout_winner_score = _covered_score_to_unit(holdout_winner, "holdout-winner")
                         if holdout_winner_score is not None:
                             run_doc.optimized_score = holdout_winner_score
                     except Exception as e:
@@ -657,7 +675,7 @@ async def run_optimization(
                             ),
                             timeout=PER_TRIAL_TIMEOUT_SECONDS,
                         )
-                        run_doc.holdout_default_score = _score_to_unit(holdout_default.get("score"))
+                        run_doc.holdout_default_score = _covered_score_to_unit(holdout_default, "holdout-default")
                     except Exception as e:
                         logger.warning("Holdout re-score (default) failed: %s", e)
 
@@ -945,6 +963,34 @@ def _score_to_unit(score: float | None) -> float | None:
     return round(float(score) / 100.0, 4)
 
 
+def _judge_covered(result: dict, label: str) -> bool:
+    """Whether a tuning result was judged well enough to publish a score.
+
+    A judged run whose judge answered for less than ``MIN_JUDGE_COVERAGE`` of
+    the fields measured the judge's availability, not the config. Publishing
+    that number — as a baseline, a headline, or a trial score — writes a
+    provider outage into the quality history as a quality collapse, where it
+    stays and where the next comparison reads it as a regression.
+    """
+    if not result.get("judge_used"):
+        return True
+    coverage = result.get("judge_coverage")
+    if coverage is None or coverage >= MIN_JUDGE_COVERAGE:
+        return True
+    logger.warning(
+        "Discarding %s score: judge covered only %.0f%% of fields (floor %.0f%%)",
+        label, coverage * 100, MIN_JUDGE_COVERAGE * 100,
+    )
+    return False
+
+
+def _covered_score_to_unit(result: dict, label: str) -> float | None:
+    """``_score_to_unit`` of a result, or None when the judge did not cover it."""
+    if not _judge_covered(result, label):
+        return None
+    return _score_to_unit(result.get("score"))
+
+
 def _discount_unit_score(score: float | None, ssf: float) -> float | None:
     """Apply the certified ValidationRun's sample-size discount to a 0..1 score.
 
@@ -1014,21 +1060,37 @@ def _to_trial_summary(result: dict, baseline_default_score: float | None) -> dic
         lift = round(score_unit - baseline_default_score, 4)
 
     status = "failed" if result.get("error") else "completed"
+    error = result.get("error")
     cfg = _trial_config_for_run(result)
+
+    # A trial the judge could not cover is not a measurement. Drop its numbers
+    # rather than letting a provider outage look like a quality collapse —
+    # winner selection only considers ``completed`` trials with a score, so
+    # this both excludes it from the decision and shows the user why.
+    coverage = result.get("judge_coverage")
+    if status == "completed" and not _judge_covered(result, result.get("label", "trial")):
+        status = "judge_unavailable"
+        error = (
+            f"judge answered for only {coverage:.0%} of fields "
+            f"(floor {MIN_JUDGE_COVERAGE:.0%}) — trial not scored"
+        )
+        score_unit = None
+        lift = None
 
     return {
         "trial_id": result.get("label", ""),
         "config": cfg,
         "score": score_unit,
-        "accuracy": result.get("accuracy"),
-        "consistency": result.get("consistency"),
+        "accuracy": result.get("accuracy") if status != "judge_unavailable" else None,
+        "consistency": result.get("consistency") if status != "judge_unavailable" else None,
         "lift_vs_default": lift,
+        "judge_coverage": coverage,
         # Real judge-token count from this trial (zero when the judge is off).
         # Sums up at run level into ``run_doc.tokens_used`` for the progress bar.
         "tokens_used": int(result.get("judge_tokens", 0) or 0),
         "status": status,
         "duration_seconds": result.get("elapsed_seconds"),
-        "error": result.get("error"),
+        "error": error,
         # Cross-field rule outcome aggregate ({pass, fail, unparseable,
         # pass_rate, ...}). Null when no rules are configured. Surfaces in the
         # trials table so the user can see how each config compares on rules,
@@ -1110,7 +1172,10 @@ async def _tighten_variance_with_top_trials(
             DEFAULT_VARIANCE_SAMPLES,
             sample_judge_variance,
         )
-        from app.services.extraction_judge import judge_field_value
+        from app.services.extraction_judge import (
+            is_judge_unavailable,
+            judge_field_value,
+        )
 
         async def _rejudge(sample: dict) -> tuple[float, int]:
             v = await judge_field_value(
@@ -1120,6 +1185,8 @@ async def _tighten_variance_with_top_trials(
                 model_name=judge_model,
                 field_metadata=sample.get("field_metadata"),
             )
+            if is_judge_unavailable(v):
+                raise RuntimeError(v.get("reasoning") or "judge unavailable")
             return float(v["score"]), int(v.get("tokens_used", 0) or 0)
 
         for trial in top_trials:
