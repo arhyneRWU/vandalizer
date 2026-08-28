@@ -589,6 +589,41 @@ class TestExecuteTaskStepTest:
         assert result is not None
 
     @patch("app.tasks.workflow_tasks._get_db")
+    def test_step_warning_is_returned_alongside_the_output(self, mock_get_db):
+        """A Form Filler that could not fill a field completes with a warning;
+        Test Step used to drop it and show a clean "Test Completed"."""
+        from app.tasks.workflow_tasks import execute_task_step_test
+
+        db = _mock_db(smart_docs=[{"uuid": "uuid1", "raw_text": "Rate 47%"}])
+        mock_get_db.return_value = db
+
+        with patch("app.services.workflow_engine._run_form_filler_model") as mock_model:
+            mock_model.return_value = '{"rate": "47%", "cap": "Not provided in context"}'
+            result = execute_task_step_test(
+                task_name="FormFiller",
+                task_data={"template": "Rate: {{rate}}\nCap: {{cap}}", "model": "gpt-4o"},
+                doc_uuids=["uuid1"],
+            )
+        assert result["output"] == "Rate: 47%\nCap: [Not provided: cap]"
+        assert result["step_test_warning"].startswith("1 field not found in the input")
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    def test_step_without_warning_returns_bare_output(self, mock_get_db):
+        from app.tasks.workflow_tasks import execute_task_step_test
+
+        db = _mock_db(smart_docs=[{"uuid": "uuid1", "raw_text": "Rate 47%"}])
+        mock_get_db.return_value = db
+
+        with patch("app.services.workflow_engine._run_form_filler_model") as mock_model:
+            mock_model.return_value = '{"rate": "47%"}'
+            result = execute_task_step_test(
+                task_name="FormFiller",
+                task_data={"template": "Rate: {{rate}}", "model": "gpt-4o"},
+                doc_uuids=["uuid1"],
+            )
+        assert result == "Rate: 47%"
+
+    @patch("app.tasks.workflow_tasks._get_db")
     def test_unknown_task_type_raises(self, mock_get_db):
         from app.tasks.workflow_tasks import execute_task_step_test
 

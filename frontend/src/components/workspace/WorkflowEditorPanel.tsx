@@ -2737,6 +2737,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   const [testProgress, setTestProgress] = useState(0)
   const [testMessage, setTestMessage] = useState('')
   const [testResult, setTestResult] = useState<unknown>(null)
+  const [testWarning, setTestWarning] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
   // Set by handleUpdate when a required field is blank; cleared on the next save attempt.
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -2824,6 +2825,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
     setTesting(true)
     setTestProgress(0)
     setTestResult(null)
+    setTestWarning(null)
     setTestError(null)
     setTestMessage(TEST_MESSAGES[0])
 
@@ -2852,6 +2854,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
             setTestProgress(100)
             if (res.status === 'completed') {
               setTestResult(res.result)
+              setTestWarning(res.warning || null)
             } else {
               setTestError(res.error || 'Test failed. Please check your configuration.')
             }
@@ -4142,7 +4145,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                 <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
                   Use <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>{'{{placeholder}}'}</code> syntax.
                   Values are copied verbatim from the input and everything outside the placeholders is kept exactly as written.
-                  A placeholder the input doesn&apos;t answer is filled with <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided]</code> and listed in the step&apos;s warning.
+                  A placeholder the input doesn&apos;t answer is marked <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: 3 }}>[Not provided: name]</code> in the form and listed in the step&apos;s warning — a &quot;not provided&quot; sentence from the model is treated the same way, never written into the form.
                 </div>
               </div>
             )}
@@ -4407,10 +4410,12 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
               <div style={{ marginTop: 16 }}>
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8,
-                  fontSize: 13, color: '#16a34a', fontWeight: 600,
+                  fontSize: 13, color: testWarning ? '#b45309' : '#16a34a', fontWeight: 600,
                 }}>
-                  <CheckCircle style={{ width: 14, height: 14 }} />
-                  Test Completed
+                  {testWarning
+                    ? <AlertTriangle style={{ width: 14, height: 14 }} />
+                    : <CheckCircle style={{ width: 14, height: 14 }} />}
+                  {testWarning ? 'Test Completed with warnings' : 'Test Completed'}
                   <button
                     type="button"
                     onClick={handleDownloadTestResult}
@@ -4437,6 +4442,16 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                     Download
                   </button>
                 </div>
+                {testWarning && (
+                  <div role="status" style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8,
+                    border: '1px solid #fde68a', backgroundColor: '#fffbeb', borderRadius: 6,
+                    padding: '8px 12px', fontSize: 12, color: '#92400e',
+                  }}>
+                    <AlertTriangle style={{ width: 14, height: 14, flexShrink: 0, marginTop: 1 }} />
+                    <div>{testWarning}</div>
+                  </div>
+                )}
                 <div style={{
                   backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6,
                   padding: 12, fontSize: 12, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
@@ -5293,12 +5308,20 @@ function WorkflowOutputCard({ status, sessionId, workflowName, running, runElaps
       {/* Completed */}
       {isCompleted && (
         <div>
+          {/* A run that completed with step warnings (fields a Form Filler
+              could not fill, an empty input, …) is not a clean pass: say so
+              in the header, in amber, before the output and the Download /
+              Save buttons that offer it as a finished deliverable. */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8,
-            fontSize: 13, color: '#16a34a', fontWeight: 500,
+            fontSize: 13, color: stepWarnings.length > 0 ? '#b45309' : '#16a34a', fontWeight: 500,
           }}>
-            <CheckCircle style={{ width: 16, height: 16 }} />
-            Completed
+            {stepWarnings.length > 0
+              ? <AlertTriangle style={{ width: 16, height: 16 }} />
+              : <CheckCircle style={{ width: 16, height: 16 }} />}
+            {stepWarnings.length > 0
+              ? `Completed with ${stepWarnings.length} warning${stepWarnings.length === 1 ? '' : 's'} — check the output before using it`
+              : 'Completed'}
           </div>
           <div
             className="chat-markdown"
