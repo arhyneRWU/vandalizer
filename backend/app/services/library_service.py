@@ -583,6 +583,7 @@ async def get_library_items(
                 deref["quality_tier"] = meta.quality_tier
                 deref["quality_score"] = meta.quality_score
                 deref["last_validated_at"] = meta.last_validated_at.isoformat() if meta.last_validated_at else None
+                deref["regression_pending_review"] = meta.regression_pending_review
             else:
                 # Fall back to latest ValidationRun
                 latest = await get_latest_validation(item.kind.value, quality_lookup_id)

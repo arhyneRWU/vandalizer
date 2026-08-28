@@ -1288,7 +1288,11 @@ async def get_workflow_quality_status(
     latest = await get_latest_validation("workflow", workflow_id)
 
     if not latest and not meta:
-        return {"status": "unvalidated", "score": None, "tier": None, "config_changed": False, "stale": False, "last_validated_at": None}
+        return {
+            "status": "unvalidated", "score": None, "tier": None,
+            "config_changed": False, "stale": False, "last_validated_at": None,
+            "regression_pending_review": False,
+        }
 
     score = meta.quality_score if meta else latest.get("score") if latest else None
     tier = meta.quality_tier if meta else None
@@ -1331,6 +1335,9 @@ async def get_workflow_quality_status(
         "last_validated_at": last_at,
         "config_changed": config_changed,
         "stale": stale,
+        # Monitoring already decided this item regressed and nobody has looked
+        # at it yet; the badge says so instead of showing the tier alone.
+        "regression_pending_review": bool(meta and meta.regression_pending_review),
     }
 
 

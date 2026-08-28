@@ -379,6 +379,8 @@ export interface QualityStatus {
   last_validated_at?: string | null
   config_changed: boolean
   stale: boolean
+  /** Monitoring found a regression here and nobody has reviewed it yet. */
+  regression_pending_review?: boolean
 }
 
 export function getQualityStatus(uuid: string) {

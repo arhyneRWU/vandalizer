@@ -2180,6 +2180,14 @@ async def acknowledge_alert(
     alert.acknowledged_by = user.user_id
     alert.acknowledged_at = datetime.datetime.now(datetime.timezone.utc)
     await alert.save()
+
+    # Acknowledging a regression IS the review the item was waiting on, so the
+    # "regression pending review" state must lift with it — otherwise the badge
+    # stays flagged forever and the signal stops meaning anything.
+    if alert.alert_type == "regression":
+        from app.services.quality_service import clear_regression_review
+        await clear_regression_review(alert.item_kind, alert.item_id)
+
     await _audit(user, "acknowledge_alert", f"Acknowledged quality alert: {uuid}")
     return {"ok": True}
 

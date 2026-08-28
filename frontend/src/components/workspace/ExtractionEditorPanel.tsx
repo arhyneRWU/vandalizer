@@ -637,7 +637,11 @@ export function ExtractionEditorPanel() {
               </button>
               {searchSet.quality_tier && (
                 <>
-                  <QualityBadge tier={searchSet.quality_tier} score={searchSet.quality_score ?? null} />
+                  <QualityBadge
+                    tier={searchSet.quality_tier}
+                    score={searchSet.quality_score ?? null}
+                    regressionPending={searchSet.regression_pending_review}
+                  />
                   {sparklineScores.length >= 2 && <QualitySparkline scores={sparklineScores} />}
                 </>
               )}
@@ -1777,7 +1781,11 @@ function QualityPulse({ searchSetUuid, itemCount = 0 }: { searchSetUuid?: string
       }} />
       <div style={{ flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <QualityBadge tier={status.tier} score={status.score} />
+          <QualityBadge
+            tier={status.tier}
+            score={status.score}
+            regressionPending={status.regression_pending_review}
+          />
           {status.last_validated_at && (
             <span style={{ fontSize: 11, color: '#6b7280' }}>
               {relativeTime(status.last_validated_at)}
