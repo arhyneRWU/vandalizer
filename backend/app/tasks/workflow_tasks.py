@@ -7,9 +7,18 @@ Task names use 'tasks.workflow_next.*' to coexist with Flask's 'tasks.workflow.*
 import logging
 
 from app.celery_app import celery_app
+from app.services.form_fill import document_meta
 from app.tasks import TRANSIENT_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _preload_form_filler_template(db, task_data: dict) -> None:
+    """Attach a Form Filler task's fillable-PDF template bytes (see form_fill)."""
+    from app.config import Settings
+    from app.services.form_fill import load_form_filler_assets
+
+    load_form_filler_assets(db, task_data, upload_dir=Settings().upload_dir)
 
 
 def _wants_selected_document(task_data: dict) -> bool:
@@ -250,6 +259,7 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
 
             if doc_uuids:
                 doc_texts = []
+                doc_metas = []
                 for uuid in doc_uuids:
                     doc = db.smart_document.find_one({"uuid": uuid})
                     if doc and doc.get("origin_workflow_id") == workflow_id:
@@ -260,6 +270,7 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
                         continue
                     if doc and doc.get("raw_text"):
                         doc_texts.append(doc["raw_text"])
+                        doc_metas.append(document_meta(doc))
                     else:
                         logger.warning(
                             "Document %s has no raw_text — it may still be processing or text extraction failed",
@@ -271,12 +282,21 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
                         len(doc_uuids),
                     )
                 task_data["doc_texts"] = doc_texts
+                if task_doc.get("name") == "FormFiller":
+                    # Aligned 1:1 with doc_texts: the fill report attributes each
+                    # value to a document and page through these.
+                    task_data["doc_metas"] = doc_metas
 
             # Pre-load specific document text when select_document is selected
             if _wants_selected_document(task_data) and task_data.get("selected_document_uuid"):
                 sel_doc = db.smart_document.find_one({"uuid": task_data["selected_document_uuid"]})
                 if sel_doc and sel_doc.get("raw_text"):
                     task_data["selected_doc_text"] = sel_doc["raw_text"]
+                    if task_doc.get("name") == "FormFiller":
+                        task_data["selected_doc_meta"] = document_meta(sel_doc)
+
+            if task_doc.get("name") == "FormFiller":
+                _preload_form_filler_template(db, task_data)
 
             tasks.append({"name": task_doc.get("name", ""), "data": task_data})
 
@@ -1156,17 +1176,26 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
 
     # Pre-load doc texts
     doc_texts = []
+    doc_metas = []
     for uuid in doc_uuids:
         doc = db.smart_document.find_one({"uuid": uuid})
         if doc and doc.get("raw_text"):
             doc_texts.append(doc["raw_text"])
+            doc_metas.append(document_meta(doc))
     task_data["doc_texts"] = doc_texts
+    if task_name == "FormFiller":
+        task_data["doc_metas"] = doc_metas
 
     # Pre-load specific document text when select_document is selected
     if _wants_selected_document(task_data) and task_data.get("selected_document_uuid"):
         sel_doc = db.smart_document.find_one({"uuid": task_data["selected_document_uuid"]})
         if sel_doc and sel_doc.get("raw_text"):
             task_data["selected_doc_text"] = sel_doc["raw_text"]
+            if task_name == "FormFiller":
+                task_data["selected_doc_meta"] = document_meta(sel_doc)
+
+    if task_name == "FormFiller":
+        _preload_form_filler_template(db, task_data)
 
     # Resolve a linked saved Prompt/Formatter so Test Step uses the live body.
     _resolve_saved_prompt_formatter(db, task_name, task_data)
@@ -1224,7 +1253,7 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
         engine.connect(nodes[i - 1], nodes[i])
 
     try:
-        final_output, _ = engine.execute()
+        final_output, steps = engine.execute()
     except WorkflowStepError as e:
         # Deterministic config/user error (blocked URL, HTTP failure, bad
         # headers…). Return a structured failure instead of raising: the task
@@ -1238,6 +1267,16 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
             "error": str(e),
             "output": e.step_output,
         }
+    # A step can complete with a warning (fields a Form Filler could not
+    # fill, an empty input, …). The run UI shows those on the step; Test
+    # Step used to drop them and show a clean "Test Completed" over output
+    # that needed checking. Wrap so the poll endpoint can hand it through.
+    warnings = [
+        s["warning"] for s in steps
+        if isinstance(s, dict) and isinstance(s.get("warning"), str) and s["warning"]
+    ]
+    if warnings:
+        return {"step_test_warning": " | ".join(warnings), "output": final_output}
     return final_output
 
 
