@@ -975,6 +975,35 @@ def _entity_has_values(entity) -> bool:
     )
 
 
+def _evaluate_cross_field_rules(search_set, values: dict) -> Optional[dict]:
+    """Run a search set's cross-field rules over one run's merged values.
+
+    Returns ``{"results", "summary"}``, or None when the set has no rules — so
+    the response shape is self-describing: absent means "nothing to check",
+    not "everything passed". Never raises: a rule engine fault must not fail
+    an extraction that already produced values.
+    """
+    if not search_set or not getattr(search_set, "cross_field_rules", None):
+        return None
+    try:
+        from app.services.cross_field_validation import (
+            CrossFieldValidator,
+            summarize_results,
+        )
+
+        rules = search_set.normalized_cross_field_rules()
+        results = CrossFieldValidator().validate(values, rules)
+        if not results:
+            return None
+        return {"results": results, "summary": summarize_results(results)}
+    except Exception:
+        logger.exception(
+            "Cross-field evaluation failed for search set %s",
+            getattr(search_set, "uuid", "?"),
+        )
+        return None
+
+
 @router.post("/run-sync")
 @limiter.limit("30/minute")
 async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, user: User = Depends(get_current_user)) -> dict:
@@ -1051,12 +1080,23 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
             if isinstance(entity, dict):
                 normalized.update(entity)
                 merged_sources.update(entity_sources)
+        # Cross-field rules run on every run that has them, not only when
+        # someone remembers to open the Validate tab. These are the checks that
+        # catch a wrong number — a budget that doesn't add up, an end date
+        # before a start date, a required field missing given its trigger — and
+        # leaving them behind a separate button meant a production extraction
+        # shipped with none of them applied. Read-only: evaluation counters
+        # stay tied to validation runs, where the user can mark a false
+        # positive, so this doesn't quietly move a rule toward auto-disable.
+        cross_field = _evaluate_cross_field_rules(ss, normalized) if not no_values else None
+
         await activity_service.activity_update(
             activity.id,
             documents_touched=len(document_uuids),
             result_snapshot={
                 "normalized": normalized,
                 "sources": merged_sources,
+                "cross_field": cross_field,
                 "document_uuids": document_uuids,
                 "search_set_uuid": req.search_set_uuid,
             },
@@ -1069,7 +1109,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         from app.tasks.quality_tasks import auto_validate_extraction
         auto_validate_extraction.delay(req.search_set_uuid, user.user_id, req.model)
 
-        return {"results": results, "sources": sources}
+        return {"results": results, "sources": sources, "cross_field": cross_field}
     except Exception as e:
         await activity_service.activity_finish(
             activity.id, ActivityStatus.FAILED, error=str(e),
