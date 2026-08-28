@@ -50,6 +50,7 @@ import { MAX_NAME_LENGTH, normalizeName } from '../../utils/nameValidation'
 import { computeReorderedIds } from '../../utils/reorder'
 import { formatPageLocator } from '../../utils/pageLocator'
 import type { Workflow, WorkflowStep, WorkflowTask, WorkflowStatus, WorkflowCitation, ModelInfo, SearchSetItem } from '../../types/workflow'
+import { describeUnfinishedSteps, findUnfinishedSteps, promptTaskIsEmpty } from './workflowStepIssues'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
@@ -566,9 +567,17 @@ export function WorkflowEditorPanel() {
   // so a workflow carrying only that one reads as empty and is treated as
   // such here too.
   const hasSteps = (workflow?.steps ?? []).some(s => !(s.name === 'Document' && s.tasks.length === 0))
+  // A step that can't do anything (a Prompt task with no instructions) used
+  // to run anyway: the engine sent a placeholder to the model and the run
+  // completed green with "The context does not contain a prompt to enter."
+  // as its deliverable. The engine now fails such a step; block the run here
+  // so the user is pointed at the step instead of at a failed run.
+  const unfinishedSteps = findUnfinishedSteps(workflow?.steps ?? [])
+  const unfinishedStepsMessage = describeUnfinishedSteps(unfinishedSteps)
+  const runBlocked = runner.running || missingInput || !hasSteps || unfinishedSteps.length > 0
 
   const handleRun = async () => {
-    if (!openWorkflowId || !hasSteps) return
+    if (!openWorkflowId || !hasSteps || unfinishedSteps.length > 0) return
 
     try {
       if (isNoInput) {
@@ -1106,6 +1115,12 @@ export function WorkflowEditorPanel() {
             No input required — runs directly
           </div>
         )}
+        {hasSteps && unfinishedStepsMessage && (
+          <div role="alert" style={{ fontSize: 12, color: '#92400e', marginBottom: 10, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+            <AlertTriangle style={{ width: 12, height: 12, flexShrink: 0, marginTop: 2 }} />
+            <span>{unfinishedStepsMessage}</span>
+          </div>
+        )}
         {runner.running && (runner.batchId || runner.sessionId) ? (
           // Run in progress (single or batch) — offer an active STOP (red,
           // matches the app's destructive-action convention; same geometry as
@@ -1138,15 +1153,17 @@ export function WorkflowEditorPanel() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={runner.running || missingInput || !hasSteps}
-            title={!hasSteps ? 'Add at least one step before running this workflow' : undefined}
+            disabled={runBlocked}
+            title={!hasSteps
+              ? 'Add at least one step before running this workflow'
+              : unfinishedStepsMessage ?? undefined}
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
               backgroundColor: 'var(--highlight-color, #eab308)',
               color: 'var(--highlight-text-color, #000)',
-              cursor: runner.running || missingInput || !hasSteps ? 'not-allowed' : 'pointer',
-              opacity: (missingInput || !hasSteps) && !runner.running ? 0.5 : 1,
+              cursor: runBlocked ? 'not-allowed' : 'pointer',
+              opacity: runBlocked && !runner.running ? 0.5 : 1,
               textTransform: 'uppercase', letterSpacing: '0.05em',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}
@@ -2005,7 +2022,23 @@ function EditStepOverlay({
                   <Icon style={{ width: 16, height: 16, color }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#202124' }}>{(task.data as Record<string, unknown>)?.name as string || task.name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#202124', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{(task.data as Record<string, unknown>)?.name as string || task.name}</span>
+                    {promptTaskIsEmpty(task.name, task.data) && (
+                      <span
+                        title="This step has no prompt — open it and add instructions"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          fontSize: 10, fontWeight: 700, letterSpacing: '0.03em',
+                          padding: '1px 6px', borderRadius: 4,
+                          color: '#92400e', backgroundColor: '#fef3c7',
+                        }}
+                      >
+                        <AlertTriangle style={{ width: 10, height: 10 }} />
+                        NO PROMPT
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 11, color: '#6b7280', marginTop: 1 }}>
                     {task.name === 'Extraction' ? 'Extraction'
                       : task.name === 'Prompt' ? 'LLM prompt task'
@@ -2416,6 +2449,25 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // Task edit modal (with Design/Input/Output sub-tabs + test step)
 // ---------------------------------------------------------------------------
 
+/**
+ * The message to show instead of saving when a step is missing a field it
+ * cannot run without, or null when it can be saved. A step saved blank used
+ * to run "successfully" and hand the next step nothing — the run finished
+ * Completed and the only trace was the missing content downstream. The
+ * backend now fails such a run, but refusing the save is where the author
+ * actually is when the mistake happens.
+ */
+export function requiredFieldMessage(taskName: string, data: Record<string, unknown>): string | null {
+  const text = (key: string) => (typeof data[key] === 'string' ? (data[key] as string) : '').trim()
+  if (taskName === 'AddWebsite' && !text('url')) {
+    return 'Enter the URL of the page to fetch before saving this step.'
+  }
+  if (taskName === 'APINode' && !text('url')) {
+    return 'Enter the endpoint URL before saving this step.'
+  }
+  return null
+}
+
 // Explain a failed input/output-config save. The backend answers PATCH on a
 // workflow the viewer can see but not manage (shared or verified) with a 404,
 // so surfacing the raw "Workflow not found" would read as if the workflow
@@ -2686,6 +2738,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   const [testMessage, setTestMessage] = useState('')
   const [testResult, setTestResult] = useState<unknown>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  // Set by handleUpdate when a required field is blank; cleared on the next save attempt.
+  const [saveError, setSaveError] = useState<string | null>(null)
   const testIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const testMsgRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -2734,7 +2788,20 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
     }
   }, [])
 
+  // The same condition that disables Improve. Update, Test Step and Run all
+  // used to ignore it, so an empty Prompt step saved without a word and then
+  // ran against a hidden placeholder, completing green with nonsense.
+  const promptMissing = promptTaskIsEmpty(task.name, taskData)
+  const PROMPT_MISSING_HINT = 'This step needs a prompt before it can be saved, tested, or run.'
+
   const handleUpdate = async () => {
+    if (promptMissing) return
+    setSaveError(null)
+    const missing = requiredFieldMessage(task.name, taskData)
+    if (missing) {
+      setSaveError(missing)
+      return
+    }
     setSaving(true)
     try {
       const finalData = {
@@ -2753,7 +2820,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   const handleTestStep = async () => {
-    if (selectedDocUuids.length === 0) return
+    if (selectedDocUuids.length === 0 || promptMissing) return
     setTesting(true)
     setTestProgress(0)
     setTestResult(null)
@@ -3334,6 +3401,15 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                       lineHeight: 1.5,
                     }}
                   />
+                  {promptMissing && (
+                    <div role="status" style={{
+                      marginTop: 8, display: 'flex', alignItems: 'center', gap: 6,
+                      fontSize: 12, color: '#92400e',
+                    }}>
+                      <AlertTriangle style={{ width: 12, height: 12, flexShrink: 0 }} />
+                      {PROMPT_MISSING_HINT}
+                    </div>
+                  )}
                   {improveError && (
                     <div role="alert" style={{
                       marginTop: 8, padding: '8px 12px', background: '#fef2f2',
@@ -3510,17 +3586,19 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
             {task.name === 'AddWebsite' && (
               <div>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-                  URL
+                  URL <span style={{ color: '#dc2626' }} aria-hidden="true">*</span>
                 </label>
                 <input
                   aria-label="URL"
+                  aria-required="true"
+                  aria-invalid={saveError ? true : undefined}
                   type="text"
                   value={getTextValue('url')}
                   onChange={e => setTextValue('url', e.target.value)}
                   placeholder="https://example.com"
                   style={{
                     width: '100%', padding: '8px 12px', fontSize: 13,
-                    fontFamily: 'inherit', border: '1px solid #d1d5db', borderRadius: 6,
+                    fontFamily: 'inherit', border: `1px solid ${saveError ? '#dc2626' : '#d1d5db'}`, borderRadius: 6,
                     outline: 'none', boxSizing: 'border-box',
                   }}
                 />
@@ -4853,6 +4931,16 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         </div>
       )}
 
+      {saveError && (
+        <div role="alert" style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '8px 20px',
+          borderTop: '1px solid #e5e7eb', fontSize: 13, color: '#dc2626', fontWeight: 600,
+        }}>
+          <XCircle style={{ width: 14, height: 14, flexShrink: 0 }} />
+          {saveError}
+        </div>
+      )}
+
       {/* Bottom toolbar */}
       <div style={{
         padding: '12px 20px', borderTop: '1px solid #e5e7eb', flexShrink: 0,
@@ -4861,14 +4949,14 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         {TEST_STEP_SUPPORTED_TYPES.has(task.name) && (
           <button
             onClick={handleTestStep}
-            disabled={testing || selectedDocUuids.length === 0}
-            title={TEST_STEP_TOOLTIP}
+            disabled={testing || selectedDocUuids.length === 0 || promptMissing}
+            title={promptMissing ? PROMPT_MISSING_HINT : TEST_STEP_TOOLTIP}
             style={{
               flex: 1, padding: '10px 16px', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
               border: '1px solid #d1d5db', borderRadius: 6, backgroundColor: '#fff',
-              cursor: testing || selectedDocUuids.length === 0 ? 'not-allowed' : 'pointer',
+              cursor: testing || selectedDocUuids.length === 0 || promptMissing ? 'not-allowed' : 'pointer',
               color: '#374151',
-              opacity: testing || selectedDocUuids.length === 0 ? 0.5 : 1,
+              opacity: testing || selectedDocUuids.length === 0 || promptMissing ? 0.5 : 1,
             }}
           >
             {testing ? 'Testing...' : 'Test Step'}
@@ -4877,14 +4965,15 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         {canManage ? (
           <button
             onClick={handleUpdate}
-            disabled={saving}
+            disabled={saving || promptMissing}
+            title={promptMissing ? PROMPT_MISSING_HINT : undefined}
             style={{
               flex: 1, padding: '10px 16px', fontSize: 13, fontWeight: 700, fontFamily: 'inherit',
               border: 'none', borderRadius: 6,
               backgroundColor: 'var(--highlight-color, #eab308)',
               color: 'var(--highlight-text-color, #000)',
-              cursor: saving ? 'not-allowed' : 'pointer',
-              opacity: saving ? 0.6 : 1,
+              cursor: saving || promptMissing ? 'not-allowed' : 'pointer',
+              opacity: saving || promptMissing ? 0.6 : 1,
             }}
           >
             {saving ? 'Updating...' : 'Update'}

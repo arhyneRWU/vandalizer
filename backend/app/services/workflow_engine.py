@@ -588,9 +588,37 @@ class PromptNode(Node):
         self.data = data
         self.model = data.get("model")
 
+    # What a Prompt step with no instructions says instead of running. Also the
+    # message Test Step and the run's error banner show, so it names the fix.
+    EMPTY_PROMPT_ERROR = (
+        "Prompt step has no instructions. Enter a prompt (or link a saved "
+        "prompt from the Library) before running this step."
+    )
+
     def process(self, inputs):
-        prompt = self.data.get("prompt", "Enter prompt")
+        prompt = self.data.get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
         prev_step_name = inputs.get("step_name")
+
+        # No instructions means there is nothing to ask. This used to fall
+        # through with the literal placeholder "Enter prompt" as the prompt,
+        # and the model would dutifully answer it — "The context does not
+        # contain a prompt to enter." — which then completed green as the
+        # run's deliverable. A missing prompt is a configuration error, not
+        # thin data, so it is a step failure (halts the run, no model call),
+        # not a warning. The editor blocks saving/testing an empty prompt;
+        # this is the backstop for steps created via the API or saved before
+        # that check existed, and for a linked saved prompt whose body is
+        # still empty (the resolver leaves the inline value untouched then).
+        if not prompt:
+            self.report_progress(self.EMPTY_PROMPT_ERROR)
+            return {
+                "output": self.EMPTY_PROMPT_ERROR,
+                "error": self.EMPTY_PROMPT_ERROR,
+                "input": "",
+                "step_name": self.name,
+            }
+
         self.report_progress(f"Prompt: {prompt}")
 
         sources = _resolve_input_sources(self.data, prev_step_name)
@@ -630,9 +658,18 @@ class WebsiteNode(Node):
         self.data = data
 
     def process(self, inputs):
-        url = self.data.get("url", "")
+        url = (self.data.get("url") or "").strip()
         if not url:
-            return {"output": "", "input": inputs.get("output"), "step_name": self.name}
+            # A step with nothing to fetch used to return "" and let the run
+            # finish Completed — the only trace was the next step's output
+            # missing the page. It is a configuration error: the engine turns
+            # ``error`` into a failed run naming this step.
+            error = (
+                "Add Website is not configured: no URL. Open the step and enter "
+                "the address of the page to fetch."
+            )
+            return {"output": "", "input": inputs.get("output"), "step_name": self.name,
+                    "error": error}
 
         from app.services.web_fetcher import fetch_url_sync
 
@@ -840,6 +877,25 @@ class CrawlerNode(Node):
         return {"output": output, "input": inputs.get("output"), "step_name": self.name}
 
 
+# Token the Deep Analysis pass-1 prompt asks the model to lead with when the
+# input has nothing relevant to the question. Checked after stripping any
+# markdown the model wraps it in (``**NO_RELEVANT_FINDINGS**``, a heading).
+RESEARCH_NO_FINDINGS = "NO_RELEVANT_FINDINGS"
+
+
+def _research_no_findings_reason(findings) -> str | None:
+    """Return the model's reason (possibly "") if pass 1 declared no findings,
+    else None. Only a leading token counts — the word appearing mid-analysis
+    is not a declaration."""
+    if not isinstance(findings, str):
+        return None
+    head = findings.strip().lstrip("#*_` \t")
+    if not head.startswith(RESEARCH_NO_FINDINGS):
+        return None
+    rest = head[len(RESEARCH_NO_FINDINGS):].lstrip("*_` \t:.-—\n").rstrip("*_` \t\n")
+    return " ".join(rest.split())
+
+
 class ResearchNode(Node):
     def __init__(self, data: dict) -> None:
         super().__init__("ResearchNode")
@@ -853,11 +909,35 @@ class ResearchNode(Node):
         sources = _resolve_input_sources(self.data, prev_step_name)
         input_data = _build_combined_context(self.data, inputs, sources)
 
+        # No data means nothing to analyze — stop here, before any model call.
+        # Sent through anyway, the chat helper would drop into its standalone
+        # "draw on your own knowledge" framing and the two passes would
+        # produce a complete, confident, entirely invented report (different
+        # figures, deadlines and citations each run), marked Completed.
+        if _stringify_context(input_data).strip() == "":
+            labels = ", ".join(INPUT_SOURCE_LABELS.get(s, s) for s in sources)
+            warning = (
+                "Deep Analysis skipped: no input data to analyze. "
+                f"Its input source ({labels}) was empty, so no findings or report were generated. "
+                "Check that the preceding step produces output, or point this step at a document."
+            )
+            self.report_progress(warning)
+            return {
+                "output": f"({warning})",
+                "input": inputs.get("output"),
+                "step_name": self.name,
+                "warning": warning,
+            }
+
         self.report_progress("Pass 1: Analyzing data")
 
         analysis_prompt = (
             f"Analyze the following data and generate structured findings related to this question: {question}\n\n"
-            "Provide your analysis as a structured list of key findings, evidence, and observations."
+            "Provide your analysis as a structured list of key findings, evidence, and observations. "
+            "Every finding must be supported by the data; quote or reference the supporting passage.\n\n"
+            f"If the data contains nothing relevant to the question, reply with the exact token "
+            f"{RESEARCH_NO_FINDINGS} on the first line, followed by one sentence saying what the data "
+            "does contain. Do not produce findings from general knowledge."
         )
         findings = llm_chat_model(
             model=self.model, prompt=analysis_prompt, data=input_data,
@@ -865,11 +945,34 @@ class ResearchNode(Node):
             usage_acc=self._usage_acc,
         )
 
+        # Pass 1 said the data has nothing on the question. Stop before pass 2:
+        # asked to "create a comprehensive report" with those four section
+        # headings, the synthesis pass would fill them anyway.
+        no_findings_reason = _research_no_findings_reason(findings)
+        if no_findings_reason is not None:
+            warning = (
+                "Deep Analysis found nothing in its input relevant to the question "
+                f"{question!r}, so no report was generated."
+            )
+            if no_findings_reason:
+                warning += f" {no_findings_reason}"
+            self.report_progress(warning)
+            return {
+                "output": f"({warning})",
+                "input": inputs.get("output"),
+                "step_name": self.name,
+                "warning": warning,
+            }
+
         self.report_progress("Pass 2: Synthesizing report")
         synthesis_prompt = (
             f"Based on the following analysis findings, create a comprehensive research report about: {question}\n\n"
             "Structure the report with clear sections: Executive Summary, Key Findings, "
             "Detailed Analysis, and Conclusions.\n\n"
+            "Every statement, figure, date, deadline, citation, and regulation reference in the "
+            "report must come from the Findings below or the CONTEXT. Where the findings say the "
+            "data does not cover something, the report says so in that section — do not fill a "
+            "section from general knowledge or with examples of what similar cases typically show.\n\n"
             f"Findings:\n{findings}"
         )
         report = llm_chat_model(
@@ -994,8 +1097,16 @@ class APICallNode(Node):
         except templating.TemplateError as e:
             return self._error_result(str(e), inputs)
         body_raw = self.data.get("body", "")
-        if not url:
-            return {"output": "", "input": inputs.get("output"), "step_name": self.name}
+        # ``url`` may be None when the step was written through the API;
+        # ``render`` passes non-strings through unchanged.
+        if not (url or "").strip():
+            # Same defect as Add Website: an unconfigured step must not pass
+            # as a successful empty call.
+            return self._error_result(
+                "API Call is not configured: no URL. Open the step and enter the "
+                "endpoint to call.",
+                inputs,
+            )
 
         from app.utils.url_validation import validate_outbound_url
 
