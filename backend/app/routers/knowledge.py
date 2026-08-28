@@ -279,7 +279,13 @@ def _source_response(s, *, document_title: str | None = None) -> KBSourceRespons
         chunk_count=s.chunk_count,
         truncated=bool(getattr(s, "truncated", False)),
         created_at=s.created_at.isoformat() if s.created_at else None,
+        processed_at=_iso_or_none(getattr(s, "processed_at", None)),
     )
+
+
+def _iso_or_none(value) -> str | None:
+    """ISO-format a datetime, tolerating None and non-datetime stand-ins."""
+    return value.isoformat() if isinstance(value, datetime.datetime) else None
 
 
 async def _resolve_document_titles(sources) -> dict[str, str]:
@@ -741,6 +747,17 @@ async def add_urls(request: Request, uuid: str, req: AddUrlsRequest, user: User 
     kb = await _require_manageable_kb(uuid, user, user_org_ancestry)
     if not req.urls:
         raise HTTPException(status_code=400, detail="No URLs provided")
+    # The worker skips URLs the KB already holds, so decide here what will
+    # actually be fetched and report it honestly: "Added 2" on a request that
+    # re-submitted two existing pages sent one support ticket author on a
+    # fruitless "refresh". Skipped URLs are returned so the UI can point at
+    # the per-source refresh action instead.
+    new_urls, skipped_urls = await svc.partition_new_urls(kb, req.urls)
+    if not new_urls:
+        return {
+            "ok": True, "added": 0,
+            "skipped": len(skipped_urls), "skipped_urls": skipped_urls,
+        }
     # Ingestion (fetch + optional crawl + embed) can run for minutes and would
     # blow past the proxy read timeout if awaited inline — dispatch it to a
     # worker and let the frontend poll source status. See tasks.kb.add_urls.
@@ -749,12 +766,55 @@ async def add_urls(request: Request, uuid: str, req: AddUrlsRequest, user: User 
     kb.status = "building"
     await kb.save()
     add_urls_task.delay(
-        kb.uuid, req.urls,
+        kb.uuid, new_urls,
         crawl_enabled=req.crawl_enabled,
         max_crawl_pages=req.max_crawl_pages,
         allowed_domains=req.allowed_domains,
     )
-    return {"ok": True, "added": len(req.urls)}
+    return {
+        "ok": True, "added": len(new_urls),
+        "skipped": len(skipped_urls), "skipped_urls": skipped_urls,
+    }
+
+
+@router.post("/{uuid}/source/{source_uuid}/refresh")
+@limiter.limit("10/minute")
+async def refresh_source(
+    request: Request, uuid: str, source_uuid: str, user: User = Depends(get_current_user),
+):
+    """Re-fetch a URL source from its page and rebuild its chunks in place.
+
+    Re-adding an existing URL is a no-op and ``/reingest`` re-embeds the stored
+    snapshot, so before this the only way to pick up a revised page was to
+    remove and re-add the source. Runs on a worker (a fetch + embed can take
+    minutes for a large PDF); the KB reports ``building`` and the source
+    ``processing`` until it lands. A failed fetch keeps the previous text.
+    """
+    from app.models.knowledge import KnowledgeBaseSource
+
+    user_org_ancestry = await organization_service.get_user_org_ancestry(user)
+    kb = await _require_manageable_kb(uuid, user, user_org_ancestry)
+    source = await KnowledgeBaseSource.find_one(
+        {"uuid": source_uuid, "knowledge_base_uuid": kb.uuid},
+    )
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    if source.source_type != "url" or not source.url:
+        raise HTTPException(
+            status_code=400,
+            detail="Only URL sources can be refreshed — re-upload the document to update a document source",
+        )
+    if source.status == "processing":
+        raise HTTPException(status_code=409, detail="This source is already being processed")
+
+    from app.tasks.kb_validation_tasks import refresh_url_source_task
+
+    source.status = "pending"
+    await source.save()
+    kb.status = "building"
+    await kb.save()
+    refresh_url_source_task.delay(kb.uuid, source.uuid)
+    return {"ok": True, "status": "queued", "source_uuid": source.uuid}
 
 
 @router.get("/{uuid}/source/{source_uuid}", response_model=KBSourceDetailResponse)
@@ -815,7 +875,6 @@ async def get_source_detail(uuid: str, source_uuid: str, user: User = Depends(ge
             _source_response(c, document_title=child_titles.get(c.document_uuid or ""))
             for c in children
         ],
-        processed_at=source.processed_at.isoformat() if source.processed_at else None,
     )
 
 
