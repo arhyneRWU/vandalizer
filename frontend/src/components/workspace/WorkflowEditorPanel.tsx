@@ -2459,6 +2459,16 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // workflow the viewer can see but not manage (shared or verified) with a 404,
 // so surfacing the raw "Workflow not found" would read as if the workflow
 // vanished — say what actually happened instead.
+/**
+ * A fixed document on the Input tab. `missing` is set by the server on read
+ * when the document has been deleted from Files; it is never saved back.
+ */
+export interface FixedDocument { uuid: string; title: string; missing?: boolean }
+
+export function stripFixedDocumentFlags(doc: FixedDocument): { uuid: string; title: string } {
+  return { uuid: doc.uuid, title: doc.title }
+}
+
 function describeConfigSaveError(err: unknown, what: string): string {
   if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
     return `Couldn't save ${what} — you don't have permission to edit this workflow. Save a copy to your library to make an editable version.`
@@ -2776,8 +2786,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
 
   // Fixed documents for workflow_documents input source
   const inputCfg = (workflow as unknown as Record<string, unknown>)?.input_config as Record<string, unknown> | undefined
-  const [fixedDocs, setFixedDocs] = useState<{ uuid: string; title: string }[]>(
-    () => (((inputCfg?.fixed_documents) as { uuid: string; title: string }[]) || [])
+  const [fixedDocs, setFixedDocs] = useState<FixedDocument[]>(
+    () => (((inputCfg?.fixed_documents) as FixedDocument[]) || [])
   )
   const [fixedDocSearch, setFixedDocSearch] = useState('')
   const [fixedDocResults, setFixedDocResults] = useState<{ uuid: string; title: string }[]>([])
@@ -2820,13 +2830,13 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }, [task.name, user?.current_team_uuid])
 
   // Save fixed documents to workflow input_config
-  const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
+  const saveFixedDocs = async (docs: FixedDocument[]) => {
     const previous = fixedDocs
     setFixedDocs(docs)  // optimistic — refresh reconciles on success
     if (!workflowId) return
     try {
       await updateWorkflow(workflowId, {
-        input_config: { ...inputCfg, fixed_documents: docs },
+        input_config: { ...inputCfg, fixed_documents: docs.map(stripFixedDocumentFlags) },
       })
       onRefreshWorkflow()
     } catch (err) {
@@ -4992,15 +5002,22 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                           {fixedDocs.map(doc => (
                             <div key={doc.uuid} style={{
                               display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px',
-                              backgroundColor: '#f3f4f6', borderRadius: 6, fontSize: 12, marginBottom: 4,
+                              backgroundColor: doc.missing ? '#fef2f2' : '#f3f4f6',
+                              border: `1px solid ${doc.missing ? '#fecaca' : 'transparent'}`,
+                              borderRadius: 6, fontSize: 12, marginBottom: 4,
                             }}>
-                              <FileText style={{ width: 12, height: 12, color: '#6b7280', flexShrink: 0 }} />
-                              <span style={{ color: '#374151', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              <FileText style={{ width: 12, height: 12, color: doc.missing ? '#b91c1c' : '#6b7280', flexShrink: 0 }} />
+                              <span style={{
+                                color: doc.missing ? '#991b1b' : '#374151', flex: 1, overflow: 'hidden',
+                                textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                textDecoration: doc.missing ? 'line-through' : 'none',
+                              }}>
                                 {doc.title}
                               </span>
+                              {doc.missing && <DeletedDocumentBadge />}
                               <button
                                 type="button"
-                                aria-label="Remove document"
+                                aria-label={doc.missing ? `Remove deleted document ${doc.title}` : 'Remove document'}
                                 onClick={() => removeFixedDoc(doc.uuid)}
                                 style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#6b7280', display: 'flex' }}
                               >
@@ -6442,8 +6459,8 @@ function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
   const inputCfg = (workflow as unknown as Record<string, unknown>)?.input_config as Record<string, unknown> | undefined
   const [triggerType, setTriggerType] = useState((inputCfg?.trigger_type as string) || 'manual')
   const [saving, setSaving] = useState(false)
-  const [fixedDocs, setFixedDocs] = useState<{ uuid: string; title: string }[]>(
-    () => ((inputCfg?.fixed_documents as { uuid: string; title: string }[]) || [])
+  const [fixedDocs, setFixedDocs] = useState<FixedDocument[]>(
+    () => ((inputCfg?.fixed_documents as FixedDocument[]) || [])
   )
 
   // Keep local UI in sync with the persisted config when the workflow
@@ -6477,11 +6494,11 @@ function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
     }
   }
 
-  const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
+  const saveFixedDocs = async (docs: FixedDocument[]) => {
     const previous = fixedDocs
     setFixedDocs(docs)  // optimistic — refresh() reconciles on success
     try {
-      await persistInputConfig({ fixed_documents: docs })
+      await persistInputConfig({ fixed_documents: docs.map(stripFixedDocumentFlags) })
     } catch (err) {
       // Roll back so the list only shows what's actually saved. Without this
       // the rejection escaped every caller (add-selected button, remove ×,
@@ -6491,7 +6508,7 @@ function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
     }
   }
 
-  const addFixedDocs = async (docs: { uuid: string; title: string }[]) => {
+  const addFixedDocs = async (docs: FixedDocument[]) => {
     const existing = new Set(fixedDocs.map(d => d.uuid))
     const merged = [...fixedDocs]
     for (const d of docs) {
@@ -6810,6 +6827,21 @@ function OutputConfigCard({
 }
 
 // Drag-and-drop / click-to-browse zone for the workflow's fixed documents.
+function DeletedDocumentBadge() {
+  return (
+    <span
+      role="status"
+      title="This document was deleted from Files. Runs will fail until it is removed here or replaced."
+      style={{
+        fontSize: 10, fontWeight: 700, color: '#b91c1c', backgroundColor: '#fee2e2',
+        border: '1px solid #fecaca', borderRadius: 999, padding: '1px 6px', whiteSpace: 'nowrap',
+      }}
+    >
+      Deleted from Files
+    </span>
+  )
+}
+
 // Accepts: (1) document rows dragged from the file browser (text/plain = uuid),
 // (2) files dropped from the OS (uploaded as new documents), (3) click → picker.
 function FixedDocumentsZone({
@@ -6818,8 +6850,8 @@ function FixedDocumentsZone({
   onRemoveDoc,
   readOnly = false,
 }: {
-  fixedDocs: { uuid: string; title: string }[]
-  onAddDocs: (docs: { uuid: string; title: string }[]) => Promise<void> | void
+  fixedDocs: FixedDocument[]
+  onAddDocs: (docs: FixedDocument[]) => Promise<void> | void
   onRemoveDoc: (uuid: string) => void
   // View-only workflows: list the pinned documents, hide every way to change them.
   readOnly?: boolean
@@ -6880,12 +6912,18 @@ function FixedDocumentsZone({
                 display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
                 borderBottom: idx < fixedDocs.length - 1 ? '1px solid #f3f4f6' : 'none',
                 fontSize: 13,
+                backgroundColor: doc.missing ? '#fef2f2' : undefined,
               }}
             >
-              <FileText style={{ width: 13, height: 13, color: '#6b7280', flexShrink: 0 }} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <FileText style={{ width: 13, height: 13, color: doc.missing ? '#b91c1c' : '#6b7280', flexShrink: 0 }} />
+              <span style={{
+                flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                color: doc.missing ? '#991b1b' : undefined,
+                textDecoration: doc.missing ? 'line-through' : 'none',
+              }}>
                 {doc.title}
               </span>
+              {doc.missing && <DeletedDocumentBadge />}
               {!readOnly && (
                 <button
                   type="button"
@@ -6894,7 +6932,7 @@ function FixedDocumentsZone({
                     background: 'none', border: 'none', cursor: 'pointer', padding: 2,
                     color: '#6b7280', display: 'flex',
                   }}
-                  aria-label={`Remove ${doc.title}`}
+                  aria-label={doc.missing ? `Remove deleted document ${doc.title}` : `Remove ${doc.title}`}
                 >
                   <X style={{ width: 14, height: 14 }} />
                 </button>

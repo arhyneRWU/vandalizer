@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel
 import datetime
 import logging
 import re
@@ -3458,3 +3459,51 @@ def _parse_json_array(text: str) -> list | None:
             pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Fixed documents: mark the ones that no longer exist
+# ---------------------------------------------------------------------------
+
+
+async def _existing_document_uuids(uuids: list[str]) -> set[str]:
+    from app.models.document import SmartDocument
+
+    if not uuids:
+        return set()
+    docs = await SmartDocument.find(
+        {"uuid": {"$in": uuids}, "soft_deleted": {"$ne": True}},
+    ).project(_UuidOnly).to_list()
+    return {d.uuid for d in docs}
+
+
+class _UuidOnly(BaseModel):
+    uuid: str
+
+
+async def annotate_missing_fixed_documents(input_config: dict | None) -> dict | None:
+    """Return *input_config* with ``missing: True`` on every fixed document
+    that has been deleted from Files (hard-deleted or retention soft-deleted).
+
+    Read-side only: the Input tab shows the saved title of a fixed document
+    and has no other way to learn the file is gone. The flag is never stored —
+    the frontend strips it when it saves the list back.
+    """
+    if not isinstance(input_config, dict):
+        return input_config
+    fixed = input_config.get("fixed_documents")
+    if not isinstance(fixed, list) or not fixed:
+        return input_config
+    uuids = [
+        (fd.get("uuid") if isinstance(fd, dict) else str(fd)) or ""
+        for fd in fixed
+    ]
+    existing = await _existing_document_uuids([u for u in uuids if u])
+    annotated = []
+    for fd, uuid in zip(fixed, uuids):
+        entry = dict(fd) if isinstance(fd, dict) else {"uuid": uuid, "title": uuid}
+        entry.pop("missing", None)
+        if uuid and uuid not in existing:
+            entry["missing"] = True
+        annotated.append(entry)
+    return {**input_config, "fixed_documents": annotated}

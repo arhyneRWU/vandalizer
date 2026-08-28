@@ -650,6 +650,41 @@ def _resolve_input_doc_uuids(workflow_doc: dict, trigger_step_data: dict) -> lis
     return doc_uuids
 
 
+def _missing_fixed_documents(db, workflow_doc: dict) -> list[str]:
+    """Titles of fixed documents (Input tab) that no longer exist.
+
+    A fixed document is configuration, not a per-run input: if it has been
+    deleted from Files the workflow is misconfigured, and the run must say so
+    rather than quietly cover fewer documents than the author set up (support
+    ticket: output covered only the selected document, run marked Completed).
+    Soft-deleted (retention) documents count as gone. ``no_input`` mode never
+    loads fixed documents, so nothing is missing there.
+    """
+    input_cfg = workflow_doc.get("input_config") or {}
+    if input_cfg.get("trigger_type") == "no_input":
+        return []
+    missing: list[str] = []
+    for fd in input_cfg.get("fixed_documents") or []:
+        uuid = (fd.get("uuid") if isinstance(fd, dict) else str(fd)) or ""
+        if not uuid:
+            continue
+        doc = db.smart_document.find_one({"uuid": uuid}, {"title": 1, "soft_deleted": 1})
+        if not doc or doc.get("soft_deleted"):
+            title = (fd.get("title") if isinstance(fd, dict) else None) or (doc or {}).get("title") or uuid
+            missing.append(title)
+    return missing
+
+
+def fixed_documents_missing_message(titles: list[str]) -> str:
+    n = len(titles)
+    return (
+        f"{n} fixed document{'s' if n != 1 else ''} configured on this workflow's Input tab "
+        f"no longer exist{'s' if n == 1 else ''}: {', '.join(titles)}. "
+        f"{'It was' if n == 1 else 'They were'} deleted from Files. Remove "
+        f"{'it' if n == 1 else 'them'} from the Input tab or add a replacement, then run again."
+    )
+
+
 def _classify_input_documents(db, workflow_doc: dict, doc_uuids: list[str]):
     """Split a run's input documents by text-extraction readiness.
 
@@ -788,6 +823,23 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     # the workflow would silently "complete" with no output. Rather than run on
     # nothing, wait for extraction (retry) when documents are still processing,
     # and fail with an actionable message when extraction has genuinely failed.
+    missing_fixed = _missing_fixed_documents(db, workflow_doc)
+    if missing_fixed:
+        # Configuration error, not a transient: no retry, no Sentry, a failed
+        # run with instructions — the same treatment as unreadable input.
+        logger.warning(
+            "Workflow %s aborted pre-flight: fixed document(s) no longer exist: %s",
+            workflow_id, missing_fixed,
+        )
+        _mark_workflow_failed(
+            db, workflow_result_id, activity_id, fixed_documents_missing_message(missing_fixed),
+            error_payload={
+                "code": "fixed_documents_missing",
+                "missing_documents": missing_fixed[:20],
+            },
+        )
+        return
+
     input_doc_uuids = _resolve_input_doc_uuids(workflow_doc, trigger_step_data)
     if input_doc_uuids:
         ready, processing, failed = _classify_input_documents(

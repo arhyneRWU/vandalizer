@@ -1506,3 +1506,49 @@ class TestBatchStatusReportsCancelled:
         assert [i["status"] for i in status["items"]] == [
             "completed", "canceled", "canceled", "queued",
         ]
+
+
+# ---------------------------------------------------------------------------
+# annotate_missing_fixed_documents — the Input tab's "Deleted from Files" flag
+# ---------------------------------------------------------------------------
+
+class TestAnnotateMissingFixedDocuments:
+    @pytest.mark.asyncio
+    async def test_marks_absent_documents_and_clears_stale_flags(self):
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.workflow_service import annotate_missing_fixed_documents
+
+        cfg = {
+            "trigger_type": "manual",
+            "fixed_documents": [
+                {"uuid": "a", "title": "Present.pdf", "missing": True},  # stale flag from an old save
+                {"uuid": "b", "title": "Gone.pdf"},
+                "c",
+            ],
+        }
+        with patch(
+            "app.services.workflow_service._existing_document_uuids",
+            new=AsyncMock(return_value={"a"}),
+        ) as lookup:
+            out = await annotate_missing_fixed_documents(cfg)
+
+        lookup.assert_awaited_once_with(["a", "b", "c"])
+        assert out["trigger_type"] == "manual"
+        assert out["fixed_documents"] == [
+            {"uuid": "a", "title": "Present.pdf"},
+            {"uuid": "b", "title": "Gone.pdf", "missing": True},
+            {"uuid": "c", "title": "c", "missing": True},
+        ]
+        assert cfg["fixed_documents"][1] == {"uuid": "b", "title": "Gone.pdf"}  # input untouched
+
+    @pytest.mark.asyncio
+    async def test_no_fixed_documents_is_a_no_op_without_a_lookup(self):
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.workflow_service import annotate_missing_fixed_documents
+
+        with patch("app.services.workflow_service._existing_document_uuids", new=AsyncMock()) as lookup:
+            assert await annotate_missing_fixed_documents({"trigger_type": "manual"}) == {"trigger_type": "manual"}
+            assert await annotate_missing_fixed_documents(None) is None
+        lookup.assert_not_awaited()
