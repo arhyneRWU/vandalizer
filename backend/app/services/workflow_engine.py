@@ -22,6 +22,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.services.extraction_engine import ExtractionEngine
+from app.services.extraction_sources import SOURCE_KEY
 from app.services.form_fill import (  # noqa: F401  (form_value_is_missing is re-exported)
     _FORM_FREEFORM_UNFILLED_RE,
     form_value_is_missing,
@@ -126,6 +127,9 @@ def format_extraction_results(data) -> str:
             if len(items) > 1:
                 lines.append(f"#### Result {idx}")
             for key, value in item.items():
+                if key == SOURCE_KEY:
+                    # Provenance sidecar, not an extracted field.
+                    continue
                 value_str = _stringify_value(value)
                 lines.append(f"- **{key}**: {value_str}")
             lines.append("")
@@ -236,14 +240,35 @@ def _build_combined_context(data: dict, inputs: dict, sources: list[str]):
     return "\n\n".join(f"=== {label} ===\n{content}" for label, content in sections)
 
 
-def _build_extraction_texts(data: dict, inputs: dict, sources: list[str]) -> list[str]:
-    """Build a list of texts for ExtractionEngine, one entry per source/document.
+def _normalize_doc_meta(meta) -> dict:
+    """A source-resolution metadata entry, whatever the caller had on hand.
+
+    A text with no document behind it (a previous step's output) still gets an
+    entry so the list stays index-aligned with the texts; its quote is verified
+    against that text and simply resolves to no page.
+    """
+    if not isinstance(meta, dict):
+        return {"uuid": None, "title": None, "text_markers": []}
+    return {
+        "uuid": meta.get("uuid"),
+        "title": meta.get("title"),
+        "text_markers": meta.get("text_markers") or [],
+    }
+
+
+def _build_extraction_inputs(
+    data: dict, inputs: dict, sources: list[str],
+) -> list[tuple[str, dict]]:
+    """Texts for ExtractionEngine, each paired with the metadata that resolves
+    a supporting quote to a document and page.
 
     Each non-empty source contributes one entry, except `workflow_documents`
     which expands to one entry per loaded document (preserving existing
-    multi-doc extraction behavior).
+    multi-doc extraction behavior). Building both in one pass is what keeps
+    `doc_metadata` index-aligned with `doc_texts` — the engine pairs them by
+    position, so a drift between the two mislabels every page it reports.
     """
-    texts: list[str] = []
+    pairs: list[tuple[str, dict]] = []
     for src in sources:
         if src == "step_input":
             payload = inputs.get("output")
@@ -256,16 +281,23 @@ def _build_extraction_texts(data: dict, inputs: dict, sources: list[str]) -> lis
             else:
                 text = _stringify_context(payload)
             if text:
-                texts.append(text)
+                pairs.append((text, _normalize_doc_meta(None)))
         elif src == "select_document":
             doc = data.get("selected_doc_text") or ""
             if doc:
-                texts.append(doc)
+                pairs.append((doc, _normalize_doc_meta(data.get("selected_doc_meta"))))
         elif src == "workflow_documents":
-            for dt in data.get("doc_texts") or []:
+            metas = data.get("doc_metas") or []
+            for i, dt in enumerate(data.get("doc_texts") or []):
                 if dt:
-                    texts.append(dt)
-    return texts
+                    meta = metas[i] if i < len(metas) else None
+                    pairs.append((dt, _normalize_doc_meta(meta)))
+    return pairs
+
+
+def _build_extraction_texts(data: dict, inputs: dict, sources: list[str]) -> list[str]:
+    """The texts half of :func:`_build_extraction_inputs`."""
+    return [text for text, _ in _build_extraction_inputs(data, inputs, sources)]
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +363,15 @@ def llm_chat_model(model: str, prompt: str, data=None, progress_callback=None,
 def data_extraction_model(model: str, keys: list[str], doc_texts: list[str] | None = None,
                           full_text: str | None = None, system_config_doc: dict | None = None,
                           usage_acc: UsageAccumulator | None = None,
-                          field_metadata: list[dict] | None = None):
-    """Run extraction and return {raw, formatted}. Sync context."""
+                          field_metadata: list[dict] | None = None,
+                          capture_sources: bool = False,
+                          doc_metadata: list[dict] | None = None):
+    """Run extraction and return {raw, formatted}. Sync context.
+
+    ``capture_sources`` attaches the verified supporting passage and page for
+    each field under ``SOURCE_KEY`` on every entity, the same provenance the
+    interactive extraction run produces.
+    """
     engine = ExtractionEngine(system_config_doc=system_config_doc)
     output = engine.extract(
         extract_keys=keys,
@@ -340,6 +379,8 @@ def data_extraction_model(model: str, keys: list[str], doc_texts: list[str] | No
         full_text=full_text,
         doc_texts=doc_texts,
         field_metadata=field_metadata,
+        capture_sources=capture_sources,
+        doc_metadata=doc_metadata,
     )
     if usage_acc:
         usage_acc.add(engine.tokens_in, engine.tokens_out)
@@ -558,7 +599,8 @@ class ExtractionNode(Node):
         self.report_progress(f"Running {task_label}" if task_label else "Extraction running")
 
         sources = _resolve_input_sources(self.data, prev_step_name)
-        texts = _build_extraction_texts(self.data, inputs, sources)
+        pairs = _build_extraction_inputs(self.data, inputs, sources)
+        texts = [text for text, _ in pairs]
 
         # Use `doc_texts` whenever the user picked a doc-list source or has
         # more than one text; otherwise pass a single string via `full_text`.
@@ -569,6 +611,12 @@ class ExtractionNode(Node):
             kwargs["doc_texts"] = texts
         elif texts:
             kwargs["full_text"] = texts[0]
+
+        # Same provenance the interactive run produces: a workflow or overnight
+        # automation is the least-supervised path there is, so it is the one
+        # that most needs each value to carry the passage it came from.
+        kwargs["capture_sources"] = True
+        kwargs["doc_metadata"] = [meta for _, meta in pairs]
 
         # Carry per-field validation / optional designations resolved from the
         # saved set (see workflow_tasks resolution) so enum and optional rules
