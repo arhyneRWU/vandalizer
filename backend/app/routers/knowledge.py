@@ -20,6 +20,7 @@ from app.models.library import LibraryItemKind
 from app.models.verification import VerifiedItemMetadata
 from app.services import organization_service
 from app.schemas.knowledge import (
+    KBSourceCurrency,
     AddDocumentsRequest,
     AddFolderRequest,
     AddUrlsRequest,
@@ -40,6 +41,7 @@ from app.schemas.knowledge import (
     UpdateKBRequest,
     UpdateSourceRequest,
 )
+from app.utils.kb_source_currency import derive_source_currency
 from app.services import access_control
 from app.services import knowledge_service as svc
 from app.services.name_conflicts import DuplicateNameError
@@ -280,6 +282,7 @@ def _source_response(s, *, document_title: str | None = None) -> KBSourceRespons
         truncated=bool(getattr(s, "truncated", False)),
         created_at=s.created_at.isoformat() if s.created_at else None,
         processed_at=_iso_or_none(getattr(s, "processed_at", None)),
+        currency=KBSourceCurrency(**derive_source_currency(s)),
     )
 
 

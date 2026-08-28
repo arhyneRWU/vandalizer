@@ -429,7 +429,7 @@ def _render_workflow_output(status: dict, format: str, parse_structured: bool) -
     # its bytes back untouched under its own filename, ignoring the requested format.
     if isinstance(output_data, dict) and output_data.get("type") == "file_download":
         file_bytes = base64.b64decode(output_data["data_b64"])
-        media_type_map = {"pdf": "application/pdf", "csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "zip": "application/zip"}
+        media_type_map = {"pdf": "application/pdf", "csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "json": "application/json", "zip": "application/zip"}
         file_type = output_data.get("file_type", "")
         media_type = media_type_map.get(file_type, "application/octet-stream")
         return file_bytes, media_type, file_type or "bin", output_data.get("filename", "output")
