@@ -34,7 +34,8 @@ import {
 } from '../../api/extractions'
 import { RunHistoryTab } from './RunHistoryTab'
 import { ApiError } from '../../api/client'
-import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap } from '../../api/extractions'
+import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap, FieldSupportState } from '../../api/extractions'
+import { fieldSupportState } from '../../api/extractions'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
 import { ExtractionAutovalidatePanel } from '../extractions/ExtractionAutovalidatePanel'
@@ -335,6 +336,27 @@ export function ExtractionEditorPanel() {
       .catch(() => toast('Failed to copy to clipboard', 'error'))
 
     const src: ExtractionFieldSource | undefined = resultSources[field]
+    const support = src ? fieldSupportState(src) : undefined
+    if (support === 'quote_unsupported' && src?.quote) {
+      // The passage is real, so still take the reader to it — seeing the
+      // sentence that does NOT say what the value claims is the fastest way
+      // to catch the error.
+      const highlight = {
+        terms: [src.quote],
+        page: src.page ?? null,
+        pageApproximate: src.page_approximate ?? false,
+      }
+      if (src.document_uuid) {
+        viewDocument(src.document_uuid, src.document_title ?? 'Document', highlight)
+      } else {
+        setHighlightTerms(highlight.terms, highlight.page, highlight.pageApproximate)
+      }
+      toast(
+        "The cited passage doesn't contain this value — check it before relying on it",
+        'error',
+      )
+      return
+    }
     if (src && src.verified && src.quote) {
       const highlight = {
         terms: [src.quote],
@@ -1111,6 +1133,47 @@ function useRotatingTip(running: boolean, config: ExtractionConfig, docCount: nu
   return running && applicable.length > 0 ? applicable[tipIdx % applicable.length].text : null
 }
 
+/** How each support state renders beside a value.
+ *
+ * Four states, not two. The old badge had only "traced to p. N" and
+ * "no source", which forced the two genuinely different failures —
+ * "we could not find the passage" and "we found the passage and it does not
+ * say this" — to share a colour with each other or with success. The second
+ * is the hallucination signal and gets its own, loudest treatment.
+ */
+const SUPPORT_BADGES: Record<
+  FieldSupportState,
+  { label: (locator: string | null) => string; title: string; color: string; background: string }
+> = {
+  supported: {
+    label: (locator) => locator ?? 'sourced',
+    title: 'This value appears in the cited passage. Click to show it in the document',
+    color: '#1d4ed8',
+    background: '#eff6ff',
+  },
+  quote_unsupported: {
+    label: () => "quote doesn't match",
+    title:
+      'The cited passage is real, but this value does not appear in it. Check it before relying on it',
+    color: '#b91c1c',
+    background: '#fee2e2',
+  },
+  unassessed: {
+    label: (locator) => (locator ? `${locator} · unconfirmed` : 'unconfirmed'),
+    title:
+      'A passage was located, but this value is a judgement about it rather than a quote from it, so it could not be confirmed automatically. Click to read the passage',
+    color: '#4b5563',
+    background: '#f3f4f6',
+  },
+  unverified: {
+    label: () => 'no source',
+    title:
+      "This value couldn't be traced back to the document — double-check it before relying on it",
+    color: '#92400e',
+    background: '#fef3c7',
+  },
+}
+
 function DesignTab({
   items,
   itemsLoading,
@@ -1608,15 +1671,18 @@ function DesignTab({
                 {resultVal !== undefined && (() => {
                   const src = sources[item.searchphrase]
                   const clickable = !!resultVal && resultVal !== 'N/A'
-                  const hasSource = !!src?.verified && !!src?.quote
-                  const noSource = !!src && !hasSource
+                  // The badge keys off support, not `verified`. A located quote
+                  // proves the passage exists, not that it says what the value
+                  // claims — certifying the weaker proposition is how a
+                  // hallucinated figure earned a blue "traced" chip.
+                  const support = src ? fieldSupportState(src) : undefined
+                  const badge = support ? SUPPORT_BADGES[support] : undefined
+                  const locator = formatPageLocator(src?.page, src?.page_approximate)
                   const clickTitle = !clickable
                     ? undefined
-                    : hasSource
-                      ? `Click to show the source passage${formatPageLocator(src?.page, src?.page_approximate) ? ` (${formatPageLocator(src?.page, src?.page_approximate)})` : ''}`
-                      : noSource
-                        ? 'No source found for this value — click to copy'
-                        : 'Click to highlight in PDF'
+                    : badge
+                      ? `${badge.title}${locator && support !== 'unverified' ? ` (${locator})` : ''}`
+                      : 'Click to highlight in PDF'
                   return (
                     <div
                       onClick={() => {
@@ -1643,25 +1709,16 @@ function DesignTab({
                       title={clickTitle}
                     >
                       {resultVal}
-                      {clickable && hasSource && src?.page != null && (
-                        <span style={{
-                          marginLeft: 6, fontSize: 10, fontWeight: 500, color: '#1d4ed8',
-                          background: '#eff6ff', borderRadius: 3, padding: '1px 4px',
-                          whiteSpace: 'nowrap',
-                        }}>
-                          {formatPageLocator(src.page, src.page_approximate)}
-                        </span>
-                      )}
-                      {clickable && noSource && (
+                      {clickable && badge && (
                         <span
-                          title="This value couldn't be traced back to the document — double-check it before relying on it"
+                          title={badge.title}
                           style={{
-                            marginLeft: 6, fontSize: 10, fontWeight: 500, color: '#92400e',
-                            background: '#fef3c7', borderRadius: 3, padding: '1px 4px',
-                            whiteSpace: 'nowrap',
+                            marginLeft: 6, fontSize: 10, fontWeight: 500,
+                            color: badge.color, background: badge.background,
+                            borderRadius: 3, padding: '1px 4px', whiteSpace: 'nowrap',
                           }}
                         >
-                          no source
+                          {badge.label(locator)}
                         </span>
                       )}
                     </div>

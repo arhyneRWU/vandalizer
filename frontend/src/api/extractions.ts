@@ -110,12 +110,49 @@ export interface ExtractionFieldSource {
    * mapping of the prose rather than a span of it); absent on results
    * extracted before this was recorded.
    *
-   * Recorded but not yet surfaced: the badge still keys off `verified` until
-   * the true/false distribution across real extractions is known.
+   * Surfaced via `support` / `fieldSupportState` — the badge keys off this,
+   * not off `verified`, which certifies only that the passage exists.
    */
   value_supported?: boolean | null
   /** How `value_supported` was decided, for measuring that distribution. */
   value_support_method?: string
+  /**
+   * The reader-facing collapse of (`verified`, `value_supported`), computed by
+   * the backend so every surface renders the same judgement. Absent on results
+   * extracted before it existed — use `fieldSupportState` rather than reading
+   * this directly.
+   */
+  support?: FieldSupportState
+}
+
+/**
+ * How much a value's cited passage actually backs it.
+ *
+ * - `supported` — the value itself appears in a passage located in the document.
+ * - `quote_unsupported` — the passage is real, the value is not in it. This is
+ *   the hallucination signal, and the reason the badge cannot key off
+ *   `verified` alone: a fabricated award amount carrying any real sentence from
+ *   the budget section is `verified`.
+ * - `unassessed` — the passage is real but the value is not the kind of thing
+ *   that can be found in it (an enum answer that maps the prose rather than
+ *   quoting it). Traceable, not confirmable.
+ * - `unverified` — no passage could be located. Nothing is traced.
+ */
+export type FieldSupportState =
+  | 'supported'
+  | 'quote_unsupported'
+  | 'unassessed'
+  | 'unverified'
+
+/** `support` for a source entry, deriving it for results written before the
+ * field existed. An unmeasured value reads as `unassessed`, never `supported`. */
+export function fieldSupportState(src?: ExtractionFieldSource | null): FieldSupportState {
+  if (!src) return 'unverified'
+  if (src.support) return src.support
+  if (!src.verified) return 'unverified'
+  if (src.value_supported === true) return 'supported'
+  if (src.value_supported === false) return 'quote_unsupported'
+  return 'unassessed'
 }
 
 export type ExtractionSourceMap = Record<string, ExtractionFieldSource>
