@@ -429,7 +429,7 @@ def _render_workflow_output(status: dict, format: str, parse_structured: bool) -
     # its bytes back untouched under its own filename, ignoring the requested format.
     if isinstance(output_data, dict) and output_data.get("type") == "file_download":
         file_bytes = base64.b64decode(output_data["data_b64"])
-        media_type_map = {"pdf": "application/pdf", "csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "json": "application/json", "zip": "application/zip"}
+        media_type_map = {"pdf": "application/pdf", "csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "json": "application/json", "zip": "application/zip"}
         file_type = output_data.get("file_type", "")
         media_type = media_type_map.get(file_type, "application/octet-stream")
         return file_bytes, media_type, file_type or "bin", output_data.get("filename", "output")
@@ -769,6 +769,11 @@ async def get_workflow(
     wf = await svc.get_workflow(workflow_id, user=user, share_token=share_token)
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    # The Input tab lists fixed documents by their saved title; tell it which
+    # ones have since been deleted from Files so it can say so.
+    input_cfg = await svc.annotate_missing_fixed_documents(wf.get("input_config"))
+    if input_cfg is not None:
+        wf = {**wf, "input_config": input_cfg}
     return await _workflow_response_from_dict(wf)
 
 
