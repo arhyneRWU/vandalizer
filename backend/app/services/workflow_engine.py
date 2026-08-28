@@ -658,9 +658,18 @@ class WebsiteNode(Node):
         self.data = data
 
     def process(self, inputs):
-        url = self.data.get("url", "")
+        url = (self.data.get("url") or "").strip()
         if not url:
-            return {"output": "", "input": inputs.get("output"), "step_name": self.name}
+            # A step with nothing to fetch used to return "" and let the run
+            # finish Completed — the only trace was the next step's output
+            # missing the page. It is a configuration error: the engine turns
+            # ``error`` into a failed run naming this step.
+            error = (
+                "Add Website is not configured: no URL. Open the step and enter "
+                "the address of the page to fetch."
+            )
+            return {"output": "", "input": inputs.get("output"), "step_name": self.name,
+                    "error": error}
 
         from app.services.web_fetcher import fetch_url_sync
 
@@ -1088,8 +1097,16 @@ class APICallNode(Node):
         except templating.TemplateError as e:
             return self._error_result(str(e), inputs)
         body_raw = self.data.get("body", "")
-        if not url:
-            return {"output": "", "input": inputs.get("output"), "step_name": self.name}
+        # ``url`` may be None when the step was written through the API;
+        # ``render`` passes non-strings through unchanged.
+        if not (url or "").strip():
+            # Same defect as Add Website: an unconfigured step must not pass
+            # as a successful empty call.
+            return self._error_result(
+                "API Call is not configured: no URL. Open the step and enter the "
+                "endpoint to call.",
+                inputs,
+            )
 
         from app.utils.url_validation import validate_outbound_url
 

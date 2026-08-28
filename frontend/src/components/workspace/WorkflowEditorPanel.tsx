@@ -2449,6 +2449,25 @@ function ExtractionTagInput({ tags, onChange }: { tags: string[]; onChange: (tag
 // Task edit modal (with Design/Input/Output sub-tabs + test step)
 // ---------------------------------------------------------------------------
 
+/**
+ * The message to show instead of saving when a step is missing a field it
+ * cannot run without, or null when it can be saved. A step saved blank used
+ * to run "successfully" and hand the next step nothing — the run finished
+ * Completed and the only trace was the missing content downstream. The
+ * backend now fails such a run, but refusing the save is where the author
+ * actually is when the mistake happens.
+ */
+export function requiredFieldMessage(taskName: string, data: Record<string, unknown>): string | null {
+  const text = (key: string) => (typeof data[key] === 'string' ? (data[key] as string) : '').trim()
+  if (taskName === 'AddWebsite' && !text('url')) {
+    return 'Enter the URL of the page to fetch before saving this step.'
+  }
+  if (taskName === 'APINode' && !text('url')) {
+    return 'Enter the endpoint URL before saving this step.'
+  }
+  return null
+}
+
 // Explain a failed input/output-config save. The backend answers PATCH on a
 // workflow the viewer can see but not manage (shared or verified) with a 404,
 // so surfacing the raw "Workflow not found" would read as if the workflow
@@ -2719,6 +2738,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   const [testMessage, setTestMessage] = useState('')
   const [testResult, setTestResult] = useState<unknown>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  // Set by handleUpdate when a required field is blank; cleared on the next save attempt.
+  const [saveError, setSaveError] = useState<string | null>(null)
   const testIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const testMsgRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -2775,6 +2796,12 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
 
   const handleUpdate = async () => {
     if (promptMissing) return
+    setSaveError(null)
+    const missing = requiredFieldMessage(task.name, taskData)
+    if (missing) {
+      setSaveError(missing)
+      return
+    }
     setSaving(true)
     try {
       const finalData = {
@@ -3559,17 +3586,19 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
             {task.name === 'AddWebsite' && (
               <div>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-                  URL
+                  URL <span style={{ color: '#dc2626' }} aria-hidden="true">*</span>
                 </label>
                 <input
                   aria-label="URL"
+                  aria-required="true"
+                  aria-invalid={saveError ? true : undefined}
                   type="text"
                   value={getTextValue('url')}
                   onChange={e => setTextValue('url', e.target.value)}
                   placeholder="https://example.com"
                   style={{
                     width: '100%', padding: '8px 12px', fontSize: 13,
-                    fontFamily: 'inherit', border: '1px solid #d1d5db', borderRadius: 6,
+                    fontFamily: 'inherit', border: `1px solid ${saveError ? '#dc2626' : '#d1d5db'}`, borderRadius: 6,
                     outline: 'none', boxSizing: 'border-box',
                   }}
                 />
@@ -4899,6 +4928,16 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
               transition: 'width 0.5s ease',
             }} />
           </div>
+        </div>
+      )}
+
+      {saveError && (
+        <div role="alert" style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '8px 20px',
+          borderTop: '1px solid #e5e7eb', fontSize: 13, color: '#dc2626', fontWeight: 600,
+        }}>
+          <XCircle style={{ width: 14, height: 14, flexShrink: 0 }} />
+          {saveError}
         </div>
       )}
 
