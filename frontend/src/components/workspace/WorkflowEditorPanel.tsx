@@ -50,6 +50,7 @@ import { MAX_NAME_LENGTH, normalizeName } from '../../utils/nameValidation'
 import { computeReorderedIds } from '../../utils/reorder'
 import { formatPageLocator } from '../../utils/pageLocator'
 import type { Workflow, WorkflowStep, WorkflowTask, WorkflowStatus, WorkflowCitation, ModelInfo, SearchSetItem } from '../../types/workflow'
+import { describeUnfinishedSteps, findUnfinishedSteps, promptTaskIsEmpty } from './workflowStepIssues'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
@@ -566,9 +567,17 @@ export function WorkflowEditorPanel() {
   // so a workflow carrying only that one reads as empty and is treated as
   // such here too.
   const hasSteps = (workflow?.steps ?? []).some(s => !(s.name === 'Document' && s.tasks.length === 0))
+  // A step that can't do anything (a Prompt task with no instructions) used
+  // to run anyway: the engine sent a placeholder to the model and the run
+  // completed green with "The context does not contain a prompt to enter."
+  // as its deliverable. The engine now fails such a step; block the run here
+  // so the user is pointed at the step instead of at a failed run.
+  const unfinishedSteps = findUnfinishedSteps(workflow?.steps ?? [])
+  const unfinishedStepsMessage = describeUnfinishedSteps(unfinishedSteps)
+  const runBlocked = runner.running || missingInput || !hasSteps || unfinishedSteps.length > 0
 
   const handleRun = async () => {
-    if (!openWorkflowId || !hasSteps) return
+    if (!openWorkflowId || !hasSteps || unfinishedSteps.length > 0) return
 
     try {
       if (isNoInput) {
@@ -970,7 +979,7 @@ export function WorkflowEditorPanel() {
           </>
         )}
 
-        {activeTab === 'input' && <InputTab workflow={workflow} openWorkflowId={openWorkflowId} onRefresh={refresh} />}
+        {activeTab === 'input' && <InputTab workflow={workflow} openWorkflowId={openWorkflowId} canManage={canManage} onRefresh={refresh} />}
         {activeTab === 'validate' && (
           hasSteps ? (
             <ValidateTab
@@ -1106,6 +1115,12 @@ export function WorkflowEditorPanel() {
             No input required — runs directly
           </div>
         )}
+        {hasSteps && unfinishedStepsMessage && (
+          <div role="alert" style={{ fontSize: 12, color: '#92400e', marginBottom: 10, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+            <AlertTriangle style={{ width: 12, height: 12, flexShrink: 0, marginTop: 2 }} />
+            <span>{unfinishedStepsMessage}</span>
+          </div>
+        )}
         {runner.running && (runner.batchId || runner.sessionId) ? (
           // Run in progress (single or batch) — offer an active STOP (red,
           // matches the app's destructive-action convention; same geometry as
@@ -1138,15 +1153,17 @@ export function WorkflowEditorPanel() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={runner.running || missingInput || !hasSteps}
-            title={!hasSteps ? 'Add at least one step before running this workflow' : undefined}
+            disabled={runBlocked}
+            title={!hasSteps
+              ? 'Add at least one step before running this workflow'
+              : unfinishedStepsMessage ?? undefined}
             style={{
               width: '100%', padding: '12px 16px', fontSize: 14, fontWeight: 700,
               fontFamily: 'inherit', borderRadius: 'var(--ui-radius, 8px)', border: 'none',
               backgroundColor: 'var(--highlight-color, #eab308)',
               color: 'var(--highlight-text-color, #000)',
-              cursor: runner.running || missingInput || !hasSteps ? 'not-allowed' : 'pointer',
-              opacity: (missingInput || !hasSteps) && !runner.running ? 0.5 : 1,
+              cursor: runBlocked ? 'not-allowed' : 'pointer',
+              opacity: runBlocked && !runner.running ? 0.5 : 1,
               textTransform: 'uppercase', letterSpacing: '0.05em',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}
@@ -2005,7 +2022,23 @@ function EditStepOverlay({
                   <Icon style={{ width: 16, height: 16, color }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#202124' }}>{(task.data as Record<string, unknown>)?.name as string || task.name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#202124', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{(task.data as Record<string, unknown>)?.name as string || task.name}</span>
+                    {promptTaskIsEmpty(task.name, task.data) && (
+                      <span
+                        title="This step has no prompt — open it and add instructions"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          fontSize: 10, fontWeight: 700, letterSpacing: '0.03em',
+                          padding: '1px 6px', borderRadius: 4,
+                          color: '#92400e', backgroundColor: '#fef3c7',
+                        }}
+                      >
+                        <AlertTriangle style={{ width: 10, height: 10 }} />
+                        NO PROMPT
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 11, color: '#6b7280', marginTop: 1 }}>
                     {task.name === 'Extraction' ? 'Extraction'
                       : task.name === 'Prompt' ? 'LLM prompt task'
@@ -2435,6 +2468,17 @@ export function requiredFieldMessage(taskName: string, data: Record<string, unkn
   return null
 }
 
+// Explain a failed input/output-config save. The backend answers PATCH on a
+// workflow the viewer can see but not manage (shared or verified) with a 404,
+// so surfacing the raw "Workflow not found" would read as if the workflow
+// vanished — say what actually happened instead.
+function describeConfigSaveError(err: unknown, what: string): string {
+  if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+    return `Couldn't save ${what} — you don't have permission to edit this workflow. Save a copy to your library to make an editable version.`
+  }
+  return err instanceof Error && err.message ? err.message : `Couldn't save ${what}. Please try again.`
+}
+
 function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, onSave, onRefreshWorkflow, canManage }: {
   task: WorkflowTask
   selectedDocUuids: string[]
@@ -2446,6 +2490,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   canManage: boolean
 }) {
   const { user } = useAuth()
+  const { toast } = useToast()
   const { selectedDocNames } = useWorkspace()
   const [taskData, setTaskData] = useState<Record<string, unknown>>({ ...task.data })
   const [saving, setSaving] = useState(false)
@@ -2536,22 +2581,27 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
 
   // Save fixed documents to workflow input_config
   const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
-    setFixedDocs(docs)
-    if (workflowId) {
+    const previous = fixedDocs
+    setFixedDocs(docs)  // optimistic — refresh reconciles on success
+    if (!workflowId) return
+    try {
       await updateWorkflow(workflowId, {
         input_config: { ...inputCfg, fixed_documents: docs },
       })
       onRefreshWorkflow()
+    } catch (err) {
+      setFixedDocs(previous)
+      toast(describeConfigSaveError(err, 'fixed documents'), 'error')
     }
   }
 
   const addFixedDoc = (doc: { uuid: string; title: string }) => {
     if (fixedDocs.some(d => d.uuid === doc.uuid)) return
-    saveFixedDocs([...fixedDocs, doc])
+    void saveFixedDocs([...fixedDocs, doc])
   }
 
   const removeFixedDoc = (uuid: string) => {
-    saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
+    void saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
   }
 
   const handleFileUpload = async (file: File) => {
@@ -2738,7 +2788,14 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
     }
   }, [])
 
+  // The same condition that disables Improve. Update, Test Step and Run all
+  // used to ignore it, so an empty Prompt step saved without a word and then
+  // ran against a hidden placeholder, completing green with nonsense.
+  const promptMissing = promptTaskIsEmpty(task.name, taskData)
+  const PROMPT_MISSING_HINT = 'This step needs a prompt before it can be saved, tested, or run.'
+
   const handleUpdate = async () => {
+    if (promptMissing) return
     setSaveError(null)
     const missing = requiredFieldMessage(task.name, taskData)
     if (missing) {
@@ -2763,7 +2820,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   const handleTestStep = async () => {
-    if (selectedDocUuids.length === 0) return
+    if (selectedDocUuids.length === 0 || promptMissing) return
     setTesting(true)
     setTestProgress(0)
     setTestResult(null)
@@ -3344,6 +3401,15 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                       lineHeight: 1.5,
                     }}
                   />
+                  {promptMissing && (
+                    <div role="status" style={{
+                      marginTop: 8, display: 'flex', alignItems: 'center', gap: 6,
+                      fontSize: 12, color: '#92400e',
+                    }}>
+                      <AlertTriangle style={{ width: 12, height: 12, flexShrink: 0 }} />
+                      {PROMPT_MISSING_HINT}
+                    </div>
+                  )}
                   {improveError && (
                     <div role="alert" style={{
                       marginTop: 8, padding: '8px 12px', background: '#fef2f2',
@@ -4883,14 +4949,14 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         {TEST_STEP_SUPPORTED_TYPES.has(task.name) && (
           <button
             onClick={handleTestStep}
-            disabled={testing || selectedDocUuids.length === 0}
-            title={TEST_STEP_TOOLTIP}
+            disabled={testing || selectedDocUuids.length === 0 || promptMissing}
+            title={promptMissing ? PROMPT_MISSING_HINT : TEST_STEP_TOOLTIP}
             style={{
               flex: 1, padding: '10px 16px', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
               border: '1px solid #d1d5db', borderRadius: 6, backgroundColor: '#fff',
-              cursor: testing || selectedDocUuids.length === 0 ? 'not-allowed' : 'pointer',
+              cursor: testing || selectedDocUuids.length === 0 || promptMissing ? 'not-allowed' : 'pointer',
               color: '#374151',
-              opacity: testing || selectedDocUuids.length === 0 ? 0.5 : 1,
+              opacity: testing || selectedDocUuids.length === 0 || promptMissing ? 0.5 : 1,
             }}
           >
             {testing ? 'Testing...' : 'Test Step'}
@@ -4899,14 +4965,15 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         {canManage ? (
           <button
             onClick={handleUpdate}
-            disabled={saving}
+            disabled={saving || promptMissing}
+            title={promptMissing ? PROMPT_MISSING_HINT : undefined}
             style={{
               flex: 1, padding: '10px 16px', fontSize: 13, fontWeight: 700, fontFamily: 'inherit',
               border: 'none', borderRadius: 6,
               backgroundColor: 'var(--highlight-color, #eab308)',
               color: 'var(--highlight-text-color, #000)',
-              cursor: saving ? 'not-allowed' : 'pointer',
-              opacity: saving ? 0.6 : 1,
+              cursor: saving || promptMissing ? 'not-allowed' : 'pointer',
+              opacity: saving || promptMissing ? 0.6 : 1,
             }}
           >
             {saving ? 'Updating...' : 'Update'}
@@ -5961,9 +6028,12 @@ function BrowserAutomationDesign({ taskData, setTextValue, getTextValue, setTask
 // ---------------------------------------------------------------------------
 
 
-function InputTab({ workflow, openWorkflowId, onRefresh }: {
+const VIEW_ONLY_HINT = 'This workflow is view-only. Save a copy to your library to change its input and output settings.'
+
+function InputTab({ workflow, openWorkflowId, canManage, onRefresh }: {
   workflow: Workflow
   openWorkflowId: string | null
+  canManage: boolean
   onRefresh: () => void
 }) {
   const { toast } = useToast()
@@ -5997,24 +6067,26 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
     try {
       await persistInputConfig({ trigger_type: value })
     } catch (err) {
-      // Roll the dropdown back so it reflects what's actually saved, and say
-      // why. The usual cause is editing a verified/shared workflow you don't
-      // have manage rights on — duplicate it first to get an editable copy.
+      // Roll the dropdown back so it reflects what's actually saved, and say why.
       setTriggerType(previous)
-      toast(
-        err instanceof Error && err.message
-          ? err.message
-          : "Couldn't change the input type — you may not have permission to edit this workflow. Duplicate it to make an editable copy.",
-        'error',
-      )
+      toast(describeConfigSaveError(err, 'the input type'), 'error')
     } finally {
       setSaving(false)
     }
   }
 
   const saveFixedDocs = async (docs: { uuid: string; title: string }[]) => {
-    setFixedDocs(docs)
-    await persistInputConfig({ fixed_documents: docs })
+    const previous = fixedDocs
+    setFixedDocs(docs)  // optimistic — refresh() reconciles on success
+    try {
+      await persistInputConfig({ fixed_documents: docs })
+    } catch (err) {
+      // Roll back so the list only shows what's actually saved. Without this
+      // the rejection escaped every caller (add-selected button, remove ×,
+      // drop zone) as an unhandled promise rejection.
+      setFixedDocs(previous)
+      toast(describeConfigSaveError(err, 'fixed documents'), 'error')
+    }
   }
 
   const addFixedDocs = async (docs: { uuid: string; title: string }[]) => {
@@ -6030,7 +6102,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
   }
 
   const removeFixedDoc = (uuid: string) => {
-    saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
+    void saveFixedDocs(fixedDocs.filter(d => d.uuid !== uuid))
   }
 
   return (
@@ -6038,6 +6110,17 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
       <div style={{ fontSize: 14, fontWeight: 600, color: '#202124', marginBottom: 16 }}>
         Input Configuration
       </div>
+      {!canManage && (
+        <div
+          role="note"
+          style={{
+            fontSize: 12, color: '#6b7280', marginBottom: 16, padding: '8px 12px',
+            border: '1px solid #e5e7eb', borderRadius: 6, backgroundColor: '#f9fafb',
+          }}
+        >
+          {VIEW_ONLY_HINT}
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {/* Input type selector */}
         <div>
@@ -6046,7 +6129,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
             aria-label="Input type"
             value={triggerType}
             onChange={e => handleTriggerChange(e.target.value)}
-            disabled={saving}
+            disabled={saving || !canManage}
             style={{
               width: '100%', fontSize: 13, fontFamily: 'inherit',
               border: '1px solid #d1d5db', borderRadius: 6, padding: '8px 12px',
@@ -6074,6 +6157,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
               fixedDocs={fixedDocs}
               onAddDocs={addFixedDocs}
               onRemoveDoc={removeFixedDoc}
+              readOnly={!canManage}
             />
           </div>
         )}
@@ -6105,6 +6189,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
                 fixedDocs={fixedDocs}
                 onAddDocs={addFixedDocs}
                 onRemoveDoc={removeFixedDoc}
+                readOnly={!canManage}
               />
             </div>
           </>
@@ -6134,6 +6219,7 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
       <OutputConfigCard
         workflow={workflow}
         openWorkflowId={openWorkflowId}
+        canManage={canManage}
         onRefresh={onRefresh}
       />
     </div>
@@ -6148,12 +6234,15 @@ function InputTab({ workflow, openWorkflowId, onRefresh }: {
 function OutputConfigCard({
   workflow,
   openWorkflowId,
+  canManage,
   onRefresh,
 }: {
   workflow: Workflow
   openWorkflowId: string | null
+  canManage: boolean
   onRefresh: () => void
 }) {
+  const { toast } = useToast()
   const oc = (workflow as unknown as Record<string, unknown>)?.output_config as Record<string, unknown> | undefined
   const storage = (oc?.storage || {}) as Record<string, unknown>
   const enabled = (storage.enabled as boolean) || false
@@ -6175,14 +6264,20 @@ function OutputConfigCard({
     if (!openWorkflowId) return
     const current = (workflow as unknown as Record<string, unknown>)?.output_config as Record<string, unknown> | undefined
     const nextStorage = { ...storage, ...patch }
-    await updateWorkflow(openWorkflowId, {
-      output_config: { ...(current || {}), storage: nextStorage },
-    })
-    onRefresh()
+    try {
+      await updateWorkflow(openWorkflowId, {
+        output_config: { ...(current || {}), storage: nextStorage },
+      })
+      onRefresh()
+    } catch (err) {
+      // Controls render from the persisted workflow, so there's nothing to roll
+      // back — just say why the change didn't stick.
+      toast(describeConfigSaveError(err, 'the output settings'), 'error')
+    }
   }
 
   return (
-    <div style={{ padding: 16, backgroundColor: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+    <fieldset disabled={!canManage} style={{ padding: 16, backgroundColor: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb', margin: 0, minWidth: 0 }}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: enabled ? 12 : 0 }}>
         <input
           type="checkbox"
@@ -6308,7 +6403,7 @@ function OutputConfigCard({
           </label>
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }
 
@@ -6319,10 +6414,13 @@ function FixedDocumentsZone({
   fixedDocs,
   onAddDocs,
   onRemoveDoc,
+  readOnly = false,
 }: {
   fixedDocs: { uuid: string; title: string }[]
   onAddDocs: (docs: { uuid: string; title: string }[]) => Promise<void> | void
   onRemoveDoc: (uuid: string) => void
+  // View-only workflows: list the pinned documents, hide every way to change them.
+  readOnly?: boolean
 }) {
   const { selectedDocUuids, selectedDocNames } = useWorkspace()
   const [dragOver, setDragOver] = useState(false)
@@ -6386,23 +6484,29 @@ function FixedDocumentsZone({
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {doc.title}
               </span>
-              <button
-                type="button"
-                onClick={() => onRemoveDoc(doc.uuid)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer', padding: 2,
-                  color: '#6b7280', display: 'flex',
-                }}
-                aria-label={`Remove ${doc.title}`}
-              >
-                <X style={{ width: 14, height: 14 }} />
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveDoc(doc.uuid)}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+                    color: '#6b7280', display: 'flex',
+                  }}
+                  aria-label={`Remove ${doc.title}`}
+                >
+                  <X style={{ width: 14, height: 14 }} />
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      <div
+      {readOnly && fixedDocs.length === 0 && (
+        <div style={{ fontSize: 12, color: '#9ca3af' }}>No fixed documents.</div>
+      )}
+
+      {!readOnly && <div
         onDragOver={e => {
           e.preventDefault()
           e.stopPropagation()
@@ -6446,9 +6550,9 @@ function FixedDocumentsZone({
             <div>Drag documents here or click to browse</div>
           </>
         )}
-      </div>
+      </div>}
 
-      {addableSelected.length > 0 && (
+      {!readOnly && addableSelected.length > 0 && (
         <button
           onClick={async () => {
             const docs = addableSelected.map(uuid => ({

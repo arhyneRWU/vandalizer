@@ -220,12 +220,55 @@ class TestPromptNode:
         assert kwargs.get("data") == "previous step output"
 
     @patch("app.services.workflow_engine.llm_chat_model")
-    def test_prompt_default_prompt(self, mock_llm):
-        mock_llm.return_value = "output"
+    def test_missing_prompt_is_a_step_error_not_a_model_call(self, mock_llm):
+        """No prompt key used to send the literal placeholder "Enter prompt" to
+        the model, which answered it ("The context does not contain a prompt
+        to enter.") and the run completed green with that as its output."""
         node = PromptNode({"model": "gpt-4o"})
         result = node.process({"output": "data", "step_name": "X"})
-        args, kwargs = mock_llm.call_args
-        assert kwargs.get("prompt") == "Enter prompt" or args[1] == "Enter prompt"
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+        assert "no instructions" in result["output"]
+        assert result["step_name"] == "Prompt"
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_prompt_is_a_step_error(self, mock_llm):
+        node = PromptNode({"prompt": "", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_whitespace_prompt_is_a_step_error(self, mock_llm):
+        node = PromptNode({"prompt": "  \n\t ", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_linked_saved_prompt_with_empty_body_is_a_step_error(self, mock_llm):
+        """The saved-prompt resolver leaves `prompt` untouched when the Library
+        item has no body yet, so the node sees the link and no text."""
+        node = PromptNode({"saved_prompt_uuid": "abc", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_prompt_fails_the_run_in_engine(self, mock_llm):
+        """Through the engine the step error becomes WorkflowStepError, so the
+        run is marked failed with the message rather than completing with the
+        placeholder answer as its deliverable."""
+        from app.services.workflow_engine import WorkflowEngine, WorkflowStepError
+
+        engine = WorkflowEngine()
+        node = PromptNode({"prompt": "", "model": "gpt-4o"})
+        engine.add_node(node)
+        with pytest.raises(WorkflowStepError) as exc_info:
+            engine.execute()
+        mock_llm.assert_not_called()
+        assert exc_info.value.step_name == "Prompt"
+        assert "no instructions" in str(exc_info.value)
 
     @patch("app.services.workflow_engine.llm_chat_model")
     def test_prompt_multi_source_step_and_document(self, mock_llm):
@@ -1937,3 +1980,143 @@ class TestNodePostProcess:
         result = {"output": ""}
         processed = node._apply_post_process(result)
         assert processed["output"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ResearchNode (Deep Analysis) — empty input must not fabricate a report
+# ---------------------------------------------------------------------------
+
+class TestResearchNodeEmptyInput:
+    """A Deep Analysis step with nothing to analyze used to run both passes in
+    the chat helper's standalone mode and hand back a confident, invented
+    report (figures, deadlines, regulation citations) marked Completed. With
+    no data it must not call the model at all, and must say so on the step."""
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_step_input_skips_model_and_warns(self, mock_llm):
+        node = ResearchNode({"question": "What are the risks?", "model": "gpt-4o"})
+        result = node.process({"output": "", "step_name": "Prev"})
+
+        mock_llm.assert_not_called()
+        assert result["step_name"] == "ResearchNode"
+        assert "no input data to analyze" in result["warning"]
+        assert "Previous Step Output" in result["warning"]
+        assert "no input data to analyze" in result["output"]
+        assert "Executive Summary" not in result["output"]
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_missing_output_key_skips_model_and_warns(self, mock_llm):
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "warning" in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_whitespace_only_input_skips_model(self, mock_llm):
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "   \n\t ", "step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "warning" in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_all_sources_empty_skips_model(self, mock_llm):
+        node = ResearchNode({
+            "question": "Q?",
+            "model": "gpt-4o",
+            "input_sources": ["step_input", "workflow_documents", "select_document"],
+            "doc_texts": [],
+            "selected_doc_text": "",
+        })
+        result = node.process({"output": None, "step_name": "Prev"})
+        mock_llm.assert_not_called()
+        assert "Workflow Documents" in result["warning"]
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_step_input_but_document_present_still_runs(self, mock_llm):
+        """Only the *combined* context being empty is a skip — a document source
+        that has text is enough to analyze even if the previous step was blank."""
+        mock_llm.side_effect = ["findings", "report"]
+        node = ResearchNode({
+            "question": "Q?",
+            "model": "gpt-4o",
+            "input_sources": ["step_input", "workflow_documents"],
+            "doc_texts": ["award terms and conditions"],
+        })
+        result = node.process({"output": "", "step_name": "Prev"})
+        assert mock_llm.call_count == 2
+        assert result["output"] == "report"
+        assert "warning" not in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_input_surfaces_as_step_warning_in_engine(self, mock_llm):
+        """End to end through the engine: the skip lands on the step entry's
+        ``warning`` (what the run UI renders as the amber banner) and the run
+        does not fail."""
+        from app.services.workflow_engine import WorkflowEngine
+
+        first = PromptNode({"prompt": "say nothing", "model": "gpt-4o"})
+        research = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        mock_llm.side_effect = [""]  # Prompt step yields nothing; research must not call
+        engine = WorkflowEngine()
+        engine.add_node(first)
+        engine.add_node(research)
+        engine.connect(first, research)
+
+        final, steps = engine.execute()
+
+        assert mock_llm.call_count == 1
+        assert steps[-1]["name"] == "ResearchNode"
+        assert "no input data to analyze" in steps[-1]["warning"]
+        assert "no input data to analyze" in final
+
+
+class TestResearchNodeNoRelevantFindings:
+    """Pass 1 is asked to lead with NO_RELEVANT_FINDINGS when the input has
+    nothing on the question. That must stop the step before pass 2 — which,
+    asked for a four-section report, would fill the sections regardless."""
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_skips_pass_two_and_warns(self, mock_llm):
+        mock_llm.side_effect = [
+            "NO_RELEVANT_FINDINGS\nThe data is a parking permit application and says nothing about award finances."
+        ]
+        node = ResearchNode({"question": "What are the budget risks?", "model": "gpt-4o"})
+        result = node.process({"output": "Parking permit application ...", "step_name": "Prev"})
+
+        assert mock_llm.call_count == 1
+        assert "nothing in its input relevant to the question" in result["warning"]
+        assert "parking permit" in result["warning"]
+        assert "Executive Summary" not in result["output"]
+        assert result["output"].startswith("(")
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_wrapped_in_markdown_still_detected(self, mock_llm):
+        mock_llm.side_effect = ["**NO_RELEVANT_FINDINGS** — nothing here."]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert mock_llm.call_count == 1
+        assert result["warning"].endswith("nothing here.")
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_sentinel_mid_text_is_not_a_declaration(self, mock_llm):
+        mock_llm.side_effect = [
+            "Finding 1: budget is $2M. (Would have said NO_RELEVANT_FINDINGS otherwise.)",
+            "report",
+        ]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        result = node.process({"output": "x", "step_name": "Prev"})
+        assert mock_llm.call_count == 2
+        assert result["output"] == "report"
+        assert "warning" not in result
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_prompts_carry_grounding_instructions(self, mock_llm):
+        mock_llm.side_effect = ["findings", "report"]
+        node = ResearchNode({"question": "Q?", "model": "gpt-4o"})
+        node.process({"output": "x", "step_name": "Prev"})
+        pass1 = mock_llm.call_args_list[0].kwargs["prompt"]
+        pass2 = mock_llm.call_args_list[1].kwargs["prompt"]
+        assert "NO_RELEVANT_FINDINGS" in pass1
+        assert "general knowledge" in pass1
+        assert "must come from the Findings below or the CONTEXT" in pass2
+        assert "Findings:\nfindings" in pass2
