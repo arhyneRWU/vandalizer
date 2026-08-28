@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Plus, Loader2, ArrowLeft, X, FileText, Globe, MessageSquare, AlertCircle, AlertTriangle, CheckCircle2, Users, ShieldCheck, Send, Tag, Check, Download, Upload, HelpCircle, Pencil, Pin, PinOff, FolderKanban, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
 import { useKnowledgeBases, useScopedKnowledgeBases } from '../../hooks/useKnowledgeBases'
+import { describeSourceCurrency, formatCurrencyDateTime, shortHash } from '../knowledge/sourceCurrency'
 import { useProjectPins } from '../../hooks/useProjectPins'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
 import { useAuth } from '../../hooks/useAuth'
@@ -1354,9 +1355,47 @@ export function KnowledgePanel() {
                         {!isRenaming && source.error_message && (
                           <div style={{ fontSize: 11, color: '#ef4444', marginTop: 2 }}>{source.error_message}</div>
                         )}
-                        {!isRenaming && source.status === 'ready' && (
-                          <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>{source.chunk_count} chunks</div>
-                        )}
+                        {!isRenaming && source.status === 'ready' && (() => {
+                          // Currency beside the size: when the text was last
+                          // actually obtained / indexed, whether the last
+                          // refresh failed and what is being served instead,
+                          // and a fingerprint of the indexed text — so an
+                          // evaluator can check a source is current without
+                          // opening the original.
+                          const cur = describeSourceCurrency(source.currency)
+                          const hash = source.currency?.content_hash
+                          const toneColor = cur?.tone === 'warn' ? '#b45309' : cur?.tone === 'error' ? '#ef4444' : '#888'
+                          return (
+                            <div style={{ fontSize: 11, color: '#888', marginTop: 2 }} data-testid="source-currency">
+                              {source.chunk_count} chunks
+                              {cur && (
+                                <>
+                                  {' · '}
+                                  <span style={{ color: toneColor }} title={[
+                                    source.currency?.last_refresh_attempted_at ? `Last refresh attempted: ${formatCurrencyDateTime(source.currency.last_refresh_attempted_at)}` : null,
+                                    source.currency?.last_retrieved_at ? `Last retrieved: ${formatCurrencyDateTime(source.currency.last_retrieved_at)}` : null,
+                                    source.currency?.last_ingested_at ? `Last indexed: ${formatCurrencyDateTime(source.currency.last_ingested_at)}` : null,
+                                    source.currency?.content_retrieved_at ? `Serving text retrieved: ${formatCurrencyDateTime(source.currency.content_retrieved_at)}` : null,
+                                    source.currency?.last_refresh_error ? `Last refresh error: ${source.currency.last_refresh_error}` : null,
+                                  ].filter(Boolean).join('\n')}>
+                                    {cur.summary}
+                                  </span>
+                                </>
+                              )}
+                              {hash && (
+                                <>
+                                  {' · '}
+                                  <span
+                                    style={{ fontFamily: 'monospace' }}
+                                    title={`${source.currency?.content_hash_algorithm ?? 'sha256'} of the indexed text: ${hash}${source.currency?.content_hash_recorded ? '' : ' (computed from the stored snapshot; recorded at the next refresh)'}`}
+                                  >
+                                    {shortHash(hash)}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          )
+                        })()}
                         {!isRenaming && (source.status === 'processing' || source.status === 'pending') && (
                           <div style={{ fontSize: 11, color: '#d97706', marginTop: 2 }}>
                             {source.status === 'processing'
