@@ -143,6 +143,7 @@ export interface KBSourceResponse {
   truncated?: boolean
   created_at?: string | null
   processed_at?: string | null
+  currency?: import('../types/knowledge').SourceCurrency | null
 }
 
 /** Set or clear the user-provided label for a KB source. Pass `""` to clear. */
@@ -904,6 +905,13 @@ export interface KBExportPayload {
     max_crawl_pages?: number
     parent_source_uuid?: string | null
     crawled_urls?: string[] | null
+    // Read-only provenance (ignored on import): status, size and currency.
+    source_reference?: string | null
+    status?: string
+    chunk_count?: number
+    truncated?: boolean
+    created_at?: string | null
+    currency?: import('../types/knowledge').SourceCurrency | null
   }[]
 }
 
