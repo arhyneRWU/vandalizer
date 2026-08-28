@@ -309,6 +309,44 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
     return steps_data, output_step_names
 
 
+def _resume_point(engine, result_doc: dict) -> tuple[int, dict | None]:
+    """Where a retried run should pick up, and what to feed the first step.
+
+    ``execute_workflow_task`` carries ``autoretry_for=TRANSIENT_EXCEPTIONS,
+    max_retries=3`` and used to restart at step 0 every time. A provider read
+    timeout on step 4 therefore re-executed steps 1-3 up to three more times:
+    an ``APICallNode`` POST fired four times, a ``save_to_folder`` wrote four
+    copies, and the tokens were billed four times over. Retrying is right; the
+    engine already supports resuming (the approval gate proves it), so a retry
+    resumes too.
+
+    Returns ``(start_index, initial_output)``. ``(0, None)`` — a full rerun —
+    whenever the persisted state cannot justify skipping anything: no completed
+    steps, a missing output for the last completed step, or a step count that
+    does not fit the engine we just built (an edited workflow between attempts).
+    """
+    completed = int(result_doc.get("num_steps_completed") or 0)
+    steps_output = result_doc.get("steps_output") or {}
+    if completed <= 0 or not steps_output:
+        return 0, None
+
+    keys = engine.step_output_keys()
+    if completed >= len(keys):
+        # The workflow changed shape since the attempt that got this far.
+        # Replaying against the new graph would attribute old outputs to
+        # different steps, so start over.
+        logger.warning(
+            "Not resuming: %d steps completed but the engine has %d — rerunning "
+            "from the start", completed, len(keys),
+        )
+        return 0, None
+
+    last_output = steps_output.get(keys[completed])
+    if not isinstance(last_output, dict):
+        return 0, None
+    return completed + 1, last_output
+
+
 def _replay_step_entries(engine, steps_output: dict, upto_index: int) -> list[dict]:
     """Rebuild the engine's per-step ``data`` entries for earlier passes.
 
@@ -908,18 +946,6 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     user_doc = db.user.find_one({"user_id": user_id}) if user_id else None
     is_admin = bool(user_doc and user_doc.get("is_admin"))
 
-    # Update result to running
-    db.workflow_result.update_one(
-        {"_id": ObjectId(workflow_result_id)},
-        {"$set": {
-            "status": "running",
-            "num_steps_completed": 0,
-            "num_steps_total": len(steps_data) - 1,
-            "steps_output": {},
-            "output_step_names": output_step_names,
-        }},
-    )
-
     # Progress updater using pymongo
     update_progress = _make_progress_updater(db, workflow_result_id)
 
@@ -930,6 +956,34 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         system_config_doc=sys_config,
         allow_code_execution=is_admin,
         config_override=workflow_doc.get("config_override"),
+    )
+
+    # A retry resumes where the failed attempt stopped. On the first attempt
+    # there is nothing to resume from and this is (0, None).
+    start_index, initial_output = (
+        _resume_point(engine, result_doc) if self.request.retries else (0, None)
+    )
+    prior_steps_output = (result_doc.get("steps_output") or {}) if start_index else {}
+    if start_index:
+        logger.info(
+            "Workflow %s retry %d/%d resuming at step %d of %d",
+            workflow_id, self.request.retries, self.max_retries,
+            start_index, len(steps_data) - 1,
+        )
+
+    # Update result to running. A resuming retry keeps the progress it already
+    # earned — clearing it here is what made the run restart from zero.
+    running_update = {
+        "status": "running",
+        "num_steps_total": len(steps_data) - 1,
+        "output_step_names": output_step_names,
+    }
+    if not start_index:
+        running_update["num_steps_completed"] = 0
+        running_update["steps_output"] = {}
+    db.workflow_result.update_one(
+        {"_id": ObjectId(workflow_result_id)},
+        {"$set": running_update},
     )
 
     # Pre-flight oversize check: refuse the run cleanly when the documents one
@@ -1034,8 +1088,17 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         ):
             final_output, data = engine.execute(
                 workflow_result_updater=update_progress,
+                start_index=start_index,
+                initial_output=initial_output,
                 should_cancel=should_cancel,
             )
+        if start_index:
+            # execute() reports only the steps this pass ran. Without the
+            # earlier ones the saved record would begin mid-workflow — the same
+            # correction the approval resume already makes.
+            data = _replay_step_entries(
+                engine, prior_steps_output, start_index,
+            ) + (data or [])
     except WorkflowCancelled:
         logger.info(
             "Workflow %s canceled by user (result %s)", workflow_id, workflow_result_id,
