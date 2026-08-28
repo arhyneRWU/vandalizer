@@ -588,9 +588,37 @@ class PromptNode(Node):
         self.data = data
         self.model = data.get("model")
 
+    # What a Prompt step with no instructions says instead of running. Also the
+    # message Test Step and the run's error banner show, so it names the fix.
+    EMPTY_PROMPT_ERROR = (
+        "Prompt step has no instructions. Enter a prompt (or link a saved "
+        "prompt from the Library) before running this step."
+    )
+
     def process(self, inputs):
-        prompt = self.data.get("prompt", "Enter prompt")
+        prompt = self.data.get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
         prev_step_name = inputs.get("step_name")
+
+        # No instructions means there is nothing to ask. This used to fall
+        # through with the literal placeholder "Enter prompt" as the prompt,
+        # and the model would dutifully answer it — "The context does not
+        # contain a prompt to enter." — which then completed green as the
+        # run's deliverable. A missing prompt is a configuration error, not
+        # thin data, so it is a step failure (halts the run, no model call),
+        # not a warning. The editor blocks saving/testing an empty prompt;
+        # this is the backstop for steps created via the API or saved before
+        # that check existed, and for a linked saved prompt whose body is
+        # still empty (the resolver leaves the inline value untouched then).
+        if not prompt:
+            self.report_progress(self.EMPTY_PROMPT_ERROR)
+            return {
+                "output": self.EMPTY_PROMPT_ERROR,
+                "error": self.EMPTY_PROMPT_ERROR,
+                "input": "",
+                "step_name": self.name,
+            }
+
         self.report_progress(f"Prompt: {prompt}")
 
         sources = _resolve_input_sources(self.data, prev_step_name)

@@ -220,12 +220,55 @@ class TestPromptNode:
         assert kwargs.get("data") == "previous step output"
 
     @patch("app.services.workflow_engine.llm_chat_model")
-    def test_prompt_default_prompt(self, mock_llm):
-        mock_llm.return_value = "output"
+    def test_missing_prompt_is_a_step_error_not_a_model_call(self, mock_llm):
+        """No prompt key used to send the literal placeholder "Enter prompt" to
+        the model, which answered it ("The context does not contain a prompt
+        to enter.") and the run completed green with that as its output."""
         node = PromptNode({"model": "gpt-4o"})
         result = node.process({"output": "data", "step_name": "X"})
-        args, kwargs = mock_llm.call_args
-        assert kwargs.get("prompt") == "Enter prompt" or args[1] == "Enter prompt"
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+        assert "no instructions" in result["output"]
+        assert result["step_name"] == "Prompt"
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_prompt_is_a_step_error(self, mock_llm):
+        node = PromptNode({"prompt": "", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_whitespace_prompt_is_a_step_error(self, mock_llm):
+        node = PromptNode({"prompt": "  \n\t ", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_linked_saved_prompt_with_empty_body_is_a_step_error(self, mock_llm):
+        """The saved-prompt resolver leaves `prompt` untouched when the Library
+        item has no body yet, so the node sees the link and no text."""
+        node = PromptNode({"saved_prompt_uuid": "abc", "model": "gpt-4o"})
+        result = node.process({"output": "data", "step_name": "X"})
+        mock_llm.assert_not_called()
+        assert result["error"] == PromptNode.EMPTY_PROMPT_ERROR
+
+    @patch("app.services.workflow_engine.llm_chat_model")
+    def test_empty_prompt_fails_the_run_in_engine(self, mock_llm):
+        """Through the engine the step error becomes WorkflowStepError, so the
+        run is marked failed with the message rather than completing with the
+        placeholder answer as its deliverable."""
+        from app.services.workflow_engine import WorkflowEngine, WorkflowStepError
+
+        engine = WorkflowEngine()
+        node = PromptNode({"prompt": "", "model": "gpt-4o"})
+        engine.add_node(node)
+        with pytest.raises(WorkflowStepError) as exc_info:
+            engine.execute()
+        mock_llm.assert_not_called()
+        assert exc_info.value.step_name == "Prompt"
+        assert "no instructions" in str(exc_info.value)
 
     @patch("app.services.workflow_engine.llm_chat_model")
     def test_prompt_multi_source_step_and_document(self, mock_llm):
