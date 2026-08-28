@@ -227,6 +227,42 @@ class TestConnectionTestRoutes:
             resp = await client.post("/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers, json={})
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_saved_test_with_edits_needs_manage_permission(self, client):
+        # A team member who can only view may test the stored credential as-is,
+        # but merging edits (e.g. a new token_endpoint) would send the stored
+        # secrets wherever the caller says, so that needs manage permission.
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = MagicMock()
+        cred.user_id = "someone-else"
+        cred.team_id = "team-1"
+        cred.type = "oauth_client_credentials"
+        cred.payload = {"client_id": "c", "token_endpoint": "https://issuer/token", "private_key": "ENC"}
+        report = {"ok": True, "steps": [], "status_code": None, "elapsed_ms": None}
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials._can_view_team", new=AsyncMock(return_value=True)),
+            patch("app.routers.credentials._can_manage_team", new=AsyncMock(return_value=False)),
+            patch("app.routers.credentials.credentials_service.decrypt_payload", return_value=dict(cred.payload)),
+            patch("app.routers.credentials.credentials_service.run_connection_test", return_value=report) as mock_test,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            denied = await client.post(
+                "/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers,
+                json={"payload": {"token_endpoint": "https://attacker.example/token"}},
+            )
+            allowed = await client.post(
+                "/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers,
+                json={"test_url": "https://api.example.com/me"},
+            )
+        assert denied.status_code == 403
+        assert allowed.status_code == 200, allowed.text
+        assert mock_test.call_count == 1
+        assert mock_test.call_args.args[1]["token_endpoint"] == "https://issuer/token"
+
 
 
 # Shared with test_credentials_service: an RSA key for OAuth payloads.

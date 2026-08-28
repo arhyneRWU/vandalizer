@@ -145,6 +145,11 @@ async def test_saved_credential(
     cred = await _load_for_view(credential_id, user)
     encrypted = cred.payload or {}
     if body and body.payload:
+        # Merged edits can redirect the stored secrets (a new token_endpoint
+        # receives the stored client_secret and a freshly signed assertion),
+        # so testing with edits needs the same permission as saving them.
+        if cred.user_id != user.user_id and not await _can_manage_team(user, cred.team_id):
+            raise HTTPException(status_code=403, detail="You don't have permission to manage this credential")
         try:
             encrypted = credentials_service.merge_update_payload(cred.type, encrypted, body.payload)
         except credentials_service.CredentialError as e:
