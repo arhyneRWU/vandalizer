@@ -112,7 +112,7 @@ const TASK_TYPES: TaskTypeDef[] = [
   { name: 'APINode', label: 'API Node', icon: Zap, color: '#f97316', categories: ['all', 'web'], enabled: true,
     description: 'Calls an external HTTP API and returns the parsed response for downstream steps to use.' },
   { name: 'DocumentRenderer', label: 'Document Renderer', icon: FileText, color: '#0d9488', categories: ['all', 'output'], enabled: true,
-    description: 'Renders the step output into a downloadable file (DOCX, PDF, etc.) and saves it to the workflow result.' },
+    description: 'Renders the step output into a downloadable file — PDF, Word (DOCX), Markdown or plain text — and saves it to the workflow result.' },
   { name: 'FormFiller', label: 'Form Filler', icon: MousePointerClick, color: '#e11d48', categories: ['all', 'output'], enabled: true,
     description: 'Maps the step output into the fields of a target form template and produces the filled form.' },
   { name: 'DataExport', label: 'Data Export', icon: Download, color: '#059669', categories: ['all', 'output'], enabled: true,
@@ -4334,6 +4334,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                         color: '#374151', appearance: 'none', paddingRight: 32,
                       }}
                     >
+                      <option value="pdf">PDF (.pdf)</option>
+                      <option value="docx">Word (.docx)</option>
                       <option value="md">Markdown (.md)</option>
                       <option value="txt">Plain Text (.txt)</option>
                     </select>
@@ -4342,7 +4344,30 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                       width: 14, height: 14, color: '#6b7280', pointerEvents: 'none',
                     }} />
                   </div>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6 }}>
+                    PDF and Word render the previous step&apos;s markdown as a formatted document (headings, lists, tables);
+                    structured output becomes a table. Markdown and plain text save the text as-is.
+                  </div>
                 </div>
+                {(getTextValue('format') || 'md') === 'pdf' && (
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
+                      Document title <span style={{ fontWeight: 400, color: '#6b7280' }}>(optional — defaults to the filename)</span>
+                    </label>
+                    <input
+                      aria-label="Document title"
+                      type="text"
+                      value={getTextValue('title')}
+                      onChange={e => setTextValue('title', e.target.value)}
+                      placeholder="Award Summary"
+                      style={{
+                        width: '100%', padding: '8px 12px', fontSize: 13,
+                        fontFamily: 'inherit', border: '1px solid #d1d5db', borderRadius: 6,
+                        outline: 'none', boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                )}
                 <div>
                   <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
                     Filename
