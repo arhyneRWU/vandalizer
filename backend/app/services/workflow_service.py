@@ -1096,6 +1096,12 @@ def get_test_status(task_id: str) -> dict:
                 "error": payload.get("error") or "Test failed",
                 "output": payload.get("output"),
             }
+        if isinstance(payload, dict) and "step_test_warning" in payload:
+            return {
+                "status": "completed",
+                "result": payload.get("output"),
+                "warning": payload["step_test_warning"],
+            }
         return {"status": "completed", "result": payload}
     payload = result.result
     if isinstance(payload, WorkflowStepError):
@@ -2839,7 +2845,7 @@ def _serialize_output(final_output: dict | None) -> str | None:
     # Handle file_download type
     if isinstance(output_data, dict) and output_data.get("type") == "file_download":
         file_type = output_data.get("file_type", "")
-        if file_type in ("zip", "pdf", "xlsx"):
+        if file_type in ("zip", "pdf", "xlsx", "docx"):
             return None  # binary — cannot evaluate
         # Text-based file downloads (csv, json, md, txt)
         try:

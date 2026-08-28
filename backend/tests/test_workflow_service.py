@@ -1062,6 +1062,25 @@ class TestGetTestStatus:
         assert status["output"]["output"] == "--- Request sent ---"
 
 
+    @patch("app.services.workflow_service.AsyncResult")
+    def test_completed_with_step_warning_hands_it_through(self, mock_async_result_cls):
+        from app.services.workflow_service import get_test_status
+
+        mock_result = MagicMock()
+        mock_result.ready.return_value = True
+        mock_result.successful.return_value = True
+        mock_result.result = {
+            "step_test_warning": "1 field not found in the input and marked [Not provided: <field>] in the form: cap",
+            "output": "Rate: 47%\nCap: [Not provided: cap]",
+        }
+        mock_async_result_cls.return_value = mock_result
+
+        status = get_test_status("task-123")
+        assert status["status"] == "completed"
+        assert status["result"] == "Rate: 47%\nCap: [Not provided: cap]"
+        assert status["warning"].startswith("1 field not found")
+
+
 # ---------------------------------------------------------------------------
 # save_expected_output
 # ---------------------------------------------------------------------------

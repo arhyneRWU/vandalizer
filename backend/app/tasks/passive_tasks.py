@@ -13,6 +13,7 @@ from uuid import uuid4
 from bson import ObjectId
 
 from app.celery_app import celery_app
+from app.services.form_fill import document_meta
 from app.tasks import TRANSIENT_EXCEPTIONS, get_sync_db
 
 logger = logging.getLogger(__name__)
@@ -492,11 +493,20 @@ def execute_workflow_passive(self, trigger_event_id: str) -> dict:
                     # Pre-load doc texts
                     if doc_uuids:
                         doc_texts = []
+                        doc_metas = []
                         for uuid_val in doc_uuids:
                             doc = db.smart_document.find_one({"uuid": uuid_val})
                             if doc and doc.get("raw_text"):
                                 doc_texts.append(doc["raw_text"])
+                                doc_metas.append(document_meta(doc))
                         task_data["doc_texts"] = doc_texts
+                        if task_doc.get("name") == "FormFiller":
+                            task_data["doc_metas"] = doc_metas
+
+                    if task_doc.get("name") == "FormFiller":
+                        from app.tasks.workflow_tasks import _preload_form_filler_template
+
+                        _preload_form_filler_template(db, task_data)
 
                     tasks.append({"name": task_doc.get("name", ""), "data": task_data})
 
