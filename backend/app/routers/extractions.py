@@ -990,6 +990,11 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
             team_id=str(user.current_team) if user.current_team else None,
             activity_id=str(activity.id),
         ):
+            # Degraded inputs the run should disclose: text that is garbled,
+            # or that is only part of the document. Chat already warns about
+            # these; a wrong extracted deadline or dollar amount is the more
+            # expensive place to stay quiet.
+            document_warnings: list[dict] = []
             results = await svc.run_extraction_sync(
                 search_set_uuid=req.search_set_uuid,
                 document_uuids=document_uuids,
@@ -998,6 +1003,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 extraction_config_override=req.extraction_config_override,
                 combined_context=req.combined_context,
                 capture_sources=True,
+                document_warnings=document_warnings,
             )
         # A run that produced no entities at all extracted nothing; recording
         # it as completed gives History a green tick with nothing behind it.
@@ -1041,13 +1047,20 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         )
 
         if no_values:
-            return {"results": results, "sources": sources, "error": EXTRACTION_NO_VALUES_ERROR}
+            return {
+                "results": results, "sources": sources,
+                "document_warnings": document_warnings,
+                "error": EXTRACTION_NO_VALUES_ERROR,
+            }
 
         # Fire-and-forget auto-validation if test cases exist
         from app.tasks.quality_tasks import auto_validate_extraction
         auto_validate_extraction.delay(req.search_set_uuid, user.user_id, req.model)
 
-        return {"results": results, "sources": sources}
+        return {
+            "results": results, "sources": sources,
+            "document_warnings": document_warnings,
+        }
     except Exception as e:
         await activity_service.activity_finish(
             activity.id, ActivityStatus.FAILED, error=str(e),
