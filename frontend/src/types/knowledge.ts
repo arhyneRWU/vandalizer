@@ -65,6 +65,28 @@ export interface KnowledgeBase {
   last_used_at?: string | null
 }
 
+/**
+ * Refresh / ingestion provenance for one source (backend
+ * app/utils/kb_source_currency.py). Lets an evaluator verify source currency
+ * without re-fetching the original.
+ */
+export interface SourceCurrency {
+  status: 'never_ingested' | 'ingested' | 'refreshed' | 'unchanged' | 'retained_previous' | 'retrieval_failed' | 'ingestion_failed'
+  last_refresh_attempted_at: string | null
+  last_retrieved_at: string | null
+  last_ingested_at: string | null
+  // When the text currently held and served was retrieved — a failed refresh
+  // leaves it alone, so this is the "retained content" date.
+  content_retrieved_at: string | null
+  content_hash: string | null
+  content_hash_algorithm: string
+  // false: computed from the retained snapshot because the source predates
+  // hash recording at ingest.
+  content_hash_recorded: boolean
+  last_refresh_outcome: 'refreshed' | 'unchanged' | 'retrieval_failed' | 'ingestion_failed' | null
+  last_refresh_error: string | null
+}
+
 export interface KnowledgeBaseSource {
   uuid: string
   source_type: 'document' | 'url'
@@ -83,6 +105,7 @@ export interface KnowledgeBaseSource {
   created_at: string
   // When the text was last fetched/ingested (null while pending).
   processed_at?: string | null
+  currency?: SourceCurrency | null
 }
 
 export interface KnowledgeBaseSourceDetail extends KnowledgeBaseSource {

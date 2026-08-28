@@ -35,7 +35,7 @@ from app.services.model_routing import (
     choose_document_model,
     suggest_document_model,
 )
-from app.services.page_locator import locator_for_meta
+from app.services.page_locator import annotate_chunk_pages, cited_pages, format_page_range, locator_for_meta
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -1133,6 +1133,29 @@ _SECTION_REF_RE = re.compile(
 # prose ("cost-sharing", "NSF-funded") never pin.
 _IDENTIFIER_REF_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b")
 
+# An identifier written without hyphens: one upper-case run of at least five
+# characters carrying both a letter and a digit — "SPC0500", "R01CA123456",
+# "SF424". The letter rules out years and amounts, the digit rules out
+# acronyms, the length rules out "R01"-style fragments that are common words
+# in this domain and would flood the lane.
+_CODE_REF_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{5,}\b")
+
+# A run of two or more shouted tokens — "SCARLET ALBATROSS CLOSEOUT 9928",
+# "PHASE II FINAL REPORT", a heading or a marker written in capitals. Nobody
+# types a run of capitals by accident: it is the user reproducing a string
+# from the page, and the embedding scores such a string as noise (support
+# ticket: a unique marker line was unreachable while a hyphenated code in the
+# same document was found at once). Each token is two or more capitals /
+# digits, the run starts with a letter, and at least one token has three
+# letters, so "US" alone, "I AM", and an acronym mid-sentence ("the NSF
+# policy") never pin. Ordinary hyphenated capitals ("ABC-DEF") don't form a
+# run because the hyphen is not whitespace. A regulation citation is not a
+# run either: "2 CFR 200.313" / "45 CFR 46" must not yield "CFR 200", so a run
+# never ends on the part of a dotted section number (the citation itself is
+# pinned by _SECTION_REF_RE) and a run led by a code-title word is dropped.
+_SHOUTED_PHRASE_RE = re.compile(r"\b[A-Z][A-Z0-9]+(?:[ \t]+[A-Z0-9]{2,}){1,7}\b(?!\.\d)")
+_CITATION_TITLE_WORDS = frozenset({"CFR", "USC"})
+
 # A phrase the user put in double quotes — an explicit "find me this string".
 # Apostrophes are deliberately excluded so ordinary contractions can't pair up
 # into a bogus quoted span.
@@ -1213,12 +1236,14 @@ _PIN_FETCH_POOL = _MAX_PIN_TERM_HITS * 4 + 1
 def _extract_pin_terms(message: str) -> list[str]:
     """Pull the literal strings worth a lexical lookup out of the message.
 
-    Three shapes, in priority order:
+    Five shapes, in priority order:
 
     * CFR-style section numbers — "§ 200.1", "section 200.1", a bare "200.1";
-    * identifier-shaped tokens — "CSU-PI-001", "NSF-2024-117";
-    * a short phrase the user quoted, or the noun phrase a "what is/are …"
-      question asks about.
+    * identifier-shaped tokens — "CSU-PI-001", "NSF-2024-117" — and hyphenless
+      codes — "SPC0500", "R01CA123456";
+    * a short phrase the user quoted;
+    * a run of shouted tokens — "SCARLET ALBATROSS CLOSEOUT 9928";
+    * the noun phrase a "what is/are …" question asks about.
 
     All three name something the embedding barely represents: a bi-encoder
     scores an identifier or a rare bigram as near-noise, so the chunk that
@@ -1249,12 +1274,26 @@ def _extract_pin_terms(message: str) -> list[str]:
     message = message or ""
     for m in _SECTION_REF_RE.finditer(message):
         add(m.group(1), cited=True)
+    identifier_spans: list[tuple[int, int]] = []
     for m in _IDENTIFIER_REF_RE.finditer(message):
         token = m.group(0)
         if any(c.isdigit() for c in token):
             add(token)
+            identifier_spans.append(m.span())
+    for m in _CODE_REF_RE.finditer(message):
+        # "R01CA123456-01A1" already pinned the whole award number; its
+        # hyphenless stem is the same lookup and must not spend a second slot.
+        if any(s <= m.start() and m.end() <= e for s, e in identifier_spans):
+            continue
+        add(m.group(0))
     for m in _QUOTED_PHRASE_RE.finditer(message):
         add(" ".join(m.group(1).split()))
+    for m in _SHOUTED_PHRASE_RE.finditer(message):
+        tokens = m.group(0).split()
+        if tokens[0] in _CITATION_TITLE_WORDS:
+            continue
+        if any(sum(ch.isalpha() for ch in tok) >= 3 for tok in tokens):
+            add(" ".join(tokens))
     for m in _ASKED_PHRASE_RE.finditer(message):
         add(_questioned_phrase(m.group(1)))
     return terms
@@ -1331,7 +1370,9 @@ async def _retrieve_pinned_chunks(
         exact = re.compile(rf"(?<!\d){re.escape(term)}(?!\d)", flags)
         variants = [term]
         if is_phrase:
-            variants += [term.lower(), term.lower().capitalize(), term.title()]
+            # A marker line or heading is usually in capitals on the page;
+            # a user who types it in lower case must still reach it.
+            variants += [term.lower(), term.lower().capitalize(), term.title(), term.upper()]
         candidates: list[dict] = []
         pooled: set = set()
         for variant in dict.fromkeys(variants):
@@ -1506,20 +1547,28 @@ async def _build_kb_segment(
     kb_sources: list[dict] = []
     snippet_blocks: list[str] = []
     any_approximate = False
+    any_spanning = False
     for r in kb_results:
         meta = r.get("metadata") or {}
+        content = r.get("content") or ""
         src = meta.get("source_name", "Unknown")
-        page = meta.get("page")
         sheet = meta.get("sheet")
-        approximate = bool(meta.get("page_approximate"))
-        locator = locator_for_meta(meta)
+        # A chunk that crosses a page break is cited by the page of the
+        # passage that matches the question, or as a range when that is
+        # ambiguous — never by the page it merely starts on.
+        cited = cited_pages(meta, content, message)
+        page, page_end, approximate = cited["page"], cited["page_end"], cited["page_approximate"]
+        locator = format_page_range(page, page_end, approximate) if page is not None else locator_for_meta(meta)
         label = f"{src} ({locator})" if locator else src
         any_approximate = any_approximate or approximate
-        snippet_blocks.append(f"\n**Source: {label}**\n{r['content']}\n")
+        annotated = annotate_chunk_pages(content, meta)
+        any_spanning = any_spanning or annotated != content
+        snippet_blocks.append(f"\n**Source: {label}**\n{annotated}\n")
         kb_sources.append({
             "document_id": meta.get("source_id"),
             "document_title": src,
-            "page": page if isinstance(page, int) else None,
+            "page": page,
+            "page_end": page_end,
             "page_approximate": approximate,
             "sheet": sheet if isinstance(sheet, str) else None,
             "chunk_id": r.get("chunk_id"),
@@ -1546,6 +1595,12 @@ async def _build_kb_segment(
             "Give such pages as approximate, e.g. \"around p. 4\". Never state "
             "one as exact and never say a passage is \"explicitly\" or "
             "\"clearly\" on it._\n"
+        )
+    if any_spanning:
+        kb_text += (
+            "_A snippet that runs across pages carries `[p. N]` where the next "
+            "page begins. When you cite a page, cite the page the passage you "
+            "are using falls under, not the page the snippet starts on._\n"
         )
     kb_text += "".join(snippet_blocks)
 
