@@ -79,7 +79,11 @@ export interface Workflow {
   team_id?: string | null;
   num_executions: number;
   steps: WorkflowStep[];
-  input_config?: { trigger_type?: string };
+  input_config?: {
+    trigger_type?: string;
+    // Pre-assigned documents the run loader merges into every run (Input tab).
+    fixed_documents?: { uuid: string; title: string }[];
+  };
   output_config?: { storage?: SaveOutputConfig; [key: string]: unknown };
   can_manage?: boolean;
   created_by?: AuthorRef | null;

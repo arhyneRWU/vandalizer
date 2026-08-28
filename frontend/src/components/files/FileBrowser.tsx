@@ -15,7 +15,9 @@ import { MoveFolderDialog } from './MoveFolderDialog'
 import { MoveFileDialog } from './MoveFileDialog'
 import { useConfirm } from '../shared/useConfirm'
 import { useToast } from '../../contexts/ToastContext'
-import { deleteFile, renameFile, downloadFile, downloadFilesAsZip, moveFile } from '../../api/files'
+import { deleteFile, renameFile, downloadFile, downloadFilesAsZip, moveFile, fetchDocumentUsage, type DocumentUsage } from '../../api/files'
+import { DocumentUsageDialog, UsageSummaryList, summarizeUsage } from './DocumentUsageDialog'
+import { useWorkspace } from '../../contexts/WorkspaceContext'
 import { createFolder, renameFolder, deleteFolder, convertFolderToTeam, moveFolder, exportFolder } from '../../api/folders'
 import { listAutomations } from '../../api/automations'
 import type { Document, Folder } from '../../types/document'
@@ -320,6 +322,8 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
   }, [selectedUuids, documents])
 
   // Context menu state
+  const [usageTarget, setUsageTarget] = useState<{ uuid: string; title: string } | null>(null)
+  const { openWorkflow, openExtraction, activateKB } = useWorkspace()
   const [contextMenu, setContextMenu] = useState<{
     x: number
     y: number
@@ -472,11 +476,22 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
       const name = (item as { name?: string; title?: string } | undefined)?.name
         || (item as { title?: string } | undefined)?.title
         || (type === 'folder' ? 'this folder' : 'this file')
+      // Say what depends on a document before it goes: a knowledge base loses
+      // a source, an extraction its test case, a workflow its pinned input.
+      let usage: DocumentUsage | null = null
+      if (type === 'doc') {
+        try { usage = await fetchDocumentUsage(uuid) } catch { usage = null }
+      }
       const ok = await confirm({
         title: type === 'folder' ? 'Delete folder?' : 'Delete file?',
         message: type === 'folder' ? (
           <>
             Are you sure you want to delete <strong>{name}</strong> and everything inside it? This cannot be undone.
+          </>
+        ) : usage && usage.total > 0 ? (
+          <>
+            <strong>{name}</strong> is {summarizeUsage(usage)}. Deleting it removes it from each of these, and a workflow that pins it will fail until it is replaced. This cannot be undone.
+            <UsageSummaryList usage={usage} />
           </>
         ) : (
           <>
@@ -686,6 +701,17 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
         />
       </div>
 
+      {usageTarget && (
+        <DocumentUsageDialog
+          docUuid={usageTarget.uuid}
+          docTitle={usageTarget.title}
+          onClose={() => setUsageTarget(null)}
+          onOpenWorkflow={(id) => openWorkflow(id)}
+          onOpenExtraction={(uuid) => openExtraction(uuid)}
+          onOpenKnowledgeBase={(uuid, title) => activateKB(uuid, title)}
+        />
+      )}
+
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -751,6 +777,11 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
           onCopyUuid={() => {
             navigator.clipboard.writeText(contextMenu.item.uuid)
           }}
+          onShowUsage={
+            contextMenu.type === 'doc'
+              ? () => setUsageTarget({ uuid: contextMenu.item.uuid, title: contextMenu.item.title })
+              : undefined
+          }
           onConvertToTeam={
             contextMenu.type === 'folder' && currentTeam && !(contextMenu.item as Folder).team_id
               ? async () => {
