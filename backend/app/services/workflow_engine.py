@@ -22,6 +22,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.services.extraction_engine import ExtractionEngine
+from app.services.form_fill import (  # noqa: F401  (form_value_is_missing is re-exported)
+    _FORM_FREEFORM_UNFILLED_RE,
+    form_value_is_missing,
+)
 from app.services.llm_service import create_chat_agent
 from app.services.page_locator import locator_for_meta
 
@@ -462,6 +466,8 @@ class MultiTaskNode(Node):
         warnings: list[str] = []
         errors: list[str] = []
         request_preview = None
+        fill_report: list[dict] = []
+        filled_values: dict = {}
         for result in results:
             if result.get("_approval_pause"):
                 return result
@@ -471,6 +477,13 @@ class MultiTaskNode(Node):
             sources = result.get("retrieved_sources")
             if isinstance(sources, list):
                 merged_sources.extend(sources)
+            # Form Filler's per-field check/source table and the values it
+            # wrote: persisted under steps_output and read by the run UI.
+            report = result.get("fill_report")
+            if isinstance(report, list):
+                fill_report.extend(report)
+            if isinstance(result.get("filled_values"), dict):
+                filled_values.update(result["filled_values"])
             warning = result.get("warning")
             if isinstance(warning, str) and warning:
                 warnings.append(warning)
@@ -502,6 +515,10 @@ class MultiTaskNode(Node):
             out["error"] = " | ".join(errors)
         if request_preview is not None:
             out["request"] = request_preview
+        if fill_report:
+            out["fill_report"] = fill_report
+        if filled_values:
+            out["filled_values"] = filled_values
         return out
 
 
@@ -1294,57 +1311,6 @@ class DocumentRendererNode(Node):
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 FORM_FILLER_MISSING = "[Not provided]"
 
-# What the model says when it has nothing, written as a value instead of
-# null: "Not provided in context", "The document does not mention this",
-# "N/A", "unknown". Rendered as-is these read as filled-in answers — a form
-# with failure notes baked into it, marked Completed with no warning (support
-# ticket). Anything matching here is a missing value: it gets the missing
-# marker and the field is listed on the step's warning. Bare sentinels are
-# the same set extraction treats as not-found (extraction_sources
-# ._NOT_FOUND_VARIANTS); the phrase forms add the "in the context" tail and
-# the "the context does not …" sentence. A value that merely *starts* with
-# one of these words ("None of the above", "Unknown Author", "Not-for-profit")
-# does not match: the tail must be a locating clause or nothing at all.
-_FORM_NULLISH_HEAD = (
-    r"(?:n/?a|n\.a\.|none|null|nil|unknown|unavailable|missing|empty|blank|tbd|"
-    r"to be determined|-{1,3}|—|"
-    r"no (?:data|value|information|info|entry)(?: (?:available|provided|given|found|supplied))?|"
-    r"not (?:provided|specified|available|found|stated|mentioned|given|present|"
-    r"applicable|listed|included|supplied|indicated|determined|"
-    r"in (?:the )?(?:context|document|input|source|text)))"
-)
-_FORM_NULLISH_SENTENCE = (
-    r"(?:the )?(?:context|document|input|source|text|information)s? "
-    r"(?:does not|doesn't|did not|didn't|do not|don't) "
-    r"(?:contain|mention|state|provide|specify|include|list|give|say|indicate).*"
-)
-_FORM_NULLISH_RE = re.compile(
-    r"^\W*(?:" + _FORM_NULLISH_SENTENCE + r"|" + _FORM_NULLISH_HEAD +
-    r"(?:\s*:\s*.*|\s+[\-–—]\s+.*|\s+(?:in|from|within|by|for|per|on)\b.*)?)\W*$",
-    re.IGNORECASE | re.DOTALL,
-)
-# Phrases in freehand output (a template with no {{markers}}) that mean a
-# blank went unfilled. Counted, not parsed: the model wrote the form itself,
-# so the count feeds the warning and nothing else.
-_FORM_FREEFORM_UNFILLED_RE = re.compile(
-    r"\bnot (?:provided|specified|available|found|stated|mentioned|given|supplied)"
-    r"(?:\s+in\s+(?:the\s+)?(?:context|document|input|source|text))?\b|"
-    r"\bno information (?:provided|available|given)\b|"
-    r"\b(?:the )?(?:context|document|input) (?:does not|doesn't) (?:contain|mention|state|provide|specify)\b",
-    re.IGNORECASE,
-)
-
-
-def form_value_is_missing(value) -> bool:
-    """True for null, blank, and prose that says there is no value."""
-    if value is None:
-        return True
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return not stripped or bool(_FORM_NULLISH_RE.match(stripped))
-
-
 def form_missing_marker(name: str, missing_token: str | None = None) -> str:
     """What goes in the form for a field with no value. The default names
     the field — ``[Not provided: applicant_name]`` — so a gap is unmistakable
@@ -1378,6 +1344,22 @@ FORM_FILLER_VALUES_INSTRUCTIONS = (
     "a sentence such as \"Not provided\" or \"The context does not mention this\". Do not "
     "guess, do not use outside knowledge, do not add keys, and write nothing before or "
     "after the JSON object."
+)
+
+FORM_FILLER_PDF_VALUES_INSTRUCTIONS = (
+    "You fill PDF forms for a document-processing workflow. You are given FIELDS — the "
+    "form's fields as JSON objects, each with its name, its type, the label printed "
+    "beside it on the form where one exists, its page, and for choice fields the "
+    "allowed options — and a CONTEXT block. Return ONE JSON object whose keys are "
+    "exactly the field names. For a text field the value is a string copied verbatim "
+    "from the CONTEXT — the same digits, units, punctuation and capitalisation as the "
+    "source; never reformatted, rounded, expanded, abbreviated or summarised. For a "
+    "checkbox the value is true or false, and only when the CONTEXT clearly settles it. "
+    "For a combobox, listbox or radiobutton the value is one of the listed options, "
+    "exactly as written. When the CONTEXT does not state a value for a field, use JSON "
+    "null — never a sentence such as \"Not provided\" or \"The context does not mention "
+    "this\". Do not guess, do not use outside knowledge, do not add keys, and write "
+    "nothing before or after the JSON object."
 )
 
 FORM_FILLER_FREEFORM_INSTRUCTIONS = (
@@ -1464,6 +1446,67 @@ class FormFillerNode(Node):
         self.data = data
         self.model = data.get("model")
 
+    # -- inputs ------------------------------------------------------------
+
+    def _attribution_sources(self, inputs, sources: list[str]) -> list[dict]:
+        """The inputs the model saw, in order, each with the metadata needed to
+        say which document and page a value came from (see form_fill)."""
+        out: list[dict] = []
+        for src in sources:
+            if src == "step_input":
+                text = _stringify_context(inputs.get("output"))
+                if text:
+                    out.append({"kind": src, "title": INPUT_SOURCE_LABELS[src], "text": text})
+            elif src == "select_document":
+                text = self.data.get("selected_doc_text") or ""
+                meta = self.data.get("selected_doc_meta") or {}
+                if text:
+                    out.append({
+                        "kind": src, "text": text,
+                        "title": meta.get("title") or INPUT_SOURCE_LABELS[src],
+                        "uuid": meta.get("uuid"),
+                        "text_markers": meta.get("text_markers") or [],
+                    })
+            elif src == "workflow_documents":
+                texts = self.data.get("doc_texts") or []
+                metas = self.data.get("doc_metas") or []
+                for i, text in enumerate(texts):
+                    if not text:
+                        continue
+                    meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+                    out.append({
+                        "kind": src, "text": text,
+                        "title": meta.get("title") or f"Document {i + 1}",
+                        "uuid": meta.get("uuid"),
+                        "text_markers": meta.get("text_markers") or [],
+                    })
+        return out
+
+    def _ask_values(self, instructions: str, prompt: str, names: list[str]) -> dict:
+        """One values call; one retry naming the failure; then a real error —
+        the step fails visibly rather than shipping a guess."""
+        raw = _run_form_filler_model(
+            self.model, instructions, prompt,
+            system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
+        )
+        try:
+            return _parse_values_json(raw, names)
+        except ValueError:
+            raw = _run_form_filler_model(
+                self.model, instructions,
+                prompt + "\n\nYour previous reply was not a JSON object. Reply with "
+                "only the JSON object.",
+                system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
+            )
+            try:
+                return _parse_values_json(raw, names)
+            except ValueError as e:
+                raise ValueError(
+                    f"Form Filler: the model did not return placeholder values as JSON ({e})"
+                ) from e
+
+    # -- fill --------------------------------------------------------------
+
     def process(self, inputs):
         template = self.data.get("template", "")
         missing_token = (self.data.get("missing_value") or "").strip() or None
@@ -1473,13 +1516,18 @@ class FormFillerNode(Node):
         input_data = _build_combined_context(self.data, inputs, sources)
         context = _context_block(input_data)
 
-        self.report_progress("Filling template")
         result = {"input": inputs.get("output"), "step_name": self.name}
+
+        if (self.data.get("template_source") or "text").lower() == "pdf":
+            return self._fill_pdf_form(inputs, sources, context, result)
+
+        self.report_progress("Filling template")
 
         placeholders = template_placeholders(template)
         if not placeholders:
             # No {{name}} markers to substitute: the model has to fill the
             # blanks itself. Still its own instructions and temperature 0.
+            # Nothing to check field-by-field either — there are no fields.
             prompt = f"TEMPLATE:\n{template}\n\nCONTEXT:\n{context}"
             result["output"] = _run_form_filler_model(
                 self.model, FORM_FILLER_FREEFORM_INSTRUCTIONS, prompt,
@@ -1494,48 +1542,119 @@ class FormFillerNode(Node):
                 )
             warnings.append(
                 "This template has no {{placeholder}} markers, so the model filled "
-                "its blanks freehand. Mark each blank as {{name}} to get the same "
-                "layout, the same missing-value marker, and a list of the fields "
-                "that were not found on every run."
+                "its blanks freehand and the values could not be checked against the "
+                "input. Mark each blank as {{name}} to get the same layout, the same "
+                "missing-value marker, a list of the fields that were not found, and "
+                "a per-field source check on every run."
             )
             result["warning"] = " | ".join(warnings)
             return result
+
+        from app.services.form_fill import describe_fill_report, resolve_fill
 
         prompt = (
             f"PLACEHOLDERS:\n{json.dumps(placeholders)}\n\n"
             f"CONTEXT:\n{context}"
         )
-        raw = _run_form_filler_model(
-            self.model, FORM_FILLER_VALUES_INSTRUCTIONS, prompt,
-            system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
-        )
-        try:
-            values = _parse_values_json(raw, placeholders)
-        except ValueError:
-            # One retry with the failure named; a second failure is a real error
-            # and the step fails visibly rather than shipping a guess.
-            raw = _run_form_filler_model(
-                self.model, FORM_FILLER_VALUES_INSTRUCTIONS,
-                prompt + "\n\nYour previous reply was not a JSON object. Reply with "
-                "only the JSON object.",
-                system_config_doc=self._sys_cfg, usage_acc=self._usage_acc,
-            )
-            try:
-                values = _parse_values_json(raw, placeholders)
-            except ValueError as e:
-                raise ValueError(
-                    f"Form Filler: the model did not return placeholder values as JSON ({e})"
-                ) from e
+        values = self._ask_values(FORM_FILLER_VALUES_INSTRUCTIONS, prompt, placeholders)
 
-        filled, missing = render_filled_template(template, values, missing_token)
+        filled, _missing = render_filled_template(template, values, missing_token)
         result["output"] = filled
-        if missing:
-            marker = missing_token or f"{FORM_FILLER_MISSING[:-1]}: <field>]"
-            result["warning"] = (
-                f"{len(missing)} field{'s' if len(missing) != 1 else ''} not found in "
-                f"the input and marked {marker} in the form — fill in or remove before "
-                f"using it: {', '.join(missing)}"
+
+        # Check the fill: every value must appear in the input, and the report
+        # says where. An unfilled field or a value found nowhere is a warning
+        # on the step, never a silent pass.
+        report = resolve_fill(
+            values, self._attribution_sources(inputs, sources), field_order=placeholders,
+        )
+        result["fill_report"] = report
+        warnings = describe_fill_report(
+            report, missing_token=missing_token or f"{FORM_FILLER_MISSING[:-1]}: <field>]",
+        )
+        if warnings:
+            result["warning"] = " | ".join(warnings)
+        return result
+
+    def _fill_pdf_form(self, inputs, sources: list[str], context: str, result: dict) -> dict:
+        """Write values into a real fillable PDF's form fields; output is the PDF."""
+        from app.services.form_fill import (
+            FILLABLE_PDF_FIELD_TYPES,
+            describe_fill_report,
+            fill_pdf_form,
+            filled_pdf_filename,
+            pdf_form_fields,
+            resolve_fill,
+        )
+
+        def _fail(message: str) -> dict:
+            result["output"] = ""
+            result["error"] = f"Form Filler: {message}"
+            return result
+
+        load_error = self.data.get("template_load_error")
+        if load_error:
+            return _fail(load_error)
+        pdf_b64 = self.data.get("template_pdf_b64")
+        if not pdf_b64:
+            return _fail(
+                "no template PDF was loaded for this step. Select a fillable PDF "
+                "document as the template."
             )
+        title = self.data.get("template_document_title") or "form.pdf"
+        try:
+            pdf_bytes = base64.b64decode(pdf_b64)
+            fields = pdf_form_fields(pdf_bytes)
+        except Exception as e:
+            return _fail(f"could not read the PDF form '{title}': {e}")
+
+        fillable = [f for f in fields if f.get("type") in FILLABLE_PDF_FIELD_TYPES]
+        if not fillable:
+            return _fail(
+                f"'{title}' has no fillable form fields. Use a PDF with form fields, "
+                "or paste the form as a text template with {{placeholder}} markers."
+            )
+        names = [f["name"] for f in fillable]
+        self.report_progress(f"Filling {len(names)} form fields in {title}")
+
+        prompt = f"FIELDS:\n{json.dumps(fillable)}\n\nCONTEXT:\n{context}"
+        values = self._ask_values(FORM_FILLER_PDF_VALUES_INSTRUCTIONS, prompt, names)
+
+        try:
+            filled_bytes, applied, skipped = fill_pdf_form(pdf_bytes, values)
+        except Exception as e:
+            return _fail(f"could not write values into '{title}': {e}")
+
+        report = resolve_fill(values, self._attribution_sources(inputs, sources), field_order=names)
+        labels = {f["name"]: f.get("label") for f in fillable}
+        skipped_reasons = dict(skipped)
+        for entry in report:
+            label = labels.get(entry["name"])
+            if label:
+                entry["label"] = label
+            if entry["name"] in skipped_reasons:
+                entry["status"] = "not_written"
+                entry["reason"] = skipped_reasons[entry["name"]]
+
+        result["output"] = {
+            "type": "file_download",
+            "data_b64": base64.b64encode(filled_bytes).decode("ascii"),
+            "file_type": "pdf",
+            "filename": filled_pdf_filename(title),
+        }
+        result["filled_values"] = {
+            name: values.get(name) for name in applied if not form_value_is_missing(values.get(name))
+        }
+        result["fill_report"] = report
+
+        warnings = describe_fill_report(report, missing_token=None)
+        if skipped:
+            n = len(skipped)
+            warnings.append(
+                f"{n} form field{'s' if n != 1 else ''} could not be set: "
+                + "; ".join(f"{name} ({reason})" for name, reason in skipped)
+            )
+        if warnings:
+            result["warning"] = " | ".join(warnings)
         return result
 
 

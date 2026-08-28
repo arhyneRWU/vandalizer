@@ -25,3 +25,16 @@ describe('requiredFieldMessage', () => {
     expect(requiredFieldMessage('ResearchNode', { url: '' })).toBeNull()
   })
 })
+
+describe('requiredFieldMessage — Form Filler', () => {
+  it('blocks a PDF-form template with no document chosen', () => {
+    expect(requiredFieldMessage('FormFiller', { template_source: 'pdf' })).toMatch(/fillable PDF/)
+    expect(requiredFieldMessage('FormFiller', { template_source: 'pdf', template_document_uuid: 'T' })).toBeNull()
+  })
+
+  it('blocks an empty text template (default source)', () => {
+    expect(requiredFieldMessage('FormFiller', {})).toMatch(/template text/)
+    expect(requiredFieldMessage('FormFiller', { template: '  ' })).toMatch(/template text/)
+    expect(requiredFieldMessage('FormFiller', { template: 'Hi {{name}}' })).toBeNull()
+  })
+})
