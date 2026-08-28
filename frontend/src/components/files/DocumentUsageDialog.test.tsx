@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { DocumentUsageDialog, summarizeUsage, describeWorkflowUse } from './DocumentUsageDialog'
+import { DocumentUsageDialog, summarizeUsage, describeWorkflowUse, mergeUsage } from './DocumentUsageDialog'
 import { fetchDocumentUsage, type DocumentUsage } from '../../api/files'
 
 vi.mock('../../api/files', () => ({
@@ -22,6 +22,31 @@ describe('summarizeUsage', () => {
     expect(summarizeUsage({ ...USAGE, extractions: [], workflows: [] })).toBe('used in 1 knowledge base')
     expect(summarizeUsage({ knowledge_bases: [], extractions: [], workflows: [] }))
       .toBe('not used in any knowledge base, extraction or workflow')
+  })
+})
+
+describe('mergeUsage', () => {
+  it('de-duplicates references shared by several documents and combines their details', () => {
+    const second: DocumentUsage = {
+      ...USAGE,
+      document: { uuid: 'd2', title: 'Budget.xlsx' },
+      knowledge_bases: [{ uuid: 'kb1', title: 'Sponsor policies', exists: true }, { uuid: 'kb2', title: 'Rates', exists: true }],
+      extractions: [{ uuid: 'ss1', title: 'Budget fields', exists: true, test_cases: [{ uuid: 'tc1', label: 'NSF case' }, { uuid: 'tc2', label: 'NIH case' }] }],
+      workflows: [{ id: 'w1', name: 'Award review', uses: [{ kind: 'fixed_document' }] }],
+      total: 4,
+    }
+    const merged = mergeUsage([USAGE, second])
+    expect(merged.knowledge_bases.map(kb => kb.uuid)).toEqual(['kb1', 'kb2'])
+    expect(merged.extractions).toHaveLength(1)
+    expect(merged.extractions[0].test_cases.map(tc => tc.label)).toEqual(['NSF case', 'NIH case'])
+    expect(merged.workflows).toHaveLength(1)
+    expect(merged.workflows[0].uses).toHaveLength(2)
+    expect(merged.total).toBe(4)
+    expect(summarizeUsage(merged)).toBe('used in 2 knowledge bases, 1 extraction and 1 workflow')
+  })
+
+  it('is empty for no documents', () => {
+    expect(mergeUsage([])).toEqual({ knowledge_bases: [], extractions: [], workflows: [], total: 0 })
   })
 })
 

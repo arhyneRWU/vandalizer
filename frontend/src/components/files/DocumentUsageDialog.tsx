@@ -22,6 +22,39 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
+/** The reference sections of a usage payload — one document's, or several merged. */
+export type UsageGroups = Pick<DocumentUsage, 'knowledge_bases' | 'extractions' | 'workflows' | 'total'>
+
+/**
+ * Merge usage across several documents (bulk delete) into one set of
+ * references, de-duplicated by id: a knowledge base that holds three of the
+ * selected files is one knowledge base, with its test cases / uses combined.
+ */
+export function mergeUsage(usages: DocumentUsage[]): UsageGroups {
+  const kbs = new Map<string, DocumentUsage['knowledge_bases'][number]>()
+  const exts = new Map<string, DocumentUsage['extractions'][number]>()
+  const wfs = new Map<string, DocumentUsage['workflows'][number]>()
+  for (const u of usages) {
+    for (const kb of u.knowledge_bases) kbs.set(kb.uuid, kb)
+    for (const ex of u.extractions) {
+      const prev = exts.get(ex.uuid)
+      if (!prev) { exts.set(ex.uuid, ex); continue }
+      const seen = new Set(prev.test_cases.map(tc => tc.uuid))
+      exts.set(ex.uuid, { ...prev, test_cases: [...prev.test_cases, ...ex.test_cases.filter(tc => !seen.has(tc.uuid))] })
+    }
+    for (const wf of u.workflows) {
+      const prev = wfs.get(wf.id)
+      if (!prev) { wfs.set(wf.id, wf); continue }
+      const seen = new Set(prev.uses.map(use => JSON.stringify(use)))
+      wfs.set(wf.id, { ...prev, uses: [...prev.uses, ...wf.uses.filter(use => !seen.has(JSON.stringify(use)))] })
+    }
+  }
+  const knowledge_bases = [...kbs.values()]
+  const extractions = [...exts.values()]
+  const workflows = [...wfs.values()]
+  return { knowledge_bases, extractions, workflows, total: knowledge_bases.length + extractions.length + workflows.length }
+}
+
 /** One sentence: "used in 1 knowledge base, 2 extractions and 1 workflow". */
 export function summarizeUsage(usage: Pick<DocumentUsage, 'knowledge_bases' | 'extractions' | 'workflows'>): string {
   const parts: string[] = []
@@ -39,8 +72,20 @@ export function describeWorkflowUse(use: DocumentUsage['workflows'][number]['use
   return use.step ? `${role} in step "${use.step}"` : role
 }
 
+/**
+ * Shown in a delete confirmation when the usage lookup failed. Saying nothing
+ * would read as "nothing depends on it", which is the one thing we do not know.
+ */
+export function UsageCheckFailedNote({ many = false }: { many?: boolean }) {
+  return (
+    <div role="status" style={{ marginTop: 8, fontSize: 12, color: '#b45309' }}>
+      Couldn&apos;t check where {many ? 'these files are' : 'this document is'} used — {many ? 'they' : 'it'} may be a knowledge-base source, an extraction test case, or a workflow document.
+    </div>
+  )
+}
+
 /** Compact list of what references the document — reused inside the delete confirmation. */
-export function UsageSummaryList({ usage }: { usage: DocumentUsage }) {
+export function UsageSummaryList({ usage }: { usage: Pick<DocumentUsage, 'knowledge_bases' | 'extractions' | 'workflows'> }) {
   const rows: { icon: typeof Library; label: string; detail?: string }[] = [
     ...usage.knowledge_bases.map(kb => ({ icon: Library, label: kb.title, detail: 'knowledge base' })),
     ...usage.extractions.map(ex => ({
