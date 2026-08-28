@@ -64,10 +64,13 @@ vi.mock('../../hooks/useProjectPins', () => ({
   }),
 }))
 
+const refreshKBSource = vi.fn().mockResolvedValue({ ok: true, status: 'queued', source_uuid: 'src-1' })
+
 vi.mock('../../api/knowledge', () => ({
   getKnowledgeBase: (uuid: string) => getKnowledgeBase(uuid),
   getKBQuality: vi.fn().mockResolvedValue({}),
   getKBSourceHealth: vi.fn().mockResolvedValue({}),
+  refreshKBSource: (uuid: string, sourceUuid: string) => refreshKBSource(uuid, sourceUuid),
 }))
 
 vi.mock('../../api/organizations', () => ({
@@ -185,6 +188,7 @@ describe('KnowledgePanel add-source permissions', () => {
     expect(screen.queryByLabelText('Edit title')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Edit description')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Rename source')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Refresh source')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Remove source')).not.toBeInTheDocument()
     expect(screen.getByText('Share with Team').closest('button')).toBeDisabled()
     // Read-only actions stay available.
@@ -210,8 +214,50 @@ describe('KnowledgePanel add-source permissions', () => {
     expect(screen.getByLabelText('Edit title')).toBeInTheDocument()
     expect(screen.getByLabelText('Edit description')).toBeInTheDocument()
     expect(screen.getByLabelText('Rename source')).toBeInTheDocument()
+    expect(screen.getByLabelText('Refresh source')).toBeInTheDocument()
     expect(screen.getByLabelText('Remove source')).toBeInTheDocument()
     expect(screen.getByText('Share with Team').closest('button')).not.toBeDisabled()
+  }, 30000)
+
+  // Support ticket: a URL source's snapshot was years stale and re-adding the
+  // URL was a silent no-op. Refresh re-fetches the page in place.
+  it('re-fetches a URL source from the Refresh button', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-1',
+        source_type: 'url',
+        url: 'https://example.gov/rule',
+        url_title: 'A Rule',
+        status: 'ready',
+        chunk_count: 4,
+        created_at: '2026-01-01T00:00:00Z',
+        processed_at: '2026-04-27T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    fireEvent.click(screen.getByLabelText('Refresh source'))
+    await waitFor(() => expect(refreshKBSource).toHaveBeenCalledWith('kb-1', 'src-1'))
+  }, 30000)
+
+  it('offers no Refresh on document sources', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-2',
+        source_type: 'document',
+        document_uuid: 'doc-1',
+        document_title: 'Uploaded policy.pdf',
+        status: 'ready',
+        chunk_count: 4,
+        created_at: '2026-01-01T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    expect(screen.queryByLabelText('Refresh source')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Remove source')).toBeInTheDocument()
   }, 30000)
 })
 

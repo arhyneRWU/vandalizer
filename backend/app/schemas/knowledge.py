@@ -66,6 +66,9 @@ class KBSourceResponse(BaseModel):
     # "ready" but incomplete, so the UI warns instead of showing a clean check.
     truncated: bool = False
     created_at: Optional[str] = None
+    # When the source's text was last fetched/ingested. Surfaced on the list
+    # so a user can tell how stale a URL snapshot is before refreshing it.
+    processed_at: Optional[str] = None
 
 
 class KBSourceDetailResponse(KBSourceResponse):
@@ -83,7 +86,6 @@ class KBSourceDetailResponse(KBSourceResponse):
     # Navigation pages the crawl followed for links but did not embed
     skipped_urls: Optional[list[str]] = None
     child_sources: list[KBSourceResponse] = []  # Crawled children (when this is a parent)
-    processed_at: Optional[str] = None
 
 
 class UpdateSourceRequest(BaseModel):

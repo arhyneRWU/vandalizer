@@ -83,6 +83,15 @@ export function convertDocumentsToKB(documentUuids: string[], title?: string) {
   })
 }
 
+export interface AddUrlsResult {
+  ok: boolean
+  /** URLs actually queued for fetching. */
+  added: number
+  /** URLs the KB already held — not re-fetched (use refreshKBSource for that). */
+  skipped?: number
+  skipped_urls?: string[]
+}
+
 export function addUrlsToKB(
   uuid: string,
   urls: string[],
@@ -90,7 +99,7 @@ export function addUrlsToKB(
   maxCrawlPages = 5,
   allowedDomains = '',
 ) {
-  return apiFetch<{ ok: boolean; added: number }>(`/api/knowledge/${uuid}/add_urls`, {
+  return apiFetch<AddUrlsResult>(`/api/knowledge/${uuid}/add_urls`, {
     method: 'POST',
     body: JSON.stringify({
       urls,
@@ -105,6 +114,14 @@ export function removeKBSource(uuid: string, sourceUuid: string) {
   return apiFetch<{ ok: boolean }>(`/api/knowledge/${uuid}/source/${sourceUuid}`, {
     method: 'DELETE',
   })
+}
+
+/** Re-fetch a URL source from its page and rebuild its chunks in place (background). */
+export function refreshKBSource(uuid: string, sourceUuid: string) {
+  return apiFetch<{ ok: boolean; status: string; source_uuid: string }>(
+    `/api/knowledge/${uuid}/source/${sourceUuid}/refresh`,
+    { method: 'POST' },
+  )
 }
 
 export function getKBSource(uuid: string, sourceUuid: string) {
@@ -125,6 +142,7 @@ export interface KBSourceResponse {
   chunk_count: number
   truncated?: boolean
   created_at?: string | null
+  processed_at?: string | null
 }
 
 /** Set or clear the user-provided label for a KB source. Pass `""` to clear. */
