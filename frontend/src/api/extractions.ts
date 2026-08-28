@@ -128,7 +128,9 @@ export function runExtractionSync(data: {
   combined_context?: boolean
 }, signal?: AbortSignal) {
   // `sources` is index-aligned with `results` (per-field source map per entity).
-  return apiFetch<{ results: unknown[]; sources?: ExtractionSourceMap[] }>('/api/extractions/run-sync', {
+  // `error` is set when the run produced no values: the backend records
+  // the run as failed with this reason rather than completed.
+  return apiFetch<{ results: unknown[]; sources?: ExtractionSourceMap[]; error?: string }>('/api/extractions/run-sync', {
     method: 'POST',
     body: JSON.stringify(data),
     signal,
