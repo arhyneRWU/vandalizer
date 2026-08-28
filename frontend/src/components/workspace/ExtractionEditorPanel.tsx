@@ -284,9 +284,10 @@ export function ExtractionEditorPanel() {
       }
       const finalSets = sets.length > 0 ? sets : [{}]
       if (sets.length === 0) {
-        // A run that "succeeds" with zero values otherwise looks identical to
-        // never having run — tell the user where to find out why.
-        toast('Extraction finished but returned no values — see the History tab for details', 'info')
+        // A run that returned nothing is recorded as failed (with this reason)
+        // in History — say that, rather than pointing at details that aren't
+        // there.
+        toast(resp.error || 'Extraction returned no values. The run is recorded as failed in the History tab.', 'error')
       }
       setResultSets(finalSets)
       setResultSourceSets(sets.length > 0 ? srcSets : [{}])
@@ -1024,9 +1025,14 @@ export function ExtractionEditorPanel() {
           <button
             type="button"
             onClick={handleRun}
-            disabled={running || (selectedDocUuids.length === 0 && !activeProjectUuid)}
+            // No fields means nothing to extract: the run would finish in
+            // milliseconds with no values and (before the backend refused it)
+            // left a green "completed" run in History with nothing to open.
+            disabled={running || items.length === 0 || (selectedDocUuids.length === 0 && !activeProjectUuid)}
             title={
-              selectedDocUuids.length === 0
+              items.length === 0
+                ? 'Add at least one field before running this extraction'
+                : selectedDocUuids.length === 0
                 ? (activeProjectUuid
                     ? 'Run this extraction on all files in this project'
                     : 'Select one or more documents to run an extraction')
