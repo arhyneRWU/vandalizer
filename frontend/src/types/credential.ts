@@ -12,3 +12,13 @@ export interface Credential {
   updated_at: string | null
   can_manage: boolean
 }
+
+/** One step of a credential connection test. */
+export interface CredentialTestStep { step: string; ok: boolean; detail: string }
+
+export interface CredentialTestResult {
+  ok: boolean
+  steps: CredentialTestStep[]
+  status_code: number | null
+  elapsed_ms: number | null
+}

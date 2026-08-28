@@ -155,3 +155,110 @@ class TestListCredentials:
         assert items[0]["payload"]["header_value"] == "<set>"
         assert items[0]["payload"]["header_name"] == "X-Api-Key"
         assert "enc:abc" not in resp.text
+
+
+class TestConnectionTestRoutes:
+    @pytest.mark.asyncio
+    async def test_draft_test_runs_the_service_with_the_typed_payload(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        report = {"ok": True, "steps": [{"step": "Configuration", "ok": True, "detail": "x"}], "status_code": None, "elapsed_ms": None}
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.credentials_service.run_connection_test", return_value=report) as mock_test,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.post(
+                "/api/credentials/test", cookies=cookies, headers=headers,
+                json={"type": "static_header", "payload": {"header_name": "X", "header_value": "k"}, "test_url": "https://api.example.com/"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == report
+        assert mock_test.call_args.args == ("static_header", {"header_name": "X", "header_value": "k"})
+        assert mock_test.call_args.kwargs == {"test_url": "https://api.example.com/"}
+
+    @pytest.mark.asyncio
+    async def test_saved_test_merges_form_edits_over_stored_secrets(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = MagicMock()
+        cred.id = "cred-1"
+        cred.user_id = "testuser"
+        cred.team_id = None
+        cred.type = "static_header"
+        cred.payload = {"header_name": "X-Old", "header_value": "ENC"}
+        report = {"ok": True, "steps": [], "status_code": 200, "elapsed_ms": 12}
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials.credentials_service.merge_update_payload",
+                  return_value={"header_name": "X-New", "header_value": "plain-secret", "test_url": "https://stored.example/"}) as mock_merge,
+            patch("app.routers.credentials.credentials_service.decrypt_payload",
+                  return_value={"header_name": "X-New", "header_value": "plain-secret", "test_url": "https://stored.example/"}),
+            patch("app.routers.credentials.credentials_service.run_connection_test", return_value=report) as mock_test,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.post(
+                "/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers,
+                json={"payload": {"header_name": "X-New", "header_value": ""}},
+            )
+        assert resp.status_code == 200, resp.text
+        # Blank secret in the form keeps the stored one (merge handles it); the
+        # stored test_url is used when the request gives none.
+        assert mock_merge.call_args.args[2] == {"header_name": "X-New", "header_value": ""}
+        assert mock_test.call_args.kwargs == {"test_url": "https://stored.example/"}
+
+    @pytest.mark.asyncio
+    async def test_saved_test_is_404_for_a_credential_the_user_cannot_see(self, client):
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = MagicMock()
+        cred.user_id = "someone-else"
+        cred.team_id = None
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials._can_view_team", new=AsyncMock(return_value=False)),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.post("/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers, json={})
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_saved_test_with_edits_needs_manage_permission(self, client):
+        # A team member who can only view may test the stored credential as-is,
+        # but merging edits (e.g. a new token_endpoint) would send the stored
+        # secrets wherever the caller says, so that needs manage permission.
+        user = _make_user()
+        cookies, headers = _auth()
+        cred = MagicMock()
+        cred.user_id = "someone-else"
+        cred.team_id = "team-1"
+        cred.type = "oauth_client_credentials"
+        cred.payload = {"client_id": "c", "token_endpoint": "https://issuer/token", "private_key": "ENC"}
+        report = {"ok": True, "steps": [], "status_code": None, "elapsed_ms": None}
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "testuser", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.credentials.Credential.get", new=AsyncMock(return_value=cred)),
+            patch("app.routers.credentials._can_view_team", new=AsyncMock(return_value=True)),
+            patch("app.routers.credentials._can_manage_team", new=AsyncMock(return_value=False)),
+            patch("app.routers.credentials.credentials_service.decrypt_payload", return_value=dict(cred.payload)),
+            patch("app.routers.credentials.credentials_service.run_connection_test", return_value=report) as mock_test,
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            denied = await client.post(
+                "/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers,
+                json={"payload": {"token_endpoint": "https://attacker.example/token"}},
+            )
+            allowed = await client.post(
+                "/api/credentials/507f1f77bcf86cd799439011/test", cookies=cookies, headers=headers,
+                json={"test_url": "https://api.example.com/me"},
+            )
+        assert denied.status_code == 403
+        assert allowed.status_code == 200, allowed.text
+        assert mock_test.call_count == 1
+        assert mock_test.call_args.args[1]["token_endpoint"] == "https://issuer/token"
