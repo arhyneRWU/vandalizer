@@ -35,7 +35,7 @@ from app.services.model_routing import (
     choose_document_model,
     suggest_document_model,
 )
-from app.services.page_locator import locator_for_meta
+from app.services.page_locator import annotate_chunk_pages, cited_pages, format_page_range, locator_for_meta
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -1547,20 +1547,28 @@ async def _build_kb_segment(
     kb_sources: list[dict] = []
     snippet_blocks: list[str] = []
     any_approximate = False
+    any_spanning = False
     for r in kb_results:
         meta = r.get("metadata") or {}
+        content = r.get("content") or ""
         src = meta.get("source_name", "Unknown")
-        page = meta.get("page")
         sheet = meta.get("sheet")
-        approximate = bool(meta.get("page_approximate"))
-        locator = locator_for_meta(meta)
+        # A chunk that crosses a page break is cited by the page of the
+        # passage that matches the question, or as a range when that is
+        # ambiguous — never by the page it merely starts on.
+        cited = cited_pages(meta, content, message)
+        page, page_end, approximate = cited["page"], cited["page_end"], cited["page_approximate"]
+        locator = format_page_range(page, page_end, approximate) if page is not None else locator_for_meta(meta)
         label = f"{src} ({locator})" if locator else src
         any_approximate = any_approximate or approximate
-        snippet_blocks.append(f"\n**Source: {label}**\n{r['content']}\n")
+        annotated = annotate_chunk_pages(content, meta)
+        any_spanning = any_spanning or annotated != content
+        snippet_blocks.append(f"\n**Source: {label}**\n{annotated}\n")
         kb_sources.append({
             "document_id": meta.get("source_id"),
             "document_title": src,
-            "page": page if isinstance(page, int) else None,
+            "page": page,
+            "page_end": page_end,
             "page_approximate": approximate,
             "sheet": sheet if isinstance(sheet, str) else None,
             "chunk_id": r.get("chunk_id"),
@@ -1587,6 +1595,12 @@ async def _build_kb_segment(
             "Give such pages as approximate, e.g. \"around p. 4\". Never state "
             "one as exact and never say a passage is \"explicitly\" or "
             "\"clearly\" on it._\n"
+        )
+    if any_spanning:
+        kb_text += (
+            "_A snippet that runs across pages carries `[p. N]` where the next "
+            "page begins. When you cite a page, cite the page the passage you "
+            "are using falls under, not the page the snippet starts on._\n"
         )
     kb_text += "".join(snippet_blocks)
 

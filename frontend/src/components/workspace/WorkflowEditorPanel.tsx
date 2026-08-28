@@ -5887,7 +5887,7 @@ function WorkflowSourcesPanel({ sources }: { sources: WorkflowCitation[] }) {
       {expanded && (
         <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {sources.map((c, i) => {
-            const locator = formatPageLocator(c.page, c.page_approximate) ?? (c.sheet || null)
+            const locator = formatPageLocator(c.page, c.page_approximate, c.page_end) ?? (c.sheet || null)
             const label = locator ? `${c.document_title} · ${locator}` : c.document_title
             const relevance = typeof c.similarity === 'number' ? `${Math.round(c.similarity * 100)}% match` : null
             const tooltip = [relevance, c.content_preview || null].filter(Boolean).join(' — ')
