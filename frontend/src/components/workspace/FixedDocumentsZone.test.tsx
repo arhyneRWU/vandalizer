@@ -60,6 +60,16 @@ describe('FixedDocumentsZone', () => {
     expect(onAddDocs).not.toHaveBeenCalled()
   })
 
+  // A fixed document deleted from Files (server sets `missing`) is flagged in
+  // place and stays removable so the user can clear the failing pin.
+  it('flags a deleted fixed document and keeps its remove button', () => {
+    const onRemoveDoc = vi.fn()
+    render(<FixedDocumentsZone fixedDocs={[{ uuid: 'gone', title: 'Old.pdf', missing: true }]} onAddDocs={vi.fn()} onRemoveDoc={onRemoveDoc} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Deleted from Files')
+    fireEvent.click(screen.getByLabelText('Remove deleted document Old.pdf'))
+    expect(onRemoveDoc).toHaveBeenCalledWith('gone')
+  })
+
   it('hides every way in on a view-only workflow', () => {
     render(<FixedDocumentsZone fixedDocs={[{ uuid: 'a', title: 'Policy.pdf' }]} onAddDocs={vi.fn()} onRemoveDoc={vi.fn()} readOnly />)
     expect(screen.getByText('Policy.pdf')).toBeInTheDocument()

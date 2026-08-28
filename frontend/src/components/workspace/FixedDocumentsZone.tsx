@@ -6,7 +6,31 @@ import { uploadFile } from '../../api/files'
 import { searchDocuments } from '../../api/documents'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 
-export interface FixedDoc { uuid: string; title: string }
+/**
+ * A fixed document on the Input tab. `missing` is set by the server on read
+ * when the document has been deleted from Files; it is never saved back.
+ */
+export interface FixedDocument { uuid: string; title: string; missing?: boolean }
+
+export function stripFixedDocumentFlags(doc: FixedDocument): { uuid: string; title: string } {
+  return { uuid: doc.uuid, title: doc.title }
+}
+
+/** Red "Deleted from Files" pill shown next to a fixed document whose source was deleted. */
+export function DeletedDocumentBadge() {
+  return (
+    <span
+      role="status"
+      title="This document was deleted from Files. Runs will fail until it is removed here or replaced."
+      style={{
+        fontSize: 10, fontWeight: 700, color: '#b91c1c', backgroundColor: '#fee2e2',
+        border: '1px solid #fecaca', borderRadius: 999, padding: '1px 6px', whiteSpace: 'nowrap',
+      }}
+    >
+      Deleted from Files
+    </span>
+  )
+}
 
 /**
  * The "Fixed Documents" picker on a workflow's Input tab: documents pinned
@@ -25,8 +49,8 @@ export function FixedDocumentsZone({
   onRemoveDoc,
   readOnly = false,
 }: {
-  fixedDocs: FixedDoc[]
-  onAddDocs: (docs: FixedDoc[]) => Promise<void> | void
+  fixedDocs: FixedDocument[]
+  onAddDocs: (docs: FixedDocument[]) => Promise<void> | void
   onRemoveDoc: (uuid: string) => void
   // View-only workflows: list the pinned documents, hide every way to change them.
   readOnly?: boolean
@@ -110,12 +134,18 @@ export function FixedDocumentsZone({
                 display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
                 borderBottom: idx < fixedDocs.length - 1 ? '1px solid #f3f4f6' : 'none',
                 fontSize: 13,
+                backgroundColor: doc.missing ? '#fef2f2' : undefined,
               }}
             >
-              <FileText style={{ width: 13, height: 13, color: '#6b7280', flexShrink: 0 }} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <FileText style={{ width: 13, height: 13, color: doc.missing ? '#b91c1c' : '#6b7280', flexShrink: 0 }} />
+              <span style={{
+                flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                color: doc.missing ? '#991b1b' : undefined,
+                textDecoration: doc.missing ? 'line-through' : 'none',
+              }}>
                 {doc.title}
               </span>
+              {doc.missing && <DeletedDocumentBadge />}
               {!readOnly && (
                 <button
                   type="button"
@@ -124,7 +154,7 @@ export function FixedDocumentsZone({
                     background: 'none', border: 'none', cursor: 'pointer', padding: 2,
                     color: '#6b7280', display: 'flex',
                   }}
-                  aria-label={`Remove ${doc.title}`}
+                  aria-label={doc.missing ? `Remove deleted document ${doc.title}` : `Remove ${doc.title}`}
                 >
                   <X style={{ width: 14, height: 14 }} />
                 </button>
