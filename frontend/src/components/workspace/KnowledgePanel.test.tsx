@@ -304,4 +304,42 @@ describe('KnowledgePanel export on an empty KB', () => {
 
     expect(screen.getByText('Export').closest('button')).not.toBeDisabled()
   }, 30000)
+
+  // Support ticket: evaluators needed refresh/ingestion provenance per source
+  // to verify currency without comparing every source to its original.
+  it('shows what is served when the last refresh failed, and the content hash', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-1',
+        source_type: 'url',
+        url: 'https://example.gov/rule',
+        url_title: 'A Rule',
+        status: 'ready',
+        chunk_count: 4,
+        created_at: '2026-01-01T00:00:00Z',
+        processed_at: '2026-06-24T09:00:00Z',
+        error_message: 'Refresh failed — previous content kept: HTTP 503',
+        currency: {
+          status: 'retained_previous',
+          last_refresh_attempted_at: '2026-08-27T15:30:00Z',
+          last_retrieved_at: '2026-06-24T09:00:00Z',
+          last_ingested_at: '2026-06-24T09:00:00Z',
+          content_retrieved_at: '2026-06-24T09:00:00Z',
+          content_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          content_hash_algorithm: 'sha256',
+          content_hash_recorded: true,
+          last_refresh_outcome: 'retrieval_failed',
+          last_refresh_error: 'HTTP 503',
+        },
+      }],
+    })
+    await openDetail()
+
+    const line = screen.getByTestId('source-currency')
+    expect(line.textContent).toContain('4 chunks')
+    expect(line.textContent).toContain('Refresh failed')
+    expect(line.textContent).toContain('serving text from')
+    expect(line.textContent).toContain('abcdef012345')
+  }, 30000)
 })

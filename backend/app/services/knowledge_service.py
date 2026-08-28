@@ -29,6 +29,7 @@ from app.models.knowledge import (
 from app.models.user import User
 from app.services import access_control, audit_service, name_conflicts
 from app.services.document_manager import DocumentManager
+from app.utils import kb_source_currency as currency
 from app.utils.fetch_errors import describe_fetch_error
 from app.utils.url_validation import normalize_crawl_url as _normalize_crawl_url
 
@@ -1039,7 +1040,12 @@ async def clone_knowledge_base(
                 )
                 new_src.chunk_count = chunk_count
                 new_src.status = "ready"
-                new_src.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+                # Cloned from the original's snapshot, not re-fetched: the
+                # text is exactly as old as it was there.
+                currency.stamp_ingested(
+                    new_src, src.content, retrieved=False,
+                    retrieved_at=getattr(src, "content_retrieved_at", None) or src.processed_at,
+                )
                 await new_src.save()
             except Exception as e:
                 logger.error(f"Error cloning URL source {new_src.uuid}: {e}")
@@ -1436,6 +1442,9 @@ async def export_knowledge_base(kb: KnowledgeBase) -> dict:
             "max_crawl_pages": s.max_crawl_pages,
             "parent_source_uuid": s.parent_source_uuid,
             "crawled_urls": s.crawled_urls,
+            # Read-only provenance for whoever evaluates the export. The
+            # importer ignores these (it re-ingests and re-stamps).
+            **currency.export_provenance(s),
         })
     return {
         "format_version": 1,
@@ -1521,7 +1530,7 @@ async def import_knowledge_base(
                 )
                 new_src.chunk_count = chunk_count
                 new_src.status = "ready"
-                new_src.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+                currency.stamp_ingested(new_src, content)
                 await new_src.save()
             except Exception as e:
                 logger.error(f"Error ingesting imported source {new_src.uuid}: {e}")
@@ -1581,7 +1590,7 @@ async def _ingest_document_source(source: KnowledgeBaseSource, kb: KnowledgeBase
         )
         source.chunk_count = chunk_count
         source.status = "ready"
-        source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+        currency.stamp_ingested(source, doc.raw_text)
         await source.save()
     except Exception as e:
         logger.error(f"Error ingesting document source {source.uuid}: {e}")
@@ -1628,11 +1637,18 @@ async def refresh_url_source(
     temporarily down must not blank out a working source. Returns None on
     success, otherwise the reason (also recorded on ``error_message`` so the
     source list can show it).
+
+    Every attempt is recorded on the source's currency fields
+    (``last_refresh_attempted_at``, ``last_refresh_outcome``, …) so an
+    evaluator can tell "never retried" from "retried and failed", and see
+    which text is actually retained. A page whose text is byte-identical to
+    what is indexed is reported ``unchanged`` and not re-embedded.
     """
     if source.source_type != "url" or not source.url:
         return "Only URL sources can be refreshed"
 
     previous_status = source.status
+    source.last_refresh_attempted_at = currency.utcnow()
     source.status = "processing"
     await source.save()
 
@@ -1649,6 +1665,8 @@ async def refresh_url_source(
 
     if reason or result is None:
         reason = reason or "Fetch returned no result"
+        source.last_refresh_outcome = currency.OUTCOME_RETRIEVAL_FAILED
+        source.last_refresh_error = reason[:2000]
         if previous_status == "ready":
             source.status = "ready"
             source.error_message = f"Refresh failed — previous content kept: {reason}"[:2000]
@@ -1659,6 +1677,23 @@ async def refresh_url_source(
         return reason
 
     raw_text = result.text
+    source.last_retrieved_at = currency.utcnow()
+    new_hash = currency.content_fingerprint(raw_text)
+    if (
+        previous_status == "ready"
+        and source.chunk_count
+        and getattr(source, "content_hash", None) == new_hash
+    ):
+        # Same text as what is indexed: nothing to re-embed. Still a
+        # successful currency check, so it clears an earlier failure.
+        source.url_title = result.title or source.url_title
+        source.status = "ready"
+        source.error_message = None
+        source.last_refresh_outcome = currency.OUTCOME_UNCHANGED
+        source.last_refresh_error = None
+        await source.save()
+        return None
+
     name = source.custom_name or result.title or source.url_title or source.url
     try:
         dm = _get_dm()
@@ -1670,6 +1705,8 @@ async def refresh_url_source(
         logger.error(f"Error re-embedding refreshed KB source {source.uuid}: {e}")
         source.status = "error"
         source.error_message = f"Refresh failed while re-indexing: {e}"[:2000]
+        source.last_refresh_outcome = currency.OUTCOME_INGESTION_FAILED
+        source.last_refresh_error = source.error_message
         await source.save()
         return source.error_message
 
@@ -1679,7 +1716,9 @@ async def refresh_url_source(
     source.chunk_count = chunk_count
     source.status = "ready"
     source.error_message = None
-    source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+    source.last_refresh_outcome = currency.OUTCOME_REFRESHED
+    source.last_refresh_error = None
+    currency.stamp_ingested(source, raw_text)
     await source.save()
     return None
 
@@ -1732,7 +1771,7 @@ async def _ingest_url_source(
         )
         source.chunk_count = chunk_count
         source.status = "ready"
-        source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+        currency.stamp_ingested(source, raw_text)
         await source.save()
         return result
     except httpx.HTTPStatusError as e:
@@ -1799,7 +1838,7 @@ async def ingest_text_into_source(
         source.truncated = False
         source.status = "ready"
         source.error_message = None
-        source.processed_at = datetime.datetime.now(tz=datetime.timezone.utc)
+        currency.stamp_ingested(source, text)
         await source.save()
         return chunk_count
     except Exception as e:
