@@ -101,3 +101,87 @@ def test_list_payload_is_remapped_and_keeps_extra_keys(monkeypatch, engine):
 def test_list_payload_with_no_matching_keys_fails_the_run(monkeypatch, engine):
     with pytest.raises(ExtractionError, match="none of the requested fields"):
         _run(monkeypatch, engine, '[{"nope": 1}]', KEYS)
+
+
+# ---------------------------------------------------------------------------
+# The envelope the prompts actually ask for
+# ---------------------------------------------------------------------------
+#
+# Every variant in PROMPT_VARIANTS ends with "Return a JSON object with an
+# 'entities' key containing a list of extracted objects", and
+# _extract_fallback_json uses those prompts. So the *obedient* answer is an
+# envelope. Reading it as "an object with none of the requested fields" is the
+# original all-null bug wearing a different coat: same payload, still wrong.
+
+
+def test_the_envelope_the_prompt_asks_for_extracts_normally(monkeypatch, engine):
+    payload = (
+        '{"entities": [{"Award Amount": "$500,000", "pi_name": "Jane Smith", '
+        '"2 CFR part 200": "Yes"}]}'
+    )
+    out = _run(monkeypatch, engine, payload, KEYS)
+    assert out == [{
+        "Award amount": "$500,000",
+        "PI Name": "Jane Smith",
+        "2 CFR Part 200": "Yes",
+    }]
+
+
+def test_an_envelope_holding_a_bare_object_also_extracts(monkeypatch, engine):
+    payload = '{"entities": {"Award Amount": "$500,000"}}'
+    out = _run(monkeypatch, engine, payload, KEYS)
+    assert out[0]["Award amount"] == "$500,000"
+
+
+def test_an_envelope_with_many_entities_keeps_them_all(monkeypatch, engine):
+    payload = (
+        '{"entities": [{"Award Amount": "$1"}, {"Award Amount": "$2"}]}'
+    )
+    out = _run(monkeypatch, engine, payload, KEYS)
+    assert [e["Award amount"] for e in out] == ["$1", "$2"]
+
+
+def test_quotes_on_the_envelope_reach_the_sidecar(monkeypatch, engine):
+    """The _sources block is the envelope's sibling, not the entity's — the
+    unwrap must not lose it."""
+    from app.services.extraction_sources import SOURCE_KEY
+
+    payload = (
+        '{"entities": [{"Award Amount": "$500,000"}], '
+        '"_sources": {"Award Amount": "The award is $500,000."}}'
+    )
+    out = _run(monkeypatch, engine, payload, KEYS, capture_sources=True)
+    assert out[0][SOURCE_KEY]["Award amount"]["quote"] == "The award is $500,000."
+
+
+def test_the_quote_block_never_becomes_a_field(monkeypatch, engine):
+    """Carried through as a value it reads as "a real value" to the router's
+    all-null guard, and the run this PR exists to fail would pass."""
+    from app.services.extraction_sources import SOURCE_KEY
+
+    payload = (
+        '{"entities": [{"Award Amount": null, "pi_name": null, '
+        '"_sources": {"Award Amount": "irrelevant"}}]}'
+    )
+    out = _run(monkeypatch, engine, payload, KEYS, capture_sources=True)
+    entity = out[0]
+    assert "_sources" not in entity
+    assert all(v is None for k, v in entity.items() if k != SOURCE_KEY)
+
+
+def test_a_field_named_sources_is_not_filled_with_the_quote_block(monkeypatch, engine):
+    payload = '{"entities": [{"Sources": "Appendix B"}], "_sources": {"x": "y"}}'
+    out = _run(monkeypatch, engine, payload, ["Sources"])
+    assert out[0]["Sources"] == "Appendix B"
+
+
+def test_an_answer_about_something_else_still_fails(monkeypatch, engine):
+    """The guard this PR adds must survive the unwrap."""
+    payload = '{"entities": [{"Colour": "blue", "Shape": "round"}]}'
+    with pytest.raises(ExtractionError):
+        _run(monkeypatch, engine, payload, KEYS)
+
+
+def test_an_empty_envelope_is_not_a_false_success(monkeypatch, engine):
+    payload = '{"entities": []}'
+    assert _run(monkeypatch, engine, payload, KEYS) == []

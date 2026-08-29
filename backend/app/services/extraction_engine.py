@@ -32,6 +32,16 @@ from app.services.llm_service import (
 
 logger = logging.getLogger(__name__)
 
+#: The key every prompt variant tells the model to wrap its answer in. The
+#: structured path unwraps it via ``coerce_entities``; the JSON-fallback path
+#: must too, or the correct answer reads as an answer about nothing.
+ENVELOPE_KEY = "entities"
+
+#: Sibling blocks carrying per-field supporting quotes. Provenance, never a
+#: field: as a field the block reads as "a real value" to the router's all-null
+#: guard, and a requested field named "Sources" would be filled with it.
+SOURCE_BLOCK_KEYS = ("_sources", "sources")
+
 # Content that can be passed to extraction methods: plain text or page images.
 ExtractionContent = Union[str, list[BinaryContent]]
 
@@ -1004,6 +1014,26 @@ class ExtractionEngine:
         return re.sub(r"[^a-z0-9]", "", str(key).lower())
 
     @classmethod
+    @staticmethod
+    def _unwrap_entities_envelope(parsed):
+        """Return ``(body, envelope)`` for a parsed fallback payload.
+
+        Every prompt variant ends with "Return a JSON object with an
+        'entities' key containing a list of extracted objects", so the
+        *correct* answer to the fallback prompt is an envelope, not a bare
+        entity. The structured path unwraps it (``coerce_entities``); this path
+        did not, so a model that obeyed the instruction had its answer read as
+        an object with none of the requested fields — which is exactly the
+        all-null run this guard exists to stop, arriving through the front
+        door. The envelope is returned alongside the body because the
+        ``_sources`` quote block is its sibling, not the entity's.
+        """
+        if isinstance(parsed, dict) and ENVELOPE_KEY in parsed:
+            body = parsed[ENVELOPE_KEY]
+            if isinstance(body, (dict, list)):
+                return body, parsed
+        return parsed, parsed
+
     def _remap_to_requested_keys(
         cls, parsed: dict, keys: list[str],
     ) -> tuple[dict, int, set]:
@@ -1024,7 +1054,17 @@ class ExtractionEngine:
         """
         folded: dict[str, tuple[str, object]] = {}
         for raw_key, value in parsed.items():
-            folded.setdefault(cls._fold_key(raw_key), (raw_key, value))
+            if raw_key in SOURCE_BLOCK_KEYS:
+                # The quote block is provenance, not a field. Without this a
+                # requested field literally named "Sources" is filled with the
+                # quote dict, and the block counts toward ``matched``.
+                continue
+            fold = cls._fold_key(raw_key)
+            if not fold:
+                # A name made only of punctuation folds to "", which would
+                # collide with every other such name.
+                continue
+            folded.setdefault(fold, (raw_key, value))
 
         entity: dict = {}
         consumed: set = set()
@@ -1157,8 +1197,12 @@ class ExtractionEngine:
                 # with real newlines, which strict JSON rejects at the first
                 # one — turning a fully usable answer into a failed run.
                 parsed = json.loads(output.strip(), strict=False)
-                if isinstance(parsed, dict):
-                    entity, matched, _ = self._remap_to_requested_keys(parsed, keys)
+                # The prompts ask for an {"entities": [...]} envelope, so
+                # unwrap it before deciding the model answered about something
+                # else. ``envelope`` keeps the sibling ``_sources`` block.
+                body, envelope = self._unwrap_entities_envelope(parsed)
+                if isinstance(body, dict):
+                    entity, matched, _ = self._remap_to_requested_keys(body, keys)
                     if keys and not matched:
                         # The model answered, but about something else: not one
                         # requested field is present under any spelling. An
@@ -1167,17 +1211,17 @@ class ExtractionEngine:
                         # dangerous possible misreport for this product.
                         raise ExtractionError(
                             "Model returned a JSON object with none of the "
-                            f"requested fields (got: {list(parsed)[:10]})"
+                            f"requested fields (got: {list(body)[:10]})"
                         )
                     if capture_sources:
-                        sidecar = self._fallback_sources_sidecar(parsed, entity)
+                        sidecar = self._fallback_sources_sidecar(envelope, entity)
                         if sidecar:
                             entity[SOURCE_KEY] = sidecar
                     return [entity]
-                elif isinstance(parsed, list):
+                elif isinstance(body, list):
                     entities = []
                     total_matched = 0
-                    for item in parsed:
+                    for item in body:
                         if not isinstance(item, dict):
                             continue
                         mapped, matched, consumed = self._remap_to_requested_keys(
@@ -1186,10 +1230,23 @@ class ExtractionEngine:
                         total_matched += matched
                         # Keep anything the model volunteered beyond the
                         # requested set — exports and downstream merges have
-                        # always carried it.
+                        # always carried it. The quote block is not one of
+                        # those: carried through as a field it would count as
+                        # "a real value" in the router's all-null guard and
+                        # keep the very runs this PR fails from failing.
                         for raw_key, value in item.items():
+                            if raw_key in SOURCE_BLOCK_KEYS:
+                                continue
                             if raw_key not in consumed and raw_key not in mapped:
                                 mapped[raw_key] = value
+                        if capture_sources:
+                            # Quotes may sit per-item or once on the envelope.
+                            sidecar = (
+                                self._fallback_sources_sidecar(item, mapped)
+                                or self._fallback_sources_sidecar(envelope, mapped)
+                            )
+                            if sidecar:
+                                mapped[SOURCE_KEY] = sidecar
                         entities.append(mapped)
                     if keys and entities and not total_matched:
                         raise ExtractionError(

@@ -1214,7 +1214,15 @@ async def run_extraction_integrated(
             document_uuids=all_doc_uuids,
             user_id=user.user_id,
         )
-        await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
+        # The same all-null run /run-sync now fails. Reporting it "completed"
+        # here just moves the confident set of "not found" answers onto the
+        # external API, where the caller has even less chance of noticing.
+        no_values = not any(_entity_has_values(e) for e in results)
+        await activity_service.activity_finish(
+            activity.id,
+            ActivityStatus.FAILED if no_values else ActivityStatus.COMPLETED,
+            error=EXTRACTION_NO_VALUES_ERROR if no_values else None,
+        )
         await activity_service.activity_update(activity.id, documents_touched=len(all_doc_uuids))
 
         # Per-document diagnostics. Empty results when uploading a file are
@@ -1237,10 +1245,11 @@ async def run_extraction_integrated(
                 })
 
         return {
-            "status": "completed",
+            "status": "error" if no_values else "completed",
             "activity_id": str(activity.id),
             "results": results,
             "documents": doc_diagnostics,
+            **({"error": EXTRACTION_NO_VALUES_ERROR} if no_values else {}),
         }
     except Exception as e:
         await activity_service.activity_finish(activity.id, ActivityStatus.FAILED, error=str(e))
