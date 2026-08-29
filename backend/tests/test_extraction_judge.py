@@ -289,5 +289,8 @@ async def test_judge_test_case_extraction_empty_keys():
         model_name="m",
     )
     assert out["num_fields_judged"] == 0
-    assert out["avg_score"] == 0.0
+    # None, not 0.0. "There was nothing to judge" and "everything scored zero"
+    # are different facts, and this module now refuses to conflate them —
+    # the same distinction that makes an unreachable judge not a FAIL.
+    assert out["avg_score"] is None
     assert out["fields"] == []

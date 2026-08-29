@@ -521,8 +521,12 @@ async def run_optimization(
             raw_by_label[trial_summary["trial_id"]] = result
             run_doc.tokens_used += int(trial_summary.get("tokens_used", 0) or 0)
 
-            # Update best-so-far ticker + convergence counter
-            score_unit = _score_to_unit(result.get("score"))
+            # Update best-so-far ticker + convergence counter. Read the score
+            # off the *summary*, not the raw result: a trial the coverage gate
+            # just nulled would otherwise still set the live "Best so far"
+            # figure and reset the convergence counter on a number the run has
+            # already decided not to trust.
+            score_unit = trial_summary.get("score")
             improved = (
                 score_unit is not None
                 and (run_doc.best_score_so_far is None or score_unit > run_doc.best_score_so_far)
@@ -654,6 +658,18 @@ async def run_optimization(
                         holdout_winner_score = _covered_score_to_unit(holdout_winner, "holdout-winner")
                         if holdout_winner_score is not None:
                             run_doc.optimized_score = holdout_winner_score
+                        else:
+                            # The headline stays the in-sample score this code
+                            # documents as best-of-N inflated. Flag it rather
+                            # than presenting it as an unbiased holdout number —
+                            # same consequence as the too-small-to-split case
+                            # this flag already covers.
+                            run_doc.overfitting_warning = True
+                            logger.warning(
+                                "Holdout winner score withheld for run %s; "
+                                "headline stays the in-sample score",
+                                run_doc.uuid,
+                            )
                     except Exception as e:
                         logger.warning("Holdout re-score (winner) failed: %s", e)
 
@@ -692,6 +708,10 @@ async def run_optimization(
                 # Apply-preview rollup (Phase 2): per-field baseline-vs-winner
                 # accuracy deltas so the Apply modal can disclose "K of N
                 # fields will change, R regress" before the override flips.
+                # Fields the coverage gate dropped are absent from
+                # ``default_breakdown``; treated as baseline 0.0 they report a
+                # fabricated near-100pp improvement in the modal that gates the
+                # apply. Unmeasured is not zero.
                 run_doc.apply_preview = _build_field_apply_preview(
                     winner_breakdown=run_doc.field_breakdown,
                     default_breakdown=list(default_result.get("field_breakdown") or []),
@@ -702,9 +722,21 @@ async def run_optimization(
         # winner beat baseline by more than 2 × SE. Applying a config change
         # the data can't justify is exactly what the significance gate exists
         # to prevent.
+        # ``tied_with_baseline`` is False both when the winner genuinely beat
+        # the baseline AND when there is no baseline to compare against — and
+        # withholding an uncovered baseline made the second case reachable.
+        # Without this check, a judge outage silently converts the significance
+        # gate into no gate at all and writes a config to the user's live
+        # settings on no evidence.
+        if run_doc.baseline_default_score is None and apply_on_finish:
+            logger.warning(
+                "Not applying winner for run %s: no baseline to measure "
+                "significance against", run_doc.uuid,
+            )
         if (
             apply_on_finish
             and run_doc.best_config
+            and run_doc.baseline_default_score is not None
             and not run_doc.tied_with_baseline
         ):
             await _apply_best(ss, run_doc)
@@ -1028,11 +1060,17 @@ def _build_field_apply_preview(
         fname = w.get("field")
         if not fname:
             continue
-        d = def_by_field.get(fname) or {}
+        d = def_by_field.get(fname)
+        if d is None or d.get("accuracy") is None:
+            # The baseline never measured this field — the coverage gate
+            # dropped it, or it had no expected value. Defaulting to 0.0 makes
+            # the modal that gates the apply report a fabricated ~100pp
+            # improvement. A field with no baseline is left out of the preview.
+            continue
         items.append({
             "item_id": fname,
             "label": fname,
-            "baseline": float(d.get("accuracy", 0.0) or 0.0),
+            "baseline": float(d.get("accuracy") or 0.0),
             "winner": float(w.get("accuracy", 0.0) or 0.0),
         })
     if not items:

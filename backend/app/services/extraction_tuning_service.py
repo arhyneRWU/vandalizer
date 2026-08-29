@@ -217,6 +217,12 @@ async def _run_single_config(
     # feed into ``judge_variance.sample_judge_variance``.
     judge_samples: list[dict] = []
     judge_tokens = 0
+    # Counted over comparisons that actually needed the LLM. The deterministic
+    # pre-judge resolves the majority of them without a model call, and it
+    # cannot be "unavailable" — folding those into the denominator would let a
+    # total judge outage read as 83% coverage on a set where 100 of 120
+    # comparisons short-circuit, sailing past the floor while every ambiguous
+    # field silently vanished from the score.
     judge_attempted = 0
     judge_unavailable = 0
     if judge_model:
@@ -248,11 +254,12 @@ async def _run_single_config(
         # so the optimizer can pick a handful for variance sampling.
         tc_lookup = {tc.uuid: tc for tc, _ in tc_run_results}
         run_lookup = {(tc.uuid, idx): r for tc, runs in tc_run_results for idx, r in enumerate(runs)}
-        judge_attempted = len(judge_tasks)
         for key, task in judge_tasks:
             try:
                 verdict = await task
                 judge_tokens += int(verdict.get("tokens_used", 0) or 0)
+                if verdict.get("comparator") != "deterministic":
+                    judge_attempted += 1
                 if is_judge_unavailable(verdict) or verdict.get("score") is None:
                     # The judge was unreachable for this field. Recording it as
                     # 0.0 would report a provider outage as a wrong extraction;
@@ -280,7 +287,10 @@ async def _run_single_config(
                     })
             except Exception as e:
                 # Same fact as an unavailable verdict, arriving as a raised
-                # exception instead of a returned one.
+                # exception instead of a returned one. A task that raised never
+                # reported a comparator, and a deterministic pre-judge does not
+                # raise, so it counts as an attempted LLM judgement.
+                judge_attempted += 1
                 judge_unavailable += 1
                 logger.warning("Judge failed for %s: %s", key, e)
 

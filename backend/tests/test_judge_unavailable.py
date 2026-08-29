@@ -156,3 +156,100 @@ class TestCoverageFloor:
         covered = {"score": 80.0, "judge_used": True, "judge_coverage": 0.95}
         assert _covered_score_to_unit(uncovered, "baseline-default") is None
         assert _covered_score_to_unit(covered, "baseline-default") == pytest.approx(0.8)
+
+
+class TestCoverageDenominator:
+    """The gate has to be able to *see* the outage it exists for.
+
+    The deterministic pre-judge resolves most comparisons without a model call
+    and cannot be unavailable. Counting those in the denominator meant a total
+    LLM-judge outage on a set where they dominate still cleared the 0.8 floor:
+    the gate passed, and every ambiguous field silently vanished from the score.
+    """
+
+    @staticmethod
+    async def _run(verdicts: list[dict], n_fields: int) -> dict:
+        from app.services import extraction_tuning_service as tuning
+
+        queue = list(verdicts)
+
+        async def fake_judge(**kwargs):
+            return queue.pop(0)
+
+        tc = MagicMock(uuid="tc-1", source_type="text", document_uuid=None)
+        tc.source_text = "some text"
+        tc.expected_values = {f"F{i}": "x" for i in range(n_fields)}
+        keys = list(tc.expected_values)
+
+        engine = MagicMock()
+        engine.extract.return_value = [{k: "x" for k in keys}]
+
+        with (
+            patch.object(tuning, "ExtractionEngine", return_value=engine),
+            patch("app.services.extraction_judge.judge_field_value",
+                  new=AsyncMock(side_effect=fake_judge)),
+        ):
+            return await tuning._run_single_config(
+                candidate={"model": "m", "config_override": {}, "label": "t"},
+                keys=keys,
+                test_cases=[tc],
+                sys_config_doc={},
+                field_metadata=None,
+                num_runs=1,
+                judge_model="judge-m",
+            )
+
+    def _det(self):
+        return {"score": 1.0, "verdict": "PASS", "reasoning": "",
+                "tokens_used": 0, "comparator": "deterministic"}
+
+    def _out(self):
+        return {"score": None, "verdict": JUDGE_UNAVAILABLE,
+                "reasoning": "judge unavailable: 502 Bad Gateway",
+                "tokens_used": 0, "comparator": "llm_error"}
+
+    def _llm(self):
+        return {"score": 1.0, "verdict": "PASS", "reasoning": "",
+                "tokens_used": 3, "comparator": "llm"}
+
+    @pytest.mark.asyncio
+    async def test_a_total_llm_outage_reads_as_zero_coverage(self):
+        """8 deterministic + 2 LLM, both LLM calls dead. Counting the
+        deterministic hits would give 0.8 and clear the floor."""
+        out = await self._run([self._det()] * 8 + [self._out()] * 2, 10)
+        assert out["judge_coverage"] == pytest.approx(0.0)
+        assert out["judge_unavailable"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_fully_deterministic_set_is_fully_covered(self):
+        """Nothing needed the LLM, so nothing is missing — coverage is 1.0,
+        not a division by zero."""
+        out = await self._run([self._det()] * 5, 5)
+        assert out["judge_coverage"] == 1.0
+        assert out["judge_unavailable"] == 0
+
+    @pytest.mark.asyncio
+    async def test_partial_llm_availability_is_measured_over_llm_calls_only(self):
+        out = await self._run(
+            [self._det()] * 6 + [self._llm()] * 3 + [self._out()], 10,
+        )
+        assert out["judge_coverage"] == pytest.approx(0.75)
+
+
+class TestApplyGateNeedsABaseline:
+    """`tied_with_baseline` is False both when the winner genuinely beat the
+    baseline and when there IS no baseline — and withholding an uncovered
+    baseline made the second case reachable, converting the significance gate
+    into no gate at all."""
+
+    def test_a_missing_baseline_is_not_a_significant_win(self):
+        from app.services.optimization_common import pick_winner_variance_aware
+
+        trials = [{"trial_id": "a", "status": "completed", "score": 0.97,
+                   "config": {}, "total_comparisons": 10}]
+        _winner, _reason, tied, _n = pick_winner_variance_aware(
+            trials, judge_variance=0.02, baseline_default_score=None,
+            distance_from_default=lambda t: 0, n_items_for_se=10,
+        )
+        # This is the value the apply gate used to read as "significant win".
+        assert tied is False

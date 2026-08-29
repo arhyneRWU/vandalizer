@@ -297,12 +297,14 @@ async def judge_test_case_extraction(
     field_results = await asyncio.gather(*(judge_one(k) for k in keys))
     attempted = [r for r in field_results if not r.get("skipped")]
     scored = [r for r in attempted if not r.get("unavailable") and r.get("score") is not None]
-    avg = sum(r["score"] for r in scored) / len(scored) if scored else 0.0
+    # None, not 0.0: "nothing could be judged" is not "everything failed",
+    # which is the whole contract this module now publishes.
+    avg = sum(r["score"] for r in scored) / len(scored) if scored else None
     tokens = sum(int(r.get("tokens_used", 0) or 0) for r in attempted)
 
     return {
         "fields": field_results,
-        "avg_score": round(avg, 4),
+        "avg_score": round(avg, 4) if avg is not None else None,
         "num_fields_judged": len(scored),
         "num_fields_unavailable": len(attempted) - len(scored),
         "judge_coverage": round(len(scored) / len(attempted), 4) if attempted else 1.0,
