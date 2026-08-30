@@ -11,6 +11,11 @@ from app.services import access_control
 INGESTION_WARNING_LABELS = {
     "partial_ocr": "only part of this document could be converted",
     "sparse_text": "far less text than its page count suggests",
+    # Emitted by the extraction path from `is_extraction_low_quality`, which
+    # reads the stored nonletter ratio rather than these codes. Without an
+    # entry here `ingestion_warnings()` filtered it straight back out, so the
+    # extraction run reported a warning code that rendered as nothing.
+    "low_quality_text": "most of the stored text is unreadable",
 }
 
 

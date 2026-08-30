@@ -65,10 +65,18 @@ class OcrRequestError(RuntimeError):
         status_code: int | None = None,
         body: str = "",
         retry_after: float | None = None,
+        permanent: bool = False,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        # Some failures carry a perfectly healthy status code and still cannot
+        # be fixed by waiting — a wrapper answering HTTP 200 with an HTML error
+        # page is misconfigured, not overloaded. Retrying those burns the
+        # in-process attempts and then minutes of Celery backoff before the
+        # document is written off, instead of falling straight through to the
+        # PyMuPDF path the caller already has.
+        self.permanent = permanent
         # Seconds the service asked us to wait, parsed from a Retry-After
         # header. Only 429 and 503 normally carry one.
         self.retry_after = retry_after
@@ -123,6 +131,8 @@ def is_retryable(exc: Exception) -> bool:
     permanent.
     """
     if isinstance(exc, _LOCAL_INPUT_ERRORS):
+        return False
+    if getattr(exc, "permanent", False):
         return False
     status = getattr(exc, "status_code", None)
     if status is None:
@@ -309,28 +319,60 @@ def parse_docling_response(payload: Any, report: dict | None = None) -> str:
 #: this exists for: ``provider="raw"`` returned ``resp.text`` verbatim, so the
 #: error page became the document's text, got chunked, embedded, and answered
 #: questions from.
-_ACCEPTED_RAW_CONTENT_TYPES = ("text/plain", "text/markdown", "application/json", "text/")
+#: Exact content types a plain-text OCR service can legitimately answer with.
+#: This was a `startswith` tuple ending in "text/", which accepted `text/html`
+#: — the precise thing the check exists to reject — making the whole gate a
+#: no-op and leaving only the body sniff below doing any work.
+_ACCEPTED_RAW_CONTENT_TYPES = frozenset({
+    "text/plain",
+    "text/markdown",
+    "text/x-markdown",
+    "application/json",
+})
 
 #: Markup a body must not open with even when the content type says text/plain.
-_MARKUP_PREFIXES = ("<!doctype html", "<html", "<?xml", "<head", "<body")
+#: Checked after stripping a BOM and any leading comment, since an error page
+#: that opens with `<!-- generated -->` would otherwise slip past.
+_MARKUP_PREFIXES = ("<!doctype html", "<html", "<?xml", "<head", "<body", "<!doctype")
+
+
+def _leading_content(text: str) -> str:
+    """The start of a body, past a BOM and any leading XML/HTML comments."""
+    head = (text or "").lstrip("\ufeff").lstrip()
+    while head.startswith("<!--"):
+        end = head.find("-->")
+        if end == -1:
+            break
+        head = head[end + 3:].lstrip()
+    return head[:200].lower()
 
 
 def _reject_non_text_body(resp) -> None:
-    """Raise unless a ``raw``-provider 200 actually looks like extracted text."""
+    """Raise unless a ``raw``-provider 200 actually looks like extracted text.
+
+    Permanent, not retryable: a wrapper that answers 200 with an error page is
+    misconfigured, and waiting does not fix a misconfiguration. Retrying it
+    would burn the in-process attempts and then minutes of Celery backoff
+    before the document is written off, when the caller has a working PyMuPDF
+    fallback one exception away.
+    """
     content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if content_type and not content_type.startswith(_ACCEPTED_RAW_CONTENT_TYPES):
+    # An absent header is not grounds for rejection — plenty of small OCR
+    # wrappers send none — but a declared type must be one we accept.
+    if content_type and content_type not in _ACCEPTED_RAW_CONTENT_TYPES:
         raise OcrRequestError(
             f"OCR endpoint returned HTTP 200 with Content-Type {content_type!r}, "
             "which is not extracted text",
             status_code=resp.status_code,
             body=resp.text[:500],
+            permanent=True,
         )
-    head = (resp.text or "").lstrip()[:200].lower()
-    if head.startswith(_MARKUP_PREFIXES):
+    if _leading_content(resp.text).startswith(_MARKUP_PREFIXES):
         raise OcrRequestError(
             "OCR endpoint returned HTTP 200 with a markup document, not extracted text",
             status_code=resp.status_code,
             body=resp.text[:500],
+            permanent=True,
         )
 
 
