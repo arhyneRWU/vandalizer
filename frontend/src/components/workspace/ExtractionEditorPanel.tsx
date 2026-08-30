@@ -267,7 +267,7 @@ export function ExtractionEditorPanel() {
     // shows until this sync request returns.
     bumpActivitySignal()
     // A previous run's rule outcomes must not sit under a new run's values.
-    setCrossField(null)
+    setCrossFieldSets([])
     // Snapshot doc names at run time so exports stay correct if the user
     // changes selection afterward.
     const runDocNames: string[] = combinedContext && docUuids.length > 1
