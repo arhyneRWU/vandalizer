@@ -174,13 +174,23 @@ def trailing_median(
     surface: str,
     window: int = TRAILING_WINDOW,
     path: Path | None = None,
+    judge_model: str | None = None,
 ) -> float | None:
     """Median κ over the most recent ``window`` entries for a surface.
 
     Returns None when fewer than 3 prior entries exist — drift detection
     needs a stable baseline, not a single anchor point.
+
+    ``judge_model`` scopes the baseline to one model, and callers that gate on
+    the result should always pass it. Pooling models means the first run after
+    a model rotation is compared against the *previous* model's median — a
+    spurious regression on the exact event ("the judge model is silently
+    swapped") this ledger exists to detect, followed by a permanently mixed
+    baseline. Rotating models is a step change, not drift.
     """
     history = load_history(surface=surface, path=path)
+    if judge_model is not None:
+        history = [e for e in history if e.judge_model == judge_model]
     if len(history) < 3:
         return None
     recent = history[-window:]
@@ -194,6 +204,7 @@ def assert_no_regression(
     window: int = TRAILING_WINDOW,
     max_regression: float = MAX_KAPPA_REGRESSION,
     path: Path | None = None,
+    judge_model: str | None = None,
 ) -> None:
     """Raise AssertionError if ``new_kappa`` regresses > max_regression
     vs the trailing-``window`` median.
@@ -203,7 +214,9 @@ def assert_no_regression(
     drifted from a non-existent past. The κ gate in the calibration test
     catches absolute floor violations; this catches *relative* drift.
     """
-    baseline = trailing_median(surface, window=window, path=path)
+    baseline = trailing_median(
+        surface, window=window, path=path, judge_model=judge_model,
+    )
     if baseline is None:
         return
     if baseline - new_kappa > max_regression:
@@ -239,7 +252,11 @@ def calibration_for(
                if e.judge_model == judge_model]
     if not entries:
         return None
-    latest = entries[-1]
+    # By timestamp, not file order. Line order is only chronological while the
+    # file is strictly appended, and the commit-back flow can reorder it on a
+    # conflict resolution — after which `entries[-1]` would publish a stale κ
+    # under a `measured_at` that is not the maximum.
+    latest = max(entries, key=lambda e: e.timestamp)
     return {
         "judge_model": judge_model,
         "kappa": latest.kappa,

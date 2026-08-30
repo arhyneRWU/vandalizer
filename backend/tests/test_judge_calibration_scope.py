@@ -125,3 +125,60 @@ class TestLedgerAccumulates:
         assert judge_drift.trailing_median("extraction", path=path) == 0.81
         with pytest.raises(AssertionError, match="regression"):
             judge_drift.assert_no_regression("extraction", 0.60, path=path)
+
+
+class TestTheGateIsScopedToTheModelToo:
+    """`calibration_for` was scoped per model but `trailing_median` still
+    pooled them. Once the ledger actually accumulates, the first run after
+    `INTEGRATION_LLM_MODEL` rotates would be compared against the *previous*
+    model's median — a spurious regression on the exact event ("the judge model
+    is silently swapped") the ledger exists to detect."""
+
+    def test_a_rotation_does_not_read_as_a_regression(self, ledger):
+        path = ledger([
+            _row("old-judge", 0.90, "2026-07-01T06:00:00+00:00"),
+            _row("old-judge", 0.91, "2026-07-08T06:00:00+00:00"),
+            _row("old-judge", 0.90, "2026-07-15T06:00:00+00:00"),
+        ])
+        # A new model measuring 0.70 is 0.20 below the old model's median.
+        # Pooled, that trips MAX_KAPPA_REGRESSION; scoped, there is no baseline
+        # for this model yet and the check correctly declines to fire.
+        judge_drift.assert_no_regression(
+            "extraction", 0.70, path=path, judge_model="new-judge",
+        )
+        with pytest.raises(AssertionError, match="regression"):
+            judge_drift.assert_no_regression("extraction", 0.70, path=path)
+
+    def test_a_real_regression_on_the_same_model_still_fires(self, ledger):
+        path = ledger([
+            _row("m", 0.90, "2026-07-01T06:00:00+00:00"),
+            _row("m", 0.91, "2026-07-08T06:00:00+00:00"),
+            _row("m", 0.90, "2026-07-15T06:00:00+00:00"),
+        ])
+        with pytest.raises(AssertionError, match="regression"):
+            judge_drift.assert_no_regression(
+                "extraction", 0.70, path=path, judge_model="m",
+            )
+
+    def test_the_median_is_per_model(self, ledger):
+        path = ledger([
+            _row("a", 0.90, "2026-07-01T06:00:00+00:00"),
+            _row("a", 0.90, "2026-07-08T06:00:00+00:00"),
+            _row("a", 0.90, "2026-07-15T06:00:00+00:00"),
+            _row("b", 0.50, "2026-07-22T06:00:00+00:00"),
+        ])
+        assert judge_drift.trailing_median("extraction", path=path, judge_model="a") == 0.90
+        assert judge_drift.trailing_median("extraction", path=path, judge_model="b") is None
+
+
+class TestLatestMeansNewest:
+    def test_an_out_of_order_ledger_still_reports_the_newest(self, ledger):
+        """Line order is only chronological while the file is strictly
+        appended; a conflict resolution in the PR flow can reorder it."""
+        path = ledger([
+            _row("m", 0.95, "2026-08-15T06:00:00+00:00"),
+            _row("m", 0.60, "2026-07-01T06:00:00+00:00"),
+        ])
+        got = judge_drift.calibration_for("extraction", "m", path=path)
+        assert got["kappa"] == 0.95
+        assert got["measured_at"] == "2026-08-15T06:00:00+00:00"
