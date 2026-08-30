@@ -80,3 +80,48 @@ class TestResumePoint:
         assert _resume_point(
             _engine(KEYS), {"steps_output": {"Extract": {"output": "x"}}},
         ) == (0, None)
+
+
+class TestApprovalResumeTakesTheFurtherPoint:
+    """`resume_workflow_after_approval` carries the same
+    `autoretry_for` + `max_retries=3` and had no resume index of its own, so a
+    transient failure at step 8 re-ran steps 4-7 — the identical bug the
+    initial-execution path just fixed. A first pass through the task must still
+    start at the gate, so the two candidates are compared and the further one
+    wins."""
+
+    def test_a_retry_past_the_gate_beats_the_gate_index(self):
+        start, initial = _resume_point(
+            _engine(KEYS),
+            {
+                "num_steps_completed": 2,
+                "steps_output": {"Call API": {"output": "called"}},
+            },
+        )
+        gate_index = 1 + 1  # approval gate was step 1
+        assert start == 3
+        assert start > gate_index
+        assert initial == {"output": "called"}
+
+    def test_a_first_pass_falls_back_to_the_gate(self):
+        """Nothing recorded past the gate — `_resume_point` declines, and the
+        caller keeps `step_index + 1`."""
+        start, _initial = _resume_point(_engine(KEYS), {"num_steps_completed": 0})
+        assert start == 0
+
+
+class TestFinalizeIsClaimedOnce:
+    """The post-run tail (library write, execution counter) sits after
+    execute() and outside the try, so a blip there retries the whole task; the
+    resume then skips every step and lands right back on those side effects.
+    The filename template carries {time}, so a second library write is a new
+    document rather than an overwrite — up to four copies."""
+
+    def test_the_claim_query_matches_a_row_that_never_had_the_field(self):
+        """Runs written before `finalized_at` existed have no such key. In
+        MongoDB `{"field": None}` matches missing as well as null, so they stay
+        claimable exactly once rather than never."""
+        from app.models.workflow import WorkflowResult
+
+        assert "finalized_at" in WorkflowResult.model_fields
+        assert WorkflowResult.model_fields["finalized_at"].default is None

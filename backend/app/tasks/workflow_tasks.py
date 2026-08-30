@@ -949,6 +949,19 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     # Progress updater using pymongo
     update_progress = _make_progress_updater(db, workflow_result_id)
 
+    # Above the engine build, which is outside the try: a bad task type raises
+    # ValueError from the builder, and leaving the row at "queued" with no
+    # output_step_names hides a run that is never coming back. Only the
+    # progress fields wait for the resume decision below.
+    db.workflow_result.update_one(
+        {"_id": ObjectId(workflow_result_id)},
+        {"$set": {
+            "status": "running",
+            "num_steps_total": len(steps_data) - 1,
+            "output_step_names": output_step_names,
+        }},
+    )
+
     engine = build_workflow_engine(
         steps_data=steps_data,
         model=model,
@@ -971,20 +984,14 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
             start_index, len(steps_data) - 1,
         )
 
-    # Update result to running. A resuming retry keeps the progress it already
-    # earned — clearing it here is what made the run restart from zero.
-    running_update = {
-        "status": "running",
-        "num_steps_total": len(steps_data) - 1,
-        "output_step_names": output_step_names,
-    }
+    # A resuming retry keeps the progress it already earned — clearing this is
+    # what made the run restart from zero.
     if not start_index:
-        running_update["num_steps_completed"] = 0
-        running_update["steps_output"] = {}
-    db.workflow_result.update_one(
-        {"_id": ObjectId(workflow_result_id)},
-        {"$set": running_update},
-    )
+        db.workflow_result.update_one(
+            {"_id": ObjectId(workflow_result_id)},
+            {"$set": {"num_steps_completed": 0, "steps_output": {}}},
+        )
+
 
     # Pre-flight oversize check: refuse the run cleanly when the documents one
     # step reads would blow the model's input budget — either a single giant
@@ -1186,24 +1193,46 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         }},
     )
 
-    # Save output to library if configured. Manual runs don't go through
-    # process_outputs (which also fires notifications/webhooks/chains for
-    # passive runs); this targets storage only.
-    storage_cfg = (workflow_doc.get("output_config") or {}).get("storage") or {}
-    if storage_cfg.get("enabled") and storage_cfg.get("destination_folder"):
-        try:
-            from app.services.output_handlers import save_results_to_folder
-            fresh_result = db.workflow_result.find_one({"_id": ObjectId(workflow_result_id)})
-            if fresh_result:
-                save_results_to_folder(fresh_result, storage_cfg)
-        except Exception as e:
-            logger.exception("Failed to save workflow output to library: %s", e)
+    # Everything below runs *after* execute() returned, and sits outside the
+    # try — so an AutoReconnect on the $inc, or a Redis blip on the
+    # auto-validate dispatch further down, retries the whole task. The resume
+    # then correctly skips every step and lands right back here, re-running
+    # side effects that already happened: a second library document (the
+    # filename template carries {time}, so it is a new file, not an overwrite)
+    # and another increment, up to four times.
+    #
+    # Claimed atomically instead. `{"finalized_at": None}` matches a missing
+    # field too, so runs that predate this are claimable exactly once.
+    import datetime as _dt
 
-    # Increment workflow execution count
-    db.workflow.update_one(
-        {"_id": ObjectId(workflow_id)},
-        {"$inc": {"num_executions": 1}},
+    claimed = db.workflow_result.update_one(
+        {"_id": ObjectId(workflow_result_id), "finalized_at": None},
+        {"$set": {"finalized_at": _dt.datetime.now(_dt.timezone.utc)}},
     )
+    if claimed.modified_count:
+        # Save output to library if configured. Manual runs don't go through
+        # process_outputs (which also fires notifications/webhooks/chains for
+        # passive runs); this targets storage only.
+        storage_cfg = (workflow_doc.get("output_config") or {}).get("storage") or {}
+        if storage_cfg.get("enabled") and storage_cfg.get("destination_folder"):
+            try:
+                from app.services.output_handlers import save_results_to_folder
+                fresh_result = db.workflow_result.find_one({"_id": ObjectId(workflow_result_id)})
+                if fresh_result:
+                    save_results_to_folder(fresh_result, storage_cfg)
+            except Exception as e:
+                logger.exception("Failed to save workflow output to library: %s", e)
+
+        # Increment workflow execution count
+        db.workflow.update_one(
+            {"_id": ObjectId(workflow_id)},
+            {"$inc": {"num_executions": 1}},
+        )
+    else:
+        logger.info(
+            "Workflow %s finalize side effects already ran; skipping on retry",
+            workflow_result_id,
+        )
 
     # Update activity and generate AI title
     if activity_id:
@@ -1495,6 +1524,23 @@ def resume_workflow_after_approval(self, approval_uuid):
                 "Could not clear pause marker on activity %s: %s", _act["_id"], e,
             )
 
+    # This task carries the same autoretry_for + max_retries=3 as the initial
+    # execution, and had no resume index of its own: a transient failure at
+    # step 8 re-ran steps 4-7 — API POSTs, folder writes, tokens — up to four
+    # times, the identical bug the initial path just fixed. `num_steps_completed`
+    # and `steps_output` are already advanced by this pass, so the same helper
+    # applies; take whichever is further along, since a first pass through this
+    # task must still start at the gate.
+    resume_index, resume_output = step_index + 1, initial_output
+    if self.request.retries:
+        retry_index, retry_output = _resume_point(engine, result_doc)
+        if retry_index > resume_index:
+            resume_index, resume_output = retry_index, retry_output
+        logger.info(
+            "Workflow %s approval-resume retry %d/%d resuming at step %d",
+            workflow_id, self.request.retries, self.max_retries, resume_index,
+        )
+
     try:
         from app.services.metering import metered
         with metered(
@@ -1505,15 +1551,15 @@ def resume_workflow_after_approval(self, approval_uuid):
         ):
             final_output, data = engine.execute(
                 workflow_result_updater=update_progress,
-                start_index=step_index + 1,
-                initial_output=initial_output,
+                start_index=resume_index,
+                initial_output=resume_output,
             )
         # execute() reports only the steps this pass ran. Prepend the ones
         # earlier passes completed, replayed from the persisted steps_output,
         # or the saved run record would show a workflow that began at the
         # approval gate and everything before it would vanish from the output.
         data = _replay_step_entries(
-            engine, result_doc.get("steps_output") or {}, step_index + 1,
+            engine, result_doc.get("steps_output") or {}, resume_index,
         ) + (data or [])
     except WorkflowStepError as e:
         # Deterministic step failure — mark the run failed, don't retry.
