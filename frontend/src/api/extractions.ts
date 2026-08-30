@@ -144,11 +144,20 @@ export type FieldSupportState =
   | 'unassessed'
   | 'unverified'
 
+const KNOWN_SUPPORT_STATES: readonly FieldSupportState[] = [
+  'supported', 'quote_unsupported', 'unassessed', 'unverified',
+]
+
 /** `support` for a source entry, deriving it for results written before the
  * field existed. An unmeasured value reads as `unassessed`, never `supported`. */
 export function fieldSupportState(src?: ExtractionFieldSource | null): FieldSupportState {
   if (!src) return 'unverified'
-  if (src.support) return src.support
+  // `support` arrives from stored snapshots cast with `as ExtractionSourceMap`,
+  // so TypeScript enforces nothing at runtime. An unrecognised value — a
+  // rolling deploy, a renamed or fifth state — used to fall through to no
+  // badge at all, which is the silent over-trust this whole change exists to
+  // remove. Fall back to deriving from the raw signals instead.
+  if (src.support && KNOWN_SUPPORT_STATES.includes(src.support)) return src.support
   if (!src.verified) return 'unverified'
   if (src.value_supported === true) return 'supported'
   if (src.value_supported === false) return 'quote_unsupported'

@@ -351,9 +351,14 @@ export function ExtractionEditorPanel() {
       } else {
         setHighlightTerms(highlight.terms, highlight.page, highlight.pageApproximate)
       }
+      // Same phase gate as the badge: while the check's false-positive rate is
+      // unmeasured, this says the automatic check could not confirm the value,
+      // not that the passage contradicts it.
       toast(
-        "The cited passage doesn't contain this value — check it before relying on it",
-        'error',
+        ALARM_ON_UNSUPPORTED_QUOTE
+          ? "The cited passage doesn't contain this value — check it before relying on it"
+          : "This value couldn't be confirmed against the cited passage — read it and check",
+        ALARM_ON_UNSUPPORTED_QUOTE ? 'error' : 'info',
       )
       return
     }
@@ -375,9 +380,17 @@ export function ExtractionEditorPanel() {
       return
     }
     if (src) {
-      // The backend couldn't trace this answer back to the document text.
       setHighlightTerms([])
-      toast("No source found — this value couldn't be traced back to the document, so double-check it before relying on it", 'info')
+      // Derive the message from the same state the badge renders. A sidecar
+      // carrying verified=true with no quote used to land here and toast "No
+      // source found" while the badge beside it read "unconfirmed" — two
+      // surfaces giving contradictory reasons for the same field.
+      toast(
+        support === 'unverified' || support === undefined
+          ? "No source found — this value couldn't be traced back to the document, so double-check it before relying on it"
+          : "This value couldn't be confirmed against the document — double-check it before relying on it",
+        'info',
+      )
       return
     }
     // Legacy run without source data — search for the value's own wording,
@@ -1141,13 +1154,41 @@ function useRotatingTip(running: boolean, config: ExtractionConfig, docCount: nu
  * say this" — to share a colour with each other or with success. The second
  * is the hallucination signal and gets its own, loudest treatment.
  */
+// `value_supported` is recorded but its false-positive rate has never been
+// measured. `extraction_sources.value_supported_by_quote` says so in its own
+// docstring — "the distribution can be measured before any of this drives a
+// badge" — and names the cases it gets wrong: a multi-part value assembled
+// from a sentence ("Jane Smith, Department of Chemistry" out of "Dr. Jane
+// Smith of the Department of Chemistry will serve as PI") reads as
+// unsupported, as does any judgement-shaped value on a field that declares no
+// enum_values.
+//
+// A red "quote doesn't match" on a correct value is the fastest way to teach a
+// grants officer to ignore the badge entirely, which costs more than the
+// over-trust it was meant to fix. So until the distribution is measured, this
+// state presents as neutral "unconfirmed" — the state stays distinct in
+// storage, which is what makes the measurement possible. Flip this to true in
+// Phase 3, with the numbers behind it.
+const ALARM_ON_UNSUPPORTED_QUOTE = false
+
+/** Presentation state: what the reader is shown, which is not always the same
+ * as the recorded state (see ALARM_ON_UNSUPPORTED_QUOTE). */
+function presentedSupport(state: FieldSupportState): FieldSupportState {
+  if (state === 'quote_unsupported' && !ALARM_ON_UNSUPPORTED_QUOTE) return 'unassessed'
+  return state
+}
+
 const SUPPORT_BADGES: Record<
   FieldSupportState,
   { label: (locator: string | null) => string; title: string; color: string; background: string }
 > = {
   supported: {
     label: (locator) => locator ?? 'sourced',
-    title: 'This value appears in the cited passage. Click to show it in the document',
+    // "an automatic check found" rather than "this is confirmed": the check
+    // tests whether the value appears in the passage, not whether the passage
+    // assigns it to this field — a "Direct Costs" value matches a quote that
+    // labels the same figure indirect, and a year (2024) matches "$2,024".
+    title: 'An automatic check found this value in the cited passage. Click to show it in the document',
     color: '#1d4ed8',
     background: '#eff6ff',
   },
@@ -1160,8 +1201,13 @@ const SUPPORT_BADGES: Record<
   },
   unassessed: {
     label: (locator) => (locator ? `${locator} · unconfirmed` : 'unconfirmed'),
+    // Covers both recorded states this presents: a value that is a judgement
+    // about the passage rather than a span of it, and one the automatic check
+    // could not match. Both mean the same thing to a reader — the passage is
+    // there, the value was not confirmed against it — so the copy says that
+    // rather than asserting which of the two it was.
     title:
-      'A passage was located, but this value is a judgement about it rather than a quote from it, so it could not be confirmed automatically. Click to read the passage',
+      'A passage was located, but this value could not be automatically confirmed against it. Click to read the passage and check it yourself',
     color: '#4b5563',
     background: '#f3f4f6',
   },
@@ -1676,7 +1722,7 @@ function DesignTab({
                   // claims — certifying the weaker proposition is how a
                   // hallucinated figure earned a blue "traced" chip.
                   const support = src ? fieldSupportState(src) : undefined
-                  const badge = support ? SUPPORT_BADGES[support] : undefined
+                  const badge = support ? SUPPORT_BADGES[presentedSupport(support)] : undefined
                   const locator = formatPageLocator(src?.page, src?.page_approximate)
                   const clickTitle = !clickable
                     ? undefined
