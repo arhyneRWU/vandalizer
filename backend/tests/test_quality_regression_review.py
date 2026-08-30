@@ -240,3 +240,34 @@ class TestOwnerLookup:
     @pytest.mark.asyncio
     async def test_unknown_kind_returns_none(self):
         assert await quality_service._item_owner_user_id("document", "d-1") is None
+
+
+class TestTheFlagSurvivesTheResponseSchema:
+    """`_attach_quality` emitted the field, but `SearchSetResponse` didn't
+    declare it — and Pydantic's default `extra="ignore"` drops undeclared keys
+    on the way out. The extraction header badge therefore received `undefined`
+    and never showed a regression, which is this feature's headline behaviour.
+    The Quality Pulse card kept working because it reads a separate dict
+    endpoint, which is what would hide this in manual testing."""
+
+    def test_the_response_model_declares_it(self):
+        from app.schemas.extractions import SearchSetResponse
+
+        assert "regression_pending_review" in SearchSetResponse.model_fields
+
+    def test_a_flagged_value_survives_serialization(self):
+        from app.schemas.extractions import SearchSetResponse
+
+        resp = SearchSetResponse(
+            id="1", title="t", uuid="u", status="ready", set_type="extraction",
+            regression_pending_review=True,
+        )
+        assert resp.model_dump()["regression_pending_review"] is True
+
+    def test_it_defaults_false_for_every_other_response_path(self):
+        from app.schemas.extractions import SearchSetResponse
+
+        resp = SearchSetResponse(
+            id="1", title="t", uuid="u", status="ready", set_type="extraction",
+        )
+        assert resp.model_dump()["regression_pending_review"] is False

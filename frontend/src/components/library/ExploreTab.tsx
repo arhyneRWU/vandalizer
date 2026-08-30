@@ -384,7 +384,11 @@ function CatalogCard({
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             <KindBadge kind={item.kind} />
-            <QualityBadge tier={item.quality_tier} score={item.quality_score} />
+            <QualityBadge
+              tier={item.quality_tier}
+              score={item.quality_score}
+              regressionPending={item.regression_pending_review}
+            />
             {item.validation_run_count > 0 && (
               <span className="text-[10px] text-gray-500">
                 {item.validation_run_count} val{item.validation_run_count !== 1 ? 's' : ''}
