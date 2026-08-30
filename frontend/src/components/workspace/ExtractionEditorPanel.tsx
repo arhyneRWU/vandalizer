@@ -125,7 +125,10 @@ export function ExtractionEditorPanel() {
   const [combinedContext, setCombinedContext] = useState(false)
   // Cross-field rule outcomes for the last run. null = the set defines no
   // rules; an empty-failure report is a different thing from no report.
-  const [crossField, setCrossField] = useState<CrossFieldRunReport | null>(null)
+  // Index-aligned with resultSets. The strip shows the report for the set the
+  // user is actually looking at — a single merged report over a multi-document
+  // run describes the last document and nothing else.
+  const [crossFieldSets, setCrossFieldSets] = useState<(CrossFieldRunReport | null)[]>([])
 
   const results = resultSets[activeResultIdx] ?? {}
   const resultSources = resultSourceSets[activeResultIdx] ?? {}
@@ -181,6 +184,11 @@ export function ExtractionEditorPanel() {
     setResultSourceSets(pending ? [pending.sources ?? {}] : [])
     setResultDocNames([])
     setActiveResultIdx(0)
+    // A previous run's rule outcomes must not sit under a new run's values —
+    // the run path already resets this; the open path (rail click, or a
+    // different set entirely) did not, so a red "2 of 3 failed" strip survived
+    // onto a run that never produced it.
+    setCrossFieldSets([])
     setActiveTab('design')
     getSearchSet(openExtractionId)
       .then(setSearchSet)
@@ -297,7 +305,7 @@ export function ExtractionEditorPanel() {
       setResultSets(finalSets)
       setResultSourceSets(sets.length > 0 ? srcSets : [{}])
       setResultDocNames(finalSets.map((_, i) => runDocNames[i] ?? `Result ${i + 1}`))
-      setCrossField(resp.cross_field ?? null)
+      setCrossFieldSets(resp.cross_field_sets ?? (resp.cross_field ? [resp.cross_field] : []))
       setActiveResultIdx(0)
     } catch (err) {
       if (err instanceof ApiError && err.status === 0) {
@@ -306,14 +314,16 @@ export function ExtractionEditorPanel() {
         // land here instead of only in the History tab.
         const run = await recoverRunFromHistory(openExtractionId)
         if (run?.status === 'completed') {
-          const snap = run.result_snapshot as { normalized?: Record<string, unknown>; sources?: ExtractionSourceMap; cross_field?: CrossFieldRunReport | null } | undefined
+          const snap = run.result_snapshot as { normalized?: Record<string, unknown>; sources?: ExtractionSourceMap; cross_field?: CrossFieldRunReport | null; cross_field_sets?: (CrossFieldRunReport | null)[] } | undefined
           const map: Record<string, string> = {}
           for (const [k, v] of Object.entries(snap?.normalized ?? {})) {
             map[k] = v === null ? 'N/A' : String(v)
           }
           setResultSets([map])
           setResultSourceSets([snap?.sources ?? {}])
-          setCrossField(snap?.cross_field ?? null)
+          setCrossFieldSets(
+            snap?.cross_field_sets ?? (snap?.cross_field ? [snap.cross_field] : []),
+          )
           // The history snapshot merges all documents into one value map, so
           // a multi-doc run recovers as a single combined result set.
           setResultDocNames([docUuids.length > 1 ? `Combined (${docUuids.length} docs)` : runDocNames[0] ?? 'Result 1'])
@@ -822,7 +832,7 @@ export function ExtractionEditorPanel() {
           searchSetUuid={openExtractionId ?? undefined}
           onValueClick={handleValueClick}
           sources={resultSources}
-          crossField={crossField}
+          crossField={crossFieldSets[activeResultIdx] ?? null}
           resultSets={resultSets}
           activeResultIdx={activeResultIdx}
           onSetActiveResultIdx={setActiveResultIdx}
@@ -1134,6 +1144,12 @@ function CrossFieldRunStrip({ report }: { report: CrossFieldRunReport | null }) 
   const { summary } = report
   const failures = report.results.filter(r => r.status === 'fail')
   const failed = failures.length > 0
+  // No rule reached a verdict — every one was unparseable. "All 0 checks
+  // passed" in green is the exact claim this strip exists to avoid: the
+  // checks did not run, and a budget that came back as "TBD" is the case
+  // that produces it. Absent is not passing.
+  const decisive = summary.pass + summary.fail
+  const inconclusive = decisive === 0
   return (
     <div
       role={failed ? 'alert' : undefined}
@@ -1142,15 +1158,17 @@ function CrossFieldRunStrip({ report }: { report: CrossFieldRunReport | null }) 
         padding: '8px 10px',
         borderRadius: 6,
         fontSize: 12,
-        border: `1px solid ${failed ? '#fca5a5' : '#bbf7d0'}`,
-        background: failed ? '#fef2f2' : '#f0fdf4',
-        color: failed ? '#991b1b' : '#166534',
+        border: `1px solid ${failed ? '#fca5a5' : inconclusive ? '#e5e7eb' : '#bbf7d0'}`,
+        background: failed ? '#fef2f2' : inconclusive ? '#f9fafb' : '#f0fdf4',
+        color: failed ? '#991b1b' : inconclusive ? '#4b5563' : '#166534',
       }}
     >
       <div style={{ fontWeight: 600 }}>
         {failed
-          ? `${summary.fail} of ${summary.pass + summary.fail} cross-field check${summary.pass + summary.fail === 1 ? '' : 's'} failed`
-          : `All ${summary.pass} cross-field check${summary.pass === 1 ? '' : 's'} passed`}
+          ? `${summary.fail} of ${decisive} cross-field check${decisive === 1 ? '' : 's'} failed`
+          : inconclusive
+            ? `No cross-field check could be evaluated on these values`
+            : `All ${summary.pass} cross-field check${summary.pass === 1 ? '' : 's'} passed`}
         {summary.unparseable > 0 && (
           <span style={{ fontWeight: 400, color: '#6b7280' }}>
             {' '}· {summary.unparseable} could not be evaluated

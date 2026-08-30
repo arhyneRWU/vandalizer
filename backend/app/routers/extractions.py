@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -996,6 +997,7 @@ def _evaluate_cross_field_rules(search_set, values: dict) -> Optional[dict]:
         if not results:
             return None
         return {"results": results, "summary": summarize_results(results)}
+
     except Exception:
         logger.exception(
             "Cross-field evaluation failed for search set %s",
@@ -1088,7 +1090,41 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         # shipped with none of them applied. Read-only: evaluation counters
         # stay tied to validation runs, where the user can mark a false
         # positive, so this doesn't quietly move a rule toward auto-disable.
-        cross_field = _evaluate_cross_field_rules(ss, normalized) if not no_values else None
+        # Off the event loop: a `custom_expression` rule runs through
+        # `execute_sandboxed_code`, which joins a worker thread with a 5s
+        # timeout plus stop-grace. On the opt-in Validate button that stalled
+        # one request; on the hot path of every extraction it would stall the
+        # whole server, repeatedly, for one bad expression.
+        # One report per result set, index-aligned with `results` exactly like
+        # `sources` — because `normalized` is a last-document-wins merge. On a
+        # 5-proposal run the merged map is document 5's values, so a single
+        # report rendered above a per-document selector told a user reading
+        # document 1 that document 5's budget added up. Rules are per-document
+        # claims; the report has to be too.
+        cross_field_sets: list[Optional[dict]] = []
+        if not no_values:
+            for entity in results:
+                cross_field_sets.append(
+                    await asyncio.to_thread(
+                        _evaluate_cross_field_rules,
+                        ss,
+                        entity if isinstance(entity, dict) else {},
+                    )
+                )
+        # The merged report stays for the combined-context case and for any
+        # consumer that wants one answer for the run. For a single result set
+        # it is the same evaluation, so reuse it rather than paying for it
+        # twice — a `custom_expression` rule costs up to 5s of thread time per
+        # evaluation, and N+1 of those on a 20-document run is a minute of
+        # worker time bought for nothing.
+        if no_values:
+            cross_field = None
+        elif len(cross_field_sets) == 1:
+            cross_field = cross_field_sets[0]
+        else:
+            cross_field = await asyncio.to_thread(
+                _evaluate_cross_field_rules, ss, normalized,
+            )
 
         await activity_service.activity_update(
             activity.id,
@@ -1097,6 +1133,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 "normalized": normalized,
                 "sources": merged_sources,
                 "cross_field": cross_field,
+                "cross_field_sets": cross_field_sets,
                 "document_uuids": document_uuids,
                 "search_set_uuid": req.search_set_uuid,
             },
@@ -1109,7 +1146,12 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         from app.tasks.quality_tasks import auto_validate_extraction
         auto_validate_extraction.delay(req.search_set_uuid, user.user_id, req.model)
 
-        return {"results": results, "sources": sources, "cross_field": cross_field}
+        return {
+            "results": results,
+            "sources": sources,
+            "cross_field": cross_field,
+            "cross_field_sets": cross_field_sets,
+        }
     except Exception as e:
         await activity_service.activity_finish(
             activity.id, ActivityStatus.FAILED, error=str(e),

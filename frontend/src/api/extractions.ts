@@ -147,6 +147,10 @@ export function runExtractionSync(data: {
     results: unknown[]
     sources?: ExtractionSourceMap[]
     cross_field?: CrossFieldRunReport | null
+    /** One report per result set, index-aligned with `results`. `cross_field`
+     * is the merged-values report, which on a multi-document run describes the
+     * last document only — read this instead when showing one set. */
+    cross_field_sets?: (CrossFieldRunReport | null)[]
     error?: string
   }>('/api/extractions/run-sync', {
     method: 'POST',
