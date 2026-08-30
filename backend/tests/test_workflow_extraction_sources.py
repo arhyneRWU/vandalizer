@@ -101,8 +101,15 @@ class TestExtractionNodeRequestsSources:
         assert kwargs["doc_texts"] == ["previous step output", "doc one"]
         metas = kwargs["doc_metadata"]
         assert len(metas) == 2
-        assert metas[0] == {"uuid": None, "title": None, "text_markers": []}
+        assert metas[0]["uuid"] is None
+        assert metas[0]["text_markers"] == []
+        # Tagged, so a quote located inside a previous LLM step's own output
+        # cannot be mistaken for evidence from a source document — the check
+        # that sets `verified` only asks whether the quote was found in the
+        # text it searched, and here that text is the model's own words.
+        assert metas[0]["kind"] == "step_input"
         assert metas[1]["uuid"] == "u1"
+        assert "kind" not in metas[1]
 
     @patch("app.services.workflow_engine.data_extraction_model")
     def test_missing_metadata_still_produces_aligned_placeholders(self, mock_extract):
@@ -117,6 +124,8 @@ class TestExtractionNodeRequestsSources:
 
         metas = mock_extract.call_args.kwargs["doc_metadata"]
         assert len(metas) == 2
+        # Documents with no hydrated metadata, not step inputs — the placeholder
+        # is bare, with no origin tag.
         assert all(m == {"uuid": None, "title": None, "text_markers": []} for m in metas)
 
 
@@ -182,3 +191,71 @@ class TestHydration:
             "uuid": "d1", "title": "Proposal",
             "text_markers": [{"page": 1, "char_offset": 0}],
         }]
+
+
+class TestSidecarTravelsBesideTheOutput:
+    """Every other capture_sources caller pops the sidecar off the entities.
+
+    Left inline it stops the entity being a flat {field: value} map, and three
+    things read that shape: approval artifact detection (a dict value drops an
+    editable field table to a raw JSON blob), DataExportNode's csv.DictWriter
+    (headers from row 0, extrasaction="raise" — so a run where only some
+    documents carried quotes raises mid-export), and any downstream LLM step,
+    which json-dumps its input into the prompt.
+    """
+
+    @patch("app.services.workflow_engine.data_extraction_model")
+    def test_entities_stay_flat(self, mock_extract):
+        mock_extract.return_value = {
+            "raw": [{
+                "Award Amount": "$4,200,000",
+                SOURCE_KEY: {"Award Amount": {"quote": "The award is $4,200,000."}},
+            }],
+            "formatted": "",
+        }
+        out = _node({"keys": ["Award Amount"]}).process(
+            {"output": "text", "step_name": "Prompt"},
+        )
+        entity = out["output"][0]
+        assert entity == {"Award Amount": "$4,200,000"}
+        assert all(isinstance(v, (str, int, float, type(None))) for v in entity.values())
+
+    @patch("app.services.workflow_engine.data_extraction_model")
+    def test_the_sidecar_is_still_carried(self, mock_extract):
+        mock_extract.return_value = {
+            "raw": [{
+                "Award Amount": "$4,200,000",
+                SOURCE_KEY: {"Award Amount": {"quote": "The award is $4,200,000."}},
+            }],
+            "formatted": "",
+        }
+        out = _node({"keys": ["Award Amount"]}).process(
+            {"output": "text", "step_name": "Prompt"},
+        )
+        assert out["field_sources"][0]["Award Amount"]["quote"] == "The award is $4,200,000."
+
+    @patch("app.services.workflow_engine.data_extraction_model")
+    def test_a_run_with_no_quotes_keeps_its_old_shape(self, mock_extract):
+        mock_extract.return_value = {"raw": [{"Award Amount": "$1"}], "formatted": ""}
+        out = _node({"keys": ["Award Amount"]}).process(
+            {"output": "text", "step_name": "Prompt"},
+        )
+        assert "field_sources" not in out
+
+    @patch("app.services.workflow_engine.data_extraction_model")
+    def test_mixed_documents_produce_uniform_rows(self, mock_extract):
+        """The CSV case: document 1's reply carried no quotes, document 2's did.
+        Both rows must still have identical keys."""
+        mock_extract.return_value = {
+            "raw": [
+                {"Award Amount": "$1"},
+                {"Award Amount": "$2", SOURCE_KEY: {"Award Amount": {"quote": "q"}}},
+            ],
+            "formatted": "",
+        }
+        out = _node({"keys": ["Award Amount"]}).process(
+            {"output": "text", "step_name": "Prompt"},
+        )
+        rows = out["output"]
+        assert set(rows[0]) == set(rows[1])
+        assert out["field_sources"] == [{}, {"Award Amount": {"quote": "q"}}]

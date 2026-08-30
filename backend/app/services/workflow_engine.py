@@ -281,7 +281,13 @@ def _build_extraction_inputs(
             else:
                 text = _stringify_context(payload)
             if text:
-                pairs.append((text, _normalize_doc_meta(None)))
+                # Marked so a consumer can tell this apart from a document.
+                # resolve_entity_sources sets verified = "the quote was located
+                # in the text we searched", and here that text is a previous
+                # LLM step's own output — a quote found in it is not evidence
+                # from a source document, and must not read as if it were.
+                # Form Filler's equivalent slot carries the same kind of tag.
+                pairs.append((text, {**_normalize_doc_meta(None), "kind": "step_input"}))
         elif src == "select_document":
             doc = data.get("selected_doc_text") or ""
             if doc:
@@ -508,6 +514,7 @@ class MultiTaskNode(Node):
         errors: list[str] = []
         request_preview = None
         fill_report: list[dict] = []
+        field_sources: list[dict] = []
         filled_values: dict = {}
         for result in results:
             if result.get("_approval_pause"):
@@ -523,6 +530,12 @@ class MultiTaskNode(Node):
             report = result.get("fill_report")
             if isinstance(report, list):
                 fill_report.extend(report)
+            # Same treatment for extraction provenance: a sidecar that the
+            # wrapper drops means a multi-task step silently loses the quotes
+            # its own Extraction task captured.
+            entity_sources = result.get("field_sources")
+            if isinstance(entity_sources, list):
+                field_sources.extend(entity_sources)
             if isinstance(result.get("filled_values"), dict):
                 filled_values.update(result["filled_values"])
             warning = result.get("warning")
@@ -558,6 +571,8 @@ class MultiTaskNode(Node):
             out["request"] = request_preview
         if fill_report:
             out["fill_report"] = fill_report
+        if any(field_sources):
+            out["field_sources"] = field_sources
         if filled_values:
             out["filled_values"] = filled_values
         return out
@@ -630,6 +645,34 @@ class ExtractionNode(Node):
         raw_output = extraction_response.get("raw") if isinstance(extraction_response, dict) else extraction_response
         formatted_output = extraction_response.get("formatted") if isinstance(extraction_response, dict) else extraction_response
 
+        # Split the sidecar out, the way every other capture_sources caller
+        # does (routers/extractions.py, chat_tools, chat_service). Left inline
+        # it is not merely untidy — the entity stops being a flat
+        # {field: value} map, and three things downstream depend on that shape:
+        #
+        #   * approval_service.detect_artifact_kind classifies an extraction
+        #     result as an editable field table only when every value is a
+        #     scalar. A dict value drops it to raw JSON, so a reviewer gets a
+        #     blob to hand-edit instead of a field table — with the provenance
+        #     itself editable.
+        #   * DataExportNode's csv.DictWriter takes its headers from row 0 and
+        #     defaults to extrasaction="raise". The engine attaches the sidecar
+        #     only when it has quotes, so a run where document 1 produced none
+        #     and document 2 did raises ValueError mid-export — a failed run on
+        #     what is often the deliverable.
+        #   * a downstream Prompt/Formatter step json-dumps its input into the
+        #     CONTEXT block, so every quote, page and document id would ride
+        #     into the next model call, several times the size of the values.
+        #
+        # It travels beside the output instead, like Form Filler's fill_report.
+        field_sources: list[dict] = []
+        if isinstance(raw_output, list):
+            for entity in raw_output:
+                if isinstance(entity, dict):
+                    field_sources.append(entity.pop(SOURCE_KEY, None) or {})
+                else:
+                    field_sources.append({})
+
         # Label output with the custom task name when set
         if task_label:
             if isinstance(raw_output, list):
@@ -639,12 +682,17 @@ class ExtractionNode(Node):
             if isinstance(formatted_output, str):
                 formatted_output = f"### {task_label}\n{formatted_output}"
 
-        return {
+        out: dict = {
             "output": raw_output,
             "formatted_output": formatted_output,
             "input": inputs.get("output"),
             "step_name": self.name,
         }
+        # Only when there is provenance to carry, so a run with no quotes keeps
+        # exactly the output shape it had before.
+        if any(field_sources):
+            out["field_sources"] = field_sources
+        return out
 
 
 class PromptNode(Node):
