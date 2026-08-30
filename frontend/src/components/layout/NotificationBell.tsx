@@ -41,9 +41,9 @@ const kindColors: Record<string, string> = {
   extraction_failed: FAILURE_RED,
   document_failed: FAILURE_RED,
   automation_failed: FAILURE_RED,
-  # Not in FAILURE_KINDS, so a warning-severity regression (the ones that get
-  # no email by design) would otherwise fall through to a generic grey bell —
-  # indistinguishable from an informational notice.
+  // Not in FAILURE_KINDS, so a warning-severity regression (the ones that get
+  // no email by design) would otherwise fall through to a generic grey bell —
+  // indistinguishable from an informational notice.
   quality_regression: '#d97706',
 }
 
