@@ -968,19 +968,68 @@ _ANAPHORA_RE = re.compile(
 _FOLLOWUP_STARTERS = ("what about", "how about", "and ", "also ", "why", "same for")
 
 
+def _names_its_own_subject(message: str) -> bool:
+    """True when the message carries a subject of its own — a section
+    citation, an identifier, a quoted phrase, a run of shouted tokens.
+
+    Only the literal channels count. The "what is/are …" noun phrase that
+    ``_extract_pin_terms`` also infers is *not* a subject in this sense: "what
+    is the amount?" after a question about an award is exactly the elliptical
+    follow-up condensing exists for.
+    """
+    message = message or ""
+    if _SECTION_REF_RE.search(message) or _QUOTED_PHRASE_RE.search(message):
+        return True
+    for m in _IDENTIFIER_REF_RE.finditer(message):
+        if any(c.isdigit() for c in m.group(0)):
+            return True
+    if _CODE_REF_RE.search(message):
+        return True
+    for m in _SHOUTED_PHRASE_RE.finditer(message):
+        tokens = m.group(0).split()
+        if tokens[0] in _CITATION_TITLE_WORDS:
+            continue
+        if any(sum(ch.isalpha() for ch in tok) >= 3 for tok in tokens):
+            return True
+    return False
+
+
+def _keep_own_terms(message: str, condensed: Optional[str]) -> Optional[str]:
+    """Re-attach any literal term of the user's message the condenser dropped.
+
+    The condense step rewrites for referents, and a rewrite that resolves "it"
+    correctly can still lose the identifier the user typed — retrieving on the
+    conversation's topic instead of what was asked. Cheap to repair: append
+    what went missing rather than trusting the rewrite wholesale.
+    """
+    if not condensed:
+        return condensed
+    lowered = condensed.lower()
+    missing = [t for t in _extract_pin_terms(message) if t.lower() not in lowered]
+    return f"{condensed} {' '.join(missing)}" if missing else condensed
+
+
 def _looks_anaphoric(message: str) -> bool:
     """Heuristic: does this message likely depend on conversation context for
     retrieval? Errs toward True — a needless condense only costs one bounded
     LLM call, while retrieving on a bare "what about year 2?" loses grounding.
+
+    Short does not mean elliptical, though. Treating every message under 100
+    characters as a follow-up meant a new question that named its own subject
+    ("SCARLET ALBATROSS CLOSEOUT 9928") got condensed against the previous
+    turn, retrieved the *previous* question's chunks, and was answered on that
+    subject. A message that names its own subject is left alone.
     """
     msg = " ".join((message or "").strip().lower().split())
     if not msg:
         return False
-    if len(msg) < 100:
-        return True
     if _ANAPHORA_RE.search(msg):
         return True
-    return msg.startswith(_FOLLOWUP_STARTERS)
+    if msg.startswith(_FOLLOWUP_STARTERS):
+        return True
+    if len(msg) < 100:
+        return not _names_its_own_subject(message)
+    return False
 
 
 def _recent_turns(
@@ -1517,6 +1566,7 @@ async def _build_kb_segment(
             retrieval_query, _ = await condense_retrieval_query(
                 message, recent, model_name,
             )
+            retrieval_query = _keep_own_terms(message, retrieval_query)
 
     # Honour the KB's tuned retrieval knobs (k, min_similarity, query
     # rewriting, rerank). cfg.model / prompt_variant / answer_temperature
