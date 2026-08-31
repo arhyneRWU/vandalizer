@@ -95,8 +95,12 @@ async def main(dry_run: bool) -> None:
             from_chunks += 1
         logger.info("  %s -> %r (from %s)", source.uuid, title, origin)
         if not dry_run:
-            source.document_title = title
-            await source.save()
+            # Write the one field, not the whole document: save() would send
+            # every field this process read, so an ingest that updated
+            # chunk_count/status between the find above and this write would
+            # be silently rolled back. The script is re-runnable and will
+            # eventually be run on a live system.
+            await source.set({KnowledgeBaseSource.document_title: title})
 
     logger.info(
         "%s%d source(s): %d from the document, %d from indexed chunks, %d unresolved.",
