@@ -178,6 +178,18 @@ describe('OptimizerInbox', () => {
     expect(await screen.findByText(/Updated just now/i)).toBeInTheDocument()
   })
 
+  it('does not claim the data is fresh when the refresh failed', async () => {
+    mockGet.mockResolvedValueOnce(makeResponse([makeItem()]))
+    render(<OptimizerInbox />)
+    await screen.findByText('Proposal intake')
+
+    mockGet.mockRejectedValueOnce(new Error('Backend unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
+
+    expect(await screen.findByText('Backend unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/Updated/i)).not.toBeInTheDocument()
+  })
+
   it('offers nothing to apply on a tied candidate', async () => {
     mockGet.mockResolvedValue(makeResponse([
       makeItem({ category: 'no_change', tied_with_baseline: true }),
