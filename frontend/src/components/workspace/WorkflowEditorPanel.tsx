@@ -749,7 +749,11 @@ export function WorkflowEditorPanel() {
               )}
               {qualityStatus?.tier && (
                 <>
-                  <QualityBadge tier={qualityStatus.tier} score={qualityStatus.score ?? null} />
+                  <QualityBadge
+                    tier={qualityStatus.tier}
+                    score={qualityStatus.score ?? null}
+                    regressionPending={qualityStatus.regression_pending_review}
+                  />
                   {sparklineScores.length >= 2 && <QualitySparkline scores={sparklineScores} />}
                 </>
               )}
@@ -985,7 +989,11 @@ export function WorkflowEditorPanel() {
                     }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <QualityBadge tier={qualityStatus.tier} score={qualityStatus.score} />
+                        <QualityBadge
+                          tier={qualityStatus.tier}
+                          score={qualityStatus.score}
+                          regressionPending={qualityStatus.regression_pending_review}
+                        />
                         {qualityStatus.last_validated_at && (
                           <span style={{ fontSize: 11, color: '#6b7280' }}>
                             {relativeTime(qualityStatus.last_validated_at)}
