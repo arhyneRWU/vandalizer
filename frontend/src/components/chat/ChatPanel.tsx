@@ -88,7 +88,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     setActivity,
   } = useChat()
 
-  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal } = useWorkspace()
+  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKBs, detachKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal } = useWorkspace()
 
   // When scoped to a project, surface its file/index status so the empty state
   // reflects the project (not a generic assistant) and sets honest expectations.
@@ -998,12 +998,14 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
           attachedUuids={activeKBs.map(kb => kb.uuid)}
           maxAttached={MAX_ATTACHED_KBS}
           onAttach={(kbs) => {
-            for (const kb of kbs) {
-              if (!attachKB(kb.uuid, kb.title)) {
-                toast(`Chat can search at most ${MAX_ATTACHED_KBS} knowledge bases`, 'error')
-                break
-              }
+            // Capacity is decided here, against the attachment as rendered —
+            // the modal already blocks over-selection, so this only fires if
+            // something was attached from elsewhere while it was open.
+            const room = MAX_ATTACHED_KBS - activeKBs.length
+            if (kbs.length > room) {
+              toast(`Chat can search at most ${MAX_ATTACHED_KBS} knowledge bases`, 'error')
             }
+            attachKBs(kbs)
           }}
           onClose={() => setShowAttachKB(false)}
         />

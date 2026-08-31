@@ -623,7 +623,14 @@ async def chat_stream(
             if len(active_kbs) > 1 and title:
                 entries = [{**e, "kb_title": title} for e in entries]
             manifests[uuid] = entries
-            kb_manifest.extend(entries)
+        # The manifest block is truncated by entry count and characters, so
+        # concatenating KB by KB lets a large first KB crowd the last one out
+        # entirely — and the model is then told those documents don't exist
+        # here. Interleave so the cut falls evenly across attached KBs.
+        kb_manifest = _round_robin_merge(
+            [manifests[uuid] for uuid, _ in active_kbs if uuid in manifests],
+            key="source_uuid",
+        )
         try:
             kb_segment, kb_sources = await _build_multi_kb_segment(
                 active_kbs, message, model_name, manifests=manifests,
@@ -1531,13 +1538,13 @@ def _split_questions(message: str) -> list[str]:
     return questions if len(questions) >= 2 else []
 
 
-def _round_robin_merge(pools: list[list[dict]]) -> list[dict]:
-    """Interleave per-question result pools so each question is fairly ranked.
+def _round_robin_merge(pools: list[list[dict]], key: str = "chunk_id") -> list[dict]:
+    """Interleave pools so each contributes before any contributes twice.
 
-    Taking each pool's #1 before any pool's #2 means the downstream top-k trim
-    can't spend the whole budget on the first (or loudest) question — every
-    question contributes before any question gets a second chunk. Deduped by
-    chunk_id.
+    Taking each pool's #1 before any pool's #2 means the downstream trim can't
+    spend the whole budget on the first (or loudest) pool — used for the
+    per-question retrieval pools, for the per-KB pools of a multi-KB turn, and
+    for the manifest union those KBs produce. Deduped on ``key``.
     """
     import itertools
 
@@ -1547,7 +1554,7 @@ def _round_robin_merge(pools: list[list[dict]]) -> list[dict]:
         for r in tier:
             if r is None:
                 continue
-            cid = r.get("chunk_id")
+            cid = r.get(key)
             if cid is not None and cid in seen:
                 continue
             if cid is not None:
@@ -1610,16 +1617,19 @@ async def _build_multi_kb_segment(
     if not kbs:
         return None, []
     if len(kbs) == 1:
-        kb_uuid, kb_title = kbs[0]
+        # One KB reads exactly as it always has: naming it on every snippet
+        # and citation would relabel every existing chat, where there is no
+        # other KB to tell it apart from. The uuid still rides along for
+        # callers that want to know which KB answered.
+        kb_uuid, _kb_title = kbs[0]
         results = await _retrieve_kb_results(
             kb_uuid, message, model_name,
             manifest=(manifests or {}).get(kb_uuid), history=history,
         )
-        for r in results:
-            r["kb_title"] = kb_title
-            r["kb_uuid"] = kb_uuid
         if not results:
             return None, []
+        for r in results:
+            r["kb_uuid"] = kb_uuid
         return await _render_kb_segment(results, message, user_id=user_id)
 
     pools = await asyncio.gather(*[

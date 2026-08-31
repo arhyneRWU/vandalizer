@@ -109,6 +109,9 @@ class TestMultiKBSegment:
 
     @pytest.mark.asyncio
     async def test_a_single_kb_is_not_labelled(self):
+        """One KB reads as it always has — every existing chat sends one, and
+        naming it would relabel all of them. The title is real here on purpose:
+        an empty one would pass whatever the code did."""
         async def fake_retrieve(*_args, **_kwargs):
             return [_chunk(0, "policy.pdf")]
 
@@ -120,11 +123,27 @@ class TestMultiKBSegment:
             ),
         ):
             segment, sources = await chat_service._build_multi_kb_segment(
-                [("kb-a", "")], "question?", "test-model",
+                [("kb-a", "Export Control")], "question?", "test-model",
             )
 
-        assert sources[0]["kb_title"] == ""
-        assert "—" not in segment.text.split("**Source:")[1].split("**")[0]
+        assert sources[0]["kb_title"] is None
+        assert sources[0]["kb_uuid"] == "kb-a"
+        assert "Export Control" not in segment.text
+
+
+class TestManifestUnion:
+    @pytest.mark.asyncio
+    async def test_interleaves_so_a_big_kb_cannot_crowd_out_a_small_one(self):
+        """The manifest block is cut by entry count and characters. Listing KB
+        by KB let a large first KB fill it and leave the model told the last
+        KB's documents don't exist here."""
+        pools = [
+            [{"source_uuid": f"a-{i}", "name": f"a{i}.pdf"} for i in range(50)],
+            [{"source_uuid": "b-0", "name": "b0.pdf"}],
+        ]
+        merged = chat_service._round_robin_merge(pools, key="source_uuid")
+
+        assert merged[1]["source_uuid"] == "b-0"
 
 
 def _make_user(user_id="user1"):

@@ -98,9 +98,13 @@ interface ChatStateContextValue {
   // Replace whatever is attached with this KB and start a fresh chat — what
   // "Chat with this KB" does from the knowledge surfaces.
   activateKB: (uuid: string, title: string) => void
-  // Add a KB to the current chat without disturbing it. No-op when already
-  // attached or at MAX_ATTACHED_KBS; returns false when it did not attach.
-  attachKB: (uuid: string, title: string) => boolean
+  // Add KBs to the current chat without disturbing it. Attaches in one update
+  // — a per-KB call that reported success from inside its own state updater
+  // could not: React defers the updater once one is queued, so attaching a
+  // batch mis-reported the second onwards and skipped the rest. Already
+  // attached and past MAX_ATTACHED_KBS are dropped silently; the caller knows
+  // the capacity (activeKBs.length) and warns before calling.
+  attachKBs: (kbs: AttachedKB[]) => void
   detachKB: (uuid: string) => void
   deactivateKB: () => void
   // Project scope — the whole workspace (files, chat, …) re-scoped to one project.
@@ -235,6 +239,24 @@ export interface AttachedKB {
 // MAX_CHAT_KNOWLEDGE_BASES in backend/app/routers/chat.py, which enforces it.
 export const MAX_ATTACHED_KBS = 3
 
+/**
+ * The attachment after adding `incoming`: already-attached uuids are ignored
+ * and anything past `max` is dropped. Pure and batch-shaped on purpose — the
+ * first version decided per KB *inside* a React state updater and reported
+ * back from there, which React defers once an update is queued, so attaching
+ * three at once mis-reported the second and skipped the third.
+ */
+export function mergeAttachedKBs(
+  prev: AttachedKB[], incoming: AttachedKB[], max: number = MAX_ATTACHED_KBS,
+): AttachedKB[] {
+  const next = [...prev]
+  for (const kb of incoming) {
+    if (next.length >= max) break
+    if (!next.some(existing => existing.uuid === kb.uuid)) next.push(kb)
+  }
+  return next.length === prev.length ? prev : next
+}
+
 function storedKBValue(kbs: AttachedKB[]): string {
   return JSON.stringify(kbs.map(kb => kb.uuid))
 }
@@ -340,6 +362,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [],
   )
   const [activeKBs, setActiveKBs] = useState<AttachedKB[]>([])
+  const kbsHydratedRef = useRef(false)
   const activeKBUuid = activeKBs[0]?.uuid ?? null
   const activeKBTitle = activeKBs[0]?.title ?? null
   const [activeProjectUuid, setActiveProjectUuid] = useState<string | null>(null)
@@ -479,24 +502,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     updateSearch((prev) => ({ ...prev, mode: undefined, workflow: undefined, extraction: undefined, automation: undefined, tab: undefined }))
   }, [updateSearch])
 
-  const attachKB = useCallback((uuid: string, title: string) => {
-    let attached = false
-    setActiveKBs(prev => {
-      if (prev.some(kb => kb.uuid === uuid) || prev.length >= MAX_ATTACHED_KBS) return prev
-      attached = true
-      const next = [...prev, { uuid, title }]
-      setStoredRaw(KB_STORAGE_KEY, storedKBValue(next))
-      return next
-    })
-    return attached
+  const attachKBs = useCallback((kbs: AttachedKB[]) => {
+    setActiveKBs(prev => mergeAttachedKBs(prev, kbs))
   }, [])
 
   const detachKB = useCallback((uuid: string) => {
-    setActiveKBs(prev => {
-      const next = prev.filter(kb => kb.uuid !== uuid)
-      setStoredRaw(KB_STORAGE_KEY, next.length ? storedKBValue(next) : null)
-      return next
-    })
+    setActiveKBs(prev => prev.filter(kb => kb.uuid !== uuid))
   }, [])
 
   const deactivateKB = useCallback(() => {
@@ -651,7 +662,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
 
     const storedKBUuids = parseStoredKBs(getStoredRaw(KB_STORAGE_KEY))
-    if (storedKBUuids.length) {
+    if (!storedKBUuids.length) {
+      kbsHydratedRef.current = true
+    } else {
       import('../api/knowledge').then(({ getKnowledgeBase }) => {
         // Titles are re-fetched rather than persisted, so a renamed KB never
         // shows stale chrome. A KB that no longer resolves is dropped; the
@@ -666,12 +679,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             })
             setActiveKBs(restored)
             setStoredRaw(KB_STORAGE_KEY, restored.length ? storedKBValue(restored) : null)
+            kbsHydratedRef.current = true
           })
-      }).catch(() => {})
+      }).catch(() => { kbsHydratedRef.current = true })
     }
     // Run once on mount; search params are read for the deep-link guard only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Persist the attachment whenever it changes. Deliberately an effect, not a
+  // write inside the state updaters: StrictMode double-invokes those, and a
+  // reducer with a side effect in it is a trap for the next reader. Held off
+  // until the mount-time restore has finished, so an empty initial state can't
+  // clear storage before the stored uuids have been resolved.
+  useEffect(() => {
+    if (!kbsHydratedRef.current) return
+    setStoredRaw(KB_STORAGE_KEY, activeKBs.length ? storedKBValue(activeKBs) : null)
+  }, [activeKBs])
 
   // Projects and knowledge bases are team-scoped. Switching the current team
   // (which happens live, without a reload) must drop any active scope so we
@@ -757,7 +781,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     newChatSignal, triggerNewChat,
     focusChatSignal, focusChat,
     pendingChatMessage, sendChatMessage, clearPendingChatMessage,
-    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB,
+    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKBs, detachKB, deactivateKB,
     activeProjectUuid, activeProjectTitle, activeProjectRootFolder, activeProjectTeamId, activeProjectRole, activateProject, deactivateProject, refreshActiveProject,
     processingDoc, setProcessingDoc,
     selectedDocsProcessing, setSelectedDocsProcessing,
@@ -766,7 +790,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     newChatSignal, triggerNewChat,
     focusChatSignal, focusChat,
     pendingChatMessage, sendChatMessage, clearPendingChatMessage,
-    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB,
+    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKBs, detachKB, deactivateKB,
     activeProjectUuid, activeProjectTitle, activeProjectRootFolder, activeProjectTeamId, activeProjectRole, activateProject, deactivateProject, refreshActiveProject,
     processingDoc,
     selectedDocsProcessing, setSelectedDocsProcessing,
