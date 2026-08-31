@@ -487,14 +487,31 @@ export function ExtractionEditorPanel() {
     }
   }
 
+  // Persisted next to the Attach Template card: the failure explanation is
+  // two sentences long, which a toast doesn't hold on screen long enough for.
+  const [templateError, setTemplateError] = useState<string | null>(null)
   const handleAttachTemplate = async (file: File) => {
     if (!openExtractionId) return
+    setTemplateError(null)
     setAttachingTemplate(true)
     try {
       const ss = await uploadPdfTemplate(openExtractionId, file)
       setSearchSet(ss)
       refreshItems()
       setActiveTab('design')
+      toast(
+        ss.item_count
+          ? `Template attached — ${ss.item_count} field${ss.item_count === 1 ? '' : 's'} generated from the PDF form`
+          : 'Template attached',
+        'success',
+      )
+    } catch (err) {
+      // The common failure is a PDF with no form fields (422). It used to
+      // reject silently: nothing awaited this promise, so the button just sat
+      // there and the upload looked broken.
+      const message = err instanceof ApiError ? err.message : 'Could not attach the template'
+      setTemplateError(message)
+      toast(message, 'error')
     } finally {
       setAttachingTemplate(false)
     }
@@ -868,6 +885,7 @@ export function ExtractionEditorPanel() {
           onBuildFromDocument={handleBuildFromDocument}
           buildingFromDoc={buildingFromDoc}
           attachingTemplate={attachingTemplate}
+          templateError={templateError}
           generatingTemplate={generatingTemplate}
           exportingPdf={exportingPdf}
           hasDocuments={selectedDocUuids.length > 0}
@@ -1796,7 +1814,7 @@ function QualityPulse({ searchSetUuid, itemCount = 0 }: { searchSetUuid?: string
 
 /* ── Tools Tab ── */
 
-function ToolsTab({
+export function ToolsTab({
   onClone,
   onDelete,
   onAttachTemplate,
@@ -1805,6 +1823,7 @@ function ToolsTab({
   onBuildFromDocument,
   buildingFromDoc,
   attachingTemplate,
+  templateError,
   generatingTemplate,
   exportingPdf,
   hasDocuments,
@@ -1820,6 +1839,7 @@ function ToolsTab({
   onBuildFromDocument: () => void
   buildingFromDoc: boolean
   attachingTemplate: boolean
+  templateError: string | null
   generatingTemplate: boolean
   exportingPdf: boolean
   hasDocuments: boolean
@@ -1854,7 +1874,7 @@ function ToolsTab({
           description={
             !hasDocuments
               ? 'Select a document first, then use AI to generate extraction fields'
-              : 'Build extraction from a selected document using AI'
+              : 'Build extraction fields from a selected document using AI — works with any document'
           }
           onClick={onBuildFromDocument}
           disabled={buildingFromDoc || !hasDocuments}
@@ -1871,10 +1891,11 @@ function ToolsTab({
           description={
             hasTemplate
               ? 'A fillable PDF template is attached. Click to replace it.'
-              : 'Upload a fillable PDF to auto-generate extraction fields and enable PDF export'
+              : 'Upload a fillable PDF — one with form fields in it — to auto-generate matching extraction fields and enable PDF export. For a regular document, use From Document.'
           }
           onClick={onAttachTemplate}
           disabled={attachingTemplate || generatingTemplate}
+          error={templateError}
           secondaryAction={{
             label: generatingTemplate ? 'Generating...' : 'Generate example from fields →',
             onClick: onGenerateTemplate,
@@ -1903,6 +1924,7 @@ function ToolCard({
   onClick,
   style,
   secondaryAction,
+  error,
 }: {
   title: string
   description: string
@@ -1911,6 +1933,7 @@ function ToolCard({
   onClick: () => void
   style?: React.CSSProperties
   secondaryAction?: { label: string; onClick: () => void; disabled?: boolean }
+  error?: string | null
 }) {
   return (
     <div
@@ -1955,6 +1978,18 @@ function ToolCard({
         {title}
       </div>
       <div style={{ fontSize: 12, color: '#5f6368', lineHeight: 1.4 }}>{description}</div>
+      {error && (
+        <div
+          role="alert"
+          style={{
+            fontSize: 12, lineHeight: 1.4, color: '#991b1b',
+            background: '#fef2f2', border: '1px solid #fecaca',
+            borderRadius: 6, padding: '8px 10px',
+          }}
+        >
+          {error}
+        </div>
+      )}
       {secondaryAction && (
         <>
           <div style={{ borderTop: '1px solid #f3f4f6', marginTop: 4 }} />
