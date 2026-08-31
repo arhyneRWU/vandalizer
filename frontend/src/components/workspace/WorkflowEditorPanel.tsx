@@ -2571,6 +2571,29 @@ function describeConfigSaveError(err: unknown, what: string): string {
  * backend now fails such a run, but refusing the save is where the author
  * actually is when the mistake happens.
  */
+/**
+ * Detach a saved prompt or formatter from a step, keeping an editable copy of
+ * the text it was running.
+ *
+ * Linking deletes the inline body — while linked, the saved item is the source
+ * of truth and is resolved at runtime — so dropping the link on its own left a
+ * named step with no instruction text at all. ``body`` is the resolved saved
+ * body the editor already loaded for its preview; an empty one (a saved prompt
+ * with no content yet) leaves the field alone rather than writing "".
+ */
+export function unlinkSavedItem(
+  data: Record<string, unknown>,
+  linkField: 'saved_prompt_uuid' | 'saved_formatter_uuid',
+  bodyField: 'prompt' | 'format_template',
+  body: string,
+): Record<string, unknown> {
+  const next = { ...data }
+  delete next[linkField]
+  if (body) next[bodyField] = body
+  return next
+}
+
+
 export function requiredFieldMessage(taskName: string, data: Record<string, unknown>): string | null {
   const text = (key: string) => (typeof data[key] === 'string' ? (data[key] as string) : '').trim()
   if (taskName === 'AddWebsite' && !text('url')) {
@@ -3336,11 +3359,11 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   const handleUnlinkSavedPrompt = () => {
-    setTaskData(prev => {
-      const next = { ...prev }
-      delete (next as Record<string, unknown>).saved_prompt_uuid
-      return next
-    })
+    // Unlink means "detach into an editable copy". Linking deleted the inline
+    // prompt (the saved body is the source of truth while linked), so dropping
+    // the link alone left a named step with no instruction text at all. Carry
+    // the resolved body across — it is already loaded for the preview above.
+    setTaskData(prev => unlinkSavedItem(prev, 'saved_prompt_uuid', 'prompt', linkedSavedBody))
   }
 
   const handleSelectSavedFormatter = (id: string, name: string) => {
@@ -3353,11 +3376,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   const handleUnlinkSavedFormatter = () => {
-    setTaskData(prev => {
-      const next = { ...prev }
-      delete (next as Record<string, unknown>).saved_formatter_uuid
-      return next
-    })
+    // Same as the prompt above: keep the template the step was running.
+    setTaskData(prev => unlinkSavedItem(prev, 'saved_formatter_uuid', 'format_template', linkedSavedBody))
   }
 
   // AI: suggest extraction fields from the workspace's selected document(s).
@@ -3691,7 +3711,10 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                       <button
                         type="button"
                         onClick={handleUnlinkSavedPrompt}
-                        title="Unlink this saved prompt and enter one manually"
+                        disabled={linkedSavedLoading}
+                        title={linkedSavedLoading
+                          ? 'Loading the saved prompt…'
+                          : 'Unlink this saved prompt and keep an editable copy of its text'}
                         style={{
                           fontSize: 11, padding: '2px 8px', border: '1px solid #d1d5db',
                           borderRadius: 4, backgroundColor: '#fff', color: '#374151',
@@ -3884,7 +3907,10 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
                       <button
                         type="button"
                         onClick={handleUnlinkSavedFormatter}
-                        title="Unlink this saved formatter and enter one manually"
+                        disabled={linkedSavedLoading}
+                        title={linkedSavedLoading
+                          ? 'Loading the saved formatter…'
+                          : 'Unlink this saved formatter and keep an editable copy of its template'}
                         style={{
                           fontSize: 11, padding: '2px 8px', border: '1px solid #d1d5db',
                           borderRadius: 4, backgroundColor: '#fff', color: '#374151',
