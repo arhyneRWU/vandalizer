@@ -1203,7 +1203,20 @@ async def run_extraction(
             combined_context=body.combined_context,
             document_warnings=document_warnings,
         )
-        await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
+        from app.routers.extractions import (
+            EXTRACTION_NO_VALUES_ERROR,
+            _entity_has_values,
+        )
+
+        # The same guard the in-app path applies: a run whose every field came
+        # back null extracted nothing, and recording it as completed hands an
+        # API caller a green tick over a set of confident "not found" answers.
+        no_values = not any(_entity_has_values(e) for e in results)
+        await activity_service.activity_finish(
+            activity.id,
+            ActivityStatus.FAILED if no_values else ActivityStatus.COMPLETED,
+            error=EXTRACTION_NO_VALUES_ERROR if no_values else None,
+        )
         await activity_service.activity_update(
             activity.id,
             documents_touched=len(body.document_uuids),
@@ -1212,6 +1225,7 @@ async def run_extraction(
             "results": results,
             "activity_id": str(activity.id),
             "document_warnings": document_warnings,
+            **({"error": EXTRACTION_NO_VALUES_ERROR} if no_values else {}),
         }
     except Exception as e:
         await activity_service.activity_finish(
