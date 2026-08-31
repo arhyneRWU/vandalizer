@@ -193,21 +193,33 @@ const TEST_STEP_SUPPORTED_TYPES = new Set([
   'FormFiller', 'DataExport', 'PackageBuilder', 'KnowledgeBaseQuery', 'APINode',
 ])
 
-const TEST_STEP_TOOLTIP = [
-  'Tests this step in isolation — prior steps are NOT run.',
-  'If this step references earlier step output, that input will be empty.',
-  '',
-  'What it does:',
-  '• Runs only this step with its current configuration',
-  '• Uses the first selected document as input',
-  '• Makes real LLM / network calls (spends real tokens)',
-  '• Shows the raw output below',
-  '',
-  "What it doesn't do:",
-  '• Run upstream steps to build context',
-  '• Iterate over all selected documents (only the first is used)',
-  '• Persist the result — close the panel and it’s gone',
-].join('\n')
+// Steps whose test input is their own configuration — a URL, an endpoint, a
+// knowledge-base question — rather than the run's documents. Testing one with
+// no document selected is the normal case, not a missing prerequisite.
+const TEST_STEP_NO_DOCUMENT_TYPES = new Set([
+  'APINode', 'CrawlerNode', 'AddWebsite', 'KnowledgeBaseQuery',
+])
+
+const TEST_STEP_NEEDS_DOCUMENT_HINT =
+  'Select a document in the library first — this step is tested against the first selected document.'
+
+function testStepTooltip(usesDocument: boolean): string {
+  return [
+    'Tests this step in isolation — prior steps are NOT run.',
+    'If this step references earlier step output, that input will be empty.',
+    '',
+    'What it does:',
+    '• Runs only this step with its current configuration',
+    ...(usesDocument ? ['• Uses the first selected document as input'] : []),
+    '• Makes real LLM / network calls (spends real tokens)',
+    '• Shows the raw output below',
+    '',
+    "What it doesn't do:",
+    '• Run upstream steps to build context',
+    ...(usesDocument ? ['• Iterate over all selected documents (only the first is used)'] : []),
+    '• Persist the result — close the panel and it’s gone',
+  ].join('\n')
+}
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -2509,6 +2521,37 @@ export function describeRunInput(input: {
   return { missing: true, hint: 'Select a document to run this workflow' }
 }
 
+/**
+ * The documents a step test should run on, and the hint to show when it can't
+ * run for lack of one.
+ *
+ * Test Step used to demand an explicit library selection from every step type,
+ * so an API Node — whose whole input is the URL, headers and body configured
+ * on the step — sat greyed out and unclickable in a workflow that has no
+ * documents at all, with a tooltip that never said why (support ticket). A
+ * step is testable when the input it actually consumes is available: nothing
+ * at all for the self-contained types, and otherwise the selection, falling
+ * back to the workflow's fixed documents the way a run does.
+ */
+export function describeTestStepInput(input: {
+  taskName: string
+  triggerType: string | undefined
+  selectedDocUuids: string[]
+  fixedDocUuids: string[]
+}): { docUuids: string[]; blockedHint: string | null } {
+  const { taskName, triggerType, selectedDocUuids, fixedDocUuids } = input
+  // Only the first document is ever used, and the fixed documents stand in
+  // for a selection exactly as they do for the Run button.
+  const docUuids = (selectedDocUuids.length > 0 ? selectedDocUuids : fixedDocUuids).slice(0, 1)
+  if (TEST_STEP_NO_DOCUMENT_TYPES.has(taskName)) return { docUuids, blockedHint: null }
+  // A "no input" workflow never has documents, so asking for one is a demand
+  // the author cannot meet. The step runs on an empty input, which is what it
+  // will get in a real run too.
+  if (triggerType === 'no_input') return { docUuids, blockedHint: null }
+  if (docUuids.length > 0) return { docUuids, blockedHint: null }
+  return { docUuids, blockedHint: TEST_STEP_NEEDS_DOCUMENT_HINT }
+}
+
 // Explain a failed input/output-config save. The backend answers PATCH on a
 // workflow the viewer can see but not manage (shared or verified) with a 404,
 // so surfacing the raw "Workflow not found" would read as if the workflow
@@ -3089,6 +3132,17 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   const promptMissing = promptTaskIsEmpty(task.name, taskData)
   const PROMPT_MISSING_HINT = 'This step needs a prompt before it can be saved, tested, or run.'
 
+  const testInput = describeTestStepInput({
+    taskName: task.name,
+    triggerType: inputCfg?.trigger_type as string | undefined,
+    selectedDocUuids,
+    fixedDocUuids: fixedDocs.map(d => d.uuid),
+  })
+  // Whichever reason applies is what the button's tooltip says — a disabled
+  // control that doesn't explain itself is the ticket this came from.
+  const testBlockedHint = promptMissing ? PROMPT_MISSING_HINT : testInput.blockedHint
+  const testDisabled = testing || testBlockedHint !== null
+
   const handleUpdate = async () => {
     if (promptMissing) return
     setSaveError(null)
@@ -3115,7 +3169,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
   }
 
   const handleTestStep = async () => {
-    if (selectedDocUuids.length === 0 || promptMissing) return
+    if (testBlockedHint !== null) return
     setTesting(true)
     setTestProgress(0)
     setTestResult(null)
@@ -3134,7 +3188,7 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
       const { task_id } = await testStep({
         task_name: task.name,
         task_data: taskData,
-        document_uuids: selectedDocUuids.slice(0, 1),
+        document_uuids: testInput.docUuids,
       })
 
       // Poll for test result
@@ -5341,14 +5395,14 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         {TEST_STEP_SUPPORTED_TYPES.has(task.name) && (
           <button
             onClick={handleTestStep}
-            disabled={testing || selectedDocUuids.length === 0 || promptMissing}
-            title={promptMissing ? PROMPT_MISSING_HINT : TEST_STEP_TOOLTIP}
+            disabled={testDisabled}
+            title={testBlockedHint ?? testStepTooltip(!TEST_STEP_NO_DOCUMENT_TYPES.has(task.name))}
             style={{
               flex: 1, padding: '10px 16px', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
               border: '1px solid #d1d5db', borderRadius: 6, backgroundColor: '#fff',
-              cursor: testing || selectedDocUuids.length === 0 || promptMissing ? 'not-allowed' : 'pointer',
+              cursor: testDisabled ? 'not-allowed' : 'pointer',
               color: '#374151',
-              opacity: testing || selectedDocUuids.length === 0 || promptMissing ? 0.5 : 1,
+              opacity: testDisabled ? 0.5 : 1,
             }}
           >
             {testing ? 'Testing...' : 'Test Step'}
