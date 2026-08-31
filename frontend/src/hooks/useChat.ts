@@ -43,7 +43,7 @@ export function useChat() {
   const citationsRef = useRef<Citation[]>([])
 
   const send = useCallback(
-    async (message: string, documentUuids: string[] = [], model?: string, knowledgeBaseUuid?: string, includeOnboardingContext?: boolean, folderUuids?: string[], isFirstSession?: boolean, projectUuid?: string) => {
+    async (message: string, documentUuids: string[] = [], model?: string, knowledgeBaseUuids?: string[], includeOnboardingContext?: boolean, folderUuids?: string[], isFirstSession?: boolean, projectUuid?: string) => {
       setError(null)
       setErrorDetails(null)
       setIsStreaming(true)
@@ -114,7 +114,7 @@ export function useChat() {
             }
           },
           model,
-          knowledgeBaseUuid,
+          knowledgeBaseUuids,
           includeOnboardingContext,
           folderUuids,
           isFirstSession,
