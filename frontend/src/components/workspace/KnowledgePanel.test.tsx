@@ -261,6 +261,56 @@ describe('KnowledgePanel add-source permissions', () => {
   }, 30000)
 })
 
+// Support ticket: deleting a document from Files left its KB source showing a
+// bare UUID, with nothing to say the file was gone — while the KB kept
+// answering from the chunks it had already indexed.
+describe('KnowledgePanel source whose document was deleted', () => {
+  beforeEach(() => {
+    getKnowledgeBase.mockClear()
+  })
+
+  it('keeps the filename and marks it deleted', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-3',
+        source_type: 'document',
+        document_uuid: '12423A16EF3F476BA92B57F5301C2EFF',
+        document_title: 'Award Letter.pdf',
+        document_exists: false,
+        status: 'ready',
+        chunk_count: 7,
+        created_at: '2026-01-01T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    expect(screen.getByText('Award Letter.pdf')).toBeInTheDocument()
+    expect(screen.getByText(/source deleted/i)).toBeInTheDocument()
+    expect(screen.queryByText('12423A16EF3F476BA92B57F5301C2EFF')).not.toBeInTheDocument()
+  }, 30000)
+
+  it('says nothing about deletion while the document is still there', async () => {
+    detail.current = makeDetail({
+      can_manage: true,
+      sources: [{
+        uuid: 'src-4',
+        source_type: 'document',
+        document_uuid: 'doc-9',
+        document_title: 'Award Letter.pdf',
+        document_exists: true,
+        status: 'ready',
+        chunk_count: 7,
+        created_at: '2026-01-01T00:00:00Z',
+      }],
+    })
+    await openDetail()
+
+    expect(screen.getByText('Award Letter.pdf')).toBeInTheDocument()
+    expect(screen.queryByText(/source deleted/i)).not.toBeInTheDocument()
+  }, 30000)
+})
+
 // Support ticket: an empty KB disabled Chat and the whole validation family,
 // but Export happily downloaded a file with no sources in it.
 describe('KnowledgePanel export on an empty KB', () => {
