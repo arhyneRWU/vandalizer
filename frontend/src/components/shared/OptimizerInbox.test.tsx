@@ -178,7 +178,7 @@ describe('OptimizerInbox', () => {
     expect(await screen.findByText(/Updated just now/i)).toBeInTheDocument()
   })
 
-  it('does not claim the data is fresh when the refresh failed', async () => {
+  it('replaces the panel with the error when a refresh fails', async () => {
     mockGet.mockResolvedValueOnce(makeResponse([makeItem()]))
     render(<OptimizerInbox />)
     await screen.findByText('Proposal intake')
@@ -186,8 +186,15 @@ describe('OptimizerInbox', () => {
     mockGet.mockRejectedValueOnce(new Error('Backend unavailable'))
     fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
 
+    // The error branch returns before the header, so the whole panel — rows,
+    // Refresh, "Updated …" stamp — is replaced by the banner and its Retry.
+    // This pins that early return, NOT the justRefreshed gate added in #791:
+    // that gate has no observable effect precisely because of this branch, and
+    // a test written against it passes with or without it.
     expect(await screen.findByText('Backend unavailable')).toBeInTheDocument()
-    expect(screen.queryByText(/Updated/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Refresh/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Proposal intake')).not.toBeInTheDocument()
   })
 
   it('offers nothing to apply on a tied candidate', async () => {
