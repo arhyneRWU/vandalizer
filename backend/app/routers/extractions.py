@@ -2258,6 +2258,26 @@ async def apply_extraction_optimization(
     # Normalize missing body to a defaults instance — UI callers don't send one.
     body = req or ApplyExtractionOptimizationRequest()
 
+    # The same condition the optimizer refuses to auto-apply on. A judge
+    # outage during the baseline-default trial withholds the baseline, and
+    # `tied_with_baseline` is False both when the winner genuinely beat the
+    # baseline and when there was no baseline to beat — so without this the
+    # significance gate silently becomes no gate, by hand, with no 409.
+    if run.baseline_default_score is None and not body.force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "no_baseline",
+                "message": (
+                    "This run has no baseline score to measure the winner "
+                    "against — the judge was unavailable when the baseline was "
+                    "measured, so there is no evidence the winning "
+                    "configuration is an improvement. Re-run the optimization, "
+                    "or re-submit with force=true to apply anyway."
+                ),
+            },
+        )
+
     if run.tied_with_baseline and not body.force:
         raise HTTPException(
             status_code=409,
