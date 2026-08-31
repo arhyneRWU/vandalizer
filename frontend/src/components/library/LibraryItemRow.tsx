@@ -38,9 +38,10 @@ interface Props {
   folders?: LibraryFolder[]
   qualityTier?: string | null
   qualityScore?: number | null
+  regressionPending?: boolean
 }
 
-export function LibraryItemRow({ item, scope, onPin, onFavorite, onClone, onShare, onRemove, onOpen, onEdit, onMoveToFolder, folders, qualityTier, qualityScore }: Props) {
+export function LibraryItemRow({ item, scope, onPin, onFavorite, onClone, onShare, onRemove, onOpen, onEdit, onMoveToFolder, folders, qualityTier, qualityScore, regressionPending }: Props) {
   const { user } = useAuth()
   const { toast } = useToast()
   const shareLink = useShareLink()
@@ -163,7 +164,11 @@ export function LibraryItemRow({ item, scope, onPin, onFavorite, onClone, onShar
             <AuthorChip author={item.created_by} />
           )}
           {(qualityTier != null || qualityScore != null) && item.set_type !== 'prompt' && item.set_type !== 'formatter' && (
-            <QualityBadge tier={qualityTier ?? null} score={qualityScore ?? null} />
+            <QualityBadge
+              tier={qualityTier ?? null}
+              score={qualityScore ?? null}
+              regressionPending={regressionPending}
+            />
           )}
         </div>
         {item.tags.length > 0 && (

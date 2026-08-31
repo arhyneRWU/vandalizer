@@ -68,6 +68,7 @@ async def _attach_quality(ss) -> dict:
             "quality_tier": meta.quality_tier,
             "last_validated_at": meta.last_validated_at.isoformat() if meta.last_validated_at else None,
             "validation_run_count": meta.validation_run_count or 0,
+            "regression_pending_review": meta.regression_pending_review,
         }
 
     latest = await get_latest_validation("search_set", ss.uuid)
@@ -77,9 +78,13 @@ async def _attach_quality(ss) -> dict:
             "quality_tier": None,
             "last_validated_at": latest.get("created_at"),
             "validation_run_count": 1,
+            "regression_pending_review": False,
         }
 
-    return {"quality_score": None, "quality_tier": None, "last_validated_at": None, "validation_run_count": 0}
+    return {
+        "quality_score": None, "quality_tier": None, "last_validated_at": None,
+        "validation_run_count": 0, "regression_pending_review": False,
+    }
 
 
 async def _ss_response(ss, *, can_manage: bool = True) -> SearchSetResponse:
@@ -1725,7 +1730,11 @@ async def get_extraction_quality_status(
     latest = await get_latest_validation("search_set", uuid)
 
     if not latest and not meta:
-        return {"status": "unvalidated", "score": None, "tier": None, "config_changed": False, "stale": False}
+        return {
+            "status": "unvalidated", "score": None, "tier": None,
+            "config_changed": False, "stale": False,
+            "regression_pending_review": False,
+        }
 
     score = meta.quality_score if meta else latest.get("score") if latest else None
     tier = meta.quality_tier if meta else None
@@ -1764,6 +1773,9 @@ async def get_extraction_quality_status(
         "last_validated_at": last_at,
         "config_changed": config_changed,
         "stale": stale,
+        # Monitoring already decided this item regressed and nobody has looked
+        # at it yet; the badge says so instead of showing the tier alone.
+        "regression_pending_review": bool(meta and meta.regression_pending_review),
     }
 
 

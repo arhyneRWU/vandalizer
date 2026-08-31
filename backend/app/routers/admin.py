@@ -2220,6 +2220,30 @@ async def acknowledge_alert(
     alert.acknowledged_by = user.user_id
     alert.acknowledged_at = datetime.datetime.now(datetime.timezone.utc)
     await alert.save()
+
+    # Acknowledging a regression IS the review the item was waiting on, so the
+    # "regression pending review" state must lift with it — otherwise the badge
+    # stays flagged forever and the signal stops meaning anything.
+    if alert.alert_type == "regression":
+        # Regression alerts have no unacknowledged-dedup (unlike stale and
+        # config_changed), so an item can carry several. Clearing the flag on
+        # any one of them un-flags an item that a newer, worse, still-open
+        # alert covers — and takes the recovery baseline with it.
+        still_open = await QualityAlert.find_one(
+            QualityAlert.alert_type == "regression",
+            QualityAlert.item_kind == alert.item_kind,
+            QualityAlert.item_id == alert.item_id,
+            QualityAlert.acknowledged == False,  # noqa: E712
+        )
+        if still_open is None:
+            from app.services.quality_service import clear_regression_review
+            await clear_regression_review(alert.item_kind, alert.item_id)
+        else:
+            logger.info(
+                "Not clearing regression review for %s %s — alert %s is still open",
+                alert.item_kind, alert.item_id, still_open.uuid,
+            )
+
     await _audit(user, "acknowledge_alert", f"Acknowledged quality alert: {uuid}")
     return {"ok": True}
 
