@@ -1,36 +1,26 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { SUPPORTED_EXTENSIONS, SUPPORTED_ACCEPT_ATTR, isSupportedExtension } from './fileTypes'
 
 /**
  * The upload list and the automation file-type filter drifted apart once
  * already: the filter offered `html` (which no upload can produce, so the
  * automation could never fire) and omitted `md` (which uploads fine).
- * Pin the frontend list to the server's, which is the only real gate.
+ *
+ * Parity with the server's ALLOWED_EXTS — the only real gate — is asserted
+ * from the backend suite (``backend/tests/test_file_type_parity.py``), which
+ * can read both files. This side stays free of filesystem access: the frontend
+ * has no @types/node, so a node:fs import fails the typecheck and the build.
  */
-function backendAllowedExts(): string[] {
-  const src = readFileSync(
-    resolve(__dirname, '../../../backend/app/utils/file_validation.py'),
-    'utf-8',
-  )
-  const match = src.match(/ALLOWED_EXTS\s*=\s*\{([^}]*)\}/)
-  if (!match) throw new Error('ALLOWED_EXTS not found in file_validation.py')
-  return match[1]
-    .split(',')
-    .map(part => part.trim().replace(/^["']|["']$/g, ''))
-    .filter(Boolean)
-    .sort()
-}
-
 describe('supported file types', () => {
-  it('matches the extensions the backend accepts', () => {
-    expect([...SUPPORTED_EXTENSIONS].sort()).toEqual(backendAllowedExts())
-  })
-
   it('offers md and does not offer html', () => {
     expect(SUPPORTED_EXTENSIONS).toContain('md')
     expect(SUPPORTED_EXTENSIONS).not.toContain('html')
+  })
+
+  it('covers every extension the uploader accepts', () => {
+    expect([...SUPPORTED_EXTENSIONS].sort()).toEqual(
+      ['csv', 'doc', 'docx', 'md', 'pdf', 'txt', 'xls', 'xlsx'],
+    )
   })
 
   it('builds an accept attribute of dotted extensions', () => {
