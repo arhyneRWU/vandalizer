@@ -261,6 +261,24 @@ def build_document_segments(
     return segments, skipped_no_text, errored, low_quality
 
 
+def partially_ingested_titles(documents: list) -> list[str]:
+    """Titles of documents whose stored text is real but incomplete.
+
+    Deliberately not folded into ``build_document_segments``' return tuple:
+    "the text layer is garbled" and "this is only part of the document" call
+    for different advice, and widening that tuple would touch every caller for
+    a second list the same loop can produce.
+    """
+    out: list[str] = []
+    for doc in documents:
+        if not doc.raw_text:
+            continue
+        detail = document_service.ingestion_warning_text(doc)
+        if detail:
+            out.append(f"{doc.title or doc.uuid} ({detail})")
+    return out
+
+
 def _classify_stream_error(exc: BaseException) -> tuple[str, str]:
     """Classify a chat stream error into (severity, user_message).
 
@@ -504,6 +522,7 @@ async def chat_stream(
     doc_segments, skipped_no_text, errored_docs, low_quality_docs = (
         build_document_segments(documents)
     )
+    partial_docs = partially_ingested_titles(documents)
 
     # Warn the caller about any selected document that the model won't see
     # because text extraction hasn't finished, errored out, or the doc is gone.
@@ -549,6 +568,23 @@ async def chat_stream(
                 "produce clean text."
             ),
             "action": "documents_low_quality",
+            "tokens_dropped": 0,
+        }) + "\n"
+    if partial_docs:
+        # Distinct from the garbled case: this text is fine, there is just less
+        # of it than the document contains. A confident summary of pages 1-30 of
+        # a 400-page package is the failure mode, and nothing about the answer
+        # would reveal it.
+        joined = ", ".join(partial_docs[:5]) + ("…" if len(partial_docs) > 5 else "")
+        yield json.dumps({
+            "kind": "context_notice",
+            "content": (
+                f"{len(partial_docs)} selected document(s) were only partly "
+                f"ingested: {joined}. Answers about them may silently omit "
+                "whatever was not converted. Use \"Retry extraction\" on the "
+                "document to try for the full text."
+            ),
+            "action": "documents_partial_ingestion",
             "tokens_dropped": 0,
         }) + "\n"
 

@@ -1190,6 +1190,10 @@ async def run_extraction(
         search_set_uuid=body.search_set_uuid,
     )
     try:
+        # Same disclosure the in-app run makes — see the note there. A caller
+        # automating against this endpoint is the least likely of all to spot
+        # a half-read document behind a confident answer.
+        document_warnings: list[dict] = []
         results = await ss_svc.run_extraction_sync(
             search_set_uuid=body.search_set_uuid,
             document_uuids=body.document_uuids,
@@ -1197,6 +1201,7 @@ async def run_extraction(
             model=body.model,
             extraction_config_override=body.extraction_config_override,
             combined_context=body.combined_context,
+            document_warnings=document_warnings,
         )
         from app.routers.extractions import (
             EXTRACTION_NO_VALUES_ERROR,
@@ -1219,6 +1224,7 @@ async def run_extraction(
         return {
             "results": results,
             "activity_id": str(activity.id),
+            "document_warnings": document_warnings,
             **({"error": EXTRACTION_NO_VALUES_ERROR} if no_values else {}),
         }
     except Exception as e:
