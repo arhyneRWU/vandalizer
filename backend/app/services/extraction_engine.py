@@ -301,6 +301,11 @@ class ExtractionEngine:
         system_prompt = (
             "You are a data scientist working on a project to extract entities and their properties "
             "from a passage. Ensure all entity names are Human Readable with spaces, not underscores."
+            # Same document text, same models, a different path — a planted
+            # note here cannot misreport a value (a person reviews the
+            # suggested field names before saving), but there is no reason to
+            # let it choose them either.
+            + INJECTION_CLAUSE
         )
 
         chat_agent = create_chat_agent(model, system_prompt=system_prompt, system_config_doc=self._sys_cfg)

@@ -42,3 +42,23 @@ class TestEveryVariantCarriesTheClause:
         for variant, fn in PROMPT_VARIANTS.items():
             body = fn("text")
             assert _resolve_prompt(variant, "text") == body + INJECTION_CLAUSE
+
+
+class TestTheSuggestFieldsPathToo:
+    """The third place document text reaches a model in this file. A planted
+    note there cannot misreport a value — a person reviews the suggested field
+    names before saving — but it can still choose them, and the clause costs
+    nothing (review finding)."""
+
+    def test_build_from_documents_carries_the_clause(self):
+        from unittest.mock import MagicMock, patch
+
+        from app.services.extraction_engine import ExtractionEngine
+
+        engine = ExtractionEngine(system_config_doc={})
+        agent = MagicMock()
+        agent.run_sync.return_value = MagicMock(output='{"entities": ["Award Number"]}')
+        with patch("app.services.extraction_engine.create_chat_agent", return_value=agent) as mk:
+            engine.build_from_documents(["Award Number: BIO-2024-07821"], "gpt-4o")
+
+        assert INJECTION_CLAUSE in mk.call_args.kwargs["system_prompt"]
