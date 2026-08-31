@@ -1140,7 +1140,17 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         )
 
         if no_values:
-            return {"results": results, "sources": sources, "error": EXTRACTION_NO_VALUES_ERROR}
+            # Same keys as the success return. A caller should not have to
+            # branch on which shape it got to know that no rules ran — the
+            # values are absent, so the rule outcomes are too, and saying so
+            # explicitly is cheaper than an optional key with two meanings.
+            return {
+                "results": results,
+                "sources": sources,
+                "cross_field": None,
+                "cross_field_sets": [],
+                "error": EXTRACTION_NO_VALUES_ERROR,
+            }
 
         # Fire-and-forget auto-validation if test cases exist
         from app.tasks.quality_tasks import auto_validate_extraction

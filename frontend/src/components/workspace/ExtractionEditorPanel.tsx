@@ -187,8 +187,11 @@ export function ExtractionEditorPanel() {
     // A previous run's rule outcomes must not sit under a new run's values —
     // the run path already resets this; the open path (rail click, or a
     // different set entirely) did not, so a red "2 of 3 failed" strip survived
-    // onto a run that never produced it.
-    setCrossFieldSets([])
+    // onto a run that never produced it. A run reopened from the rail carries
+    // its own verdict in the same snapshot as its values, so restore that
+    // rather than clearing to nothing: values without the strip re-open a run
+    // that failed a rule looking exactly like one that passed.
+    setCrossFieldSets(pending?.crossFieldSets ?? [])
     setActiveTab('design')
     getSearchSet(openExtractionId)
       .then(setSearchSet)
