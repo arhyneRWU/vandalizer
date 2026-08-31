@@ -643,9 +643,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (didRehydrateScope.current) return
     didRehydrateScope.current = true
-    if (search.project || search.kb) return
 
-    const storedProject = getStoredRaw(PROJECT_STORAGE_KEY)
+    const deepLink = !!(search.project || search.kb)
+    const storedProject = deepLink ? null : getStoredRaw(PROJECT_STORAGE_KEY)
+    const storedKBUuids = deepLink || storedProject
+      ? []
+      : parseStoredKBs(getStoredRaw(KB_STORAGE_KEY))
+
+    // KB persistence is parked in exactly one situation: a restore is in
+    // flight and about to overwrite the attachment from storage. Decided once,
+    // here, rather than armed per branch below — a path that forgot to arm it
+    // silently stopped writing attach/detach for the rest of the session, and
+    // a reload then resurrected a KB the user had detached.
+    kbsHydratedRef.current = storedKBUuids.length === 0
+
+    if (deepLink) return
+
     if (storedProject) {
       import('../api/projects').then(({ getProject }) => {
         getProject(storedProject)
@@ -661,10 +674,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    const storedKBUuids = parseStoredKBs(getStoredRaw(KB_STORAGE_KEY))
-    if (!storedKBUuids.length) {
-      kbsHydratedRef.current = true
-    } else {
+    if (storedKBUuids.length) {
       import('../api/knowledge').then(({ getKnowledgeBase }) => {
         // Titles are re-fetched rather than persisted, so a renamed KB never
         // shows stale chrome. A KB that no longer resolves is dropped; the
@@ -679,8 +689,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             })
             setActiveKBs(restored)
             setStoredRaw(KB_STORAGE_KEY, restored.length ? storedKBValue(restored) : null)
-            kbsHydratedRef.current = true
           })
+          // Whatever happens to the restore, persistence has to come back on.
+          .finally(() => { kbsHydratedRef.current = true })
       }).catch(() => { kbsHydratedRef.current = true })
     }
     // Run once on mount; search params are read for the deep-link guard only.
