@@ -1275,6 +1275,12 @@ export function KnowledgePanel() {
                     ? (source.url_title || source.url || source.uuid)
                     : (source.document_title || source.document_uuid || source.uuid)
                   const displayLabel = source.custom_name || autoLabel
+                  // The document was deleted from Files. Its chunks are still
+                  // indexed and still answer questions, so the row stays — but
+                  // it says so, the way an extraction test case does.
+                  const docDeleted = source.source_type === 'document'
+                    && !!source.document_uuid
+                    && source.document_exists === false
                   // Verifiable provenance: an explicit source_reference, else the
                   // origin URL for url sources. Linkify http(s)/www, else show text.
                   const effectiveSource = source.source_reference || (source.source_type === 'url' ? (source.url || '') : '')
@@ -1353,6 +1359,14 @@ export function KnowledgePanel() {
                             {source.custom_name && autoLabel && autoLabel !== source.custom_name && (
                               <span style={{ color: '#888', marginLeft: 6, fontStyle: 'italic' }}>
                                 · {autoLabel}
+                              </span>
+                            )}
+                            {docDeleted && (
+                              <span
+                                style={{ color: '#d97706', marginLeft: 6, fontStyle: 'italic' }}
+                                title="The source document was deleted from Files. This knowledge base still answers from the text it indexed."
+                              >
+                                · source deleted
                               </span>
                             )}
                           </div>
