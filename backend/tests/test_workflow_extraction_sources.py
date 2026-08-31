@@ -259,3 +259,69 @@ class TestSidecarTravelsBesideTheOutput:
         rows = out["output"]
         assert set(rows[0]) == set(rows[1])
         assert out["field_sources"] == [{}, {"Award Amount": {"quote": "q"}}]
+
+
+# ---------------------------------------------------------------------------
+# field_sources must stay positional against output through the step wrapper
+# ---------------------------------------------------------------------------
+
+
+class _StubTask:
+    """Minimal stand-in for a node: MultiTaskNode only needs `inputs`,
+    `process` and `_apply_post_process`."""
+
+    def __init__(self, result):
+        self._result = result
+        self.inputs = None
+
+    def process(self, _inputs):
+        return dict(self._result)
+
+    def _apply_post_process(self, result):
+        return result
+
+
+class TestFieldSourcesStayAlignedWithOutput:
+    """`field_sources[i]` holds the quotes for `output[i]` — the contract
+    ExtractionNode builds. `collected` takes a slot from every task in the
+    step while only an Extraction task contributes a sidecar, so extending by
+    the sidecar alone drifted the two lists apart and attributed one task's
+    quotes to another task's output."""
+
+    def test_a_task_with_no_sidecar_still_takes_its_slots(self):
+        from app.services.workflow_engine import MultiTaskNode
+
+        wrapper = MultiTaskNode("Mixed")
+        # A Prompt-style task: one output, no provenance.
+        wrapper.add_task(_StubTask({"output": "a prose summary", "step_name": "Mixed"}))
+        # An Extraction-style task: two entities, each with its own quotes.
+        wrapper.add_task(_StubTask({
+            "output": [{"Award": "$1"}, {"Award": "$2"}],
+            "field_sources": [
+                {"Award": {"quote": "one"}},
+                {"Award": {"quote": "two"}},
+            ],
+            "step_name": "Mixed",
+        }))
+
+        out = wrapper.process({"output": "in", "step_name": "Prev"})
+
+        output, sources = out["output"], out["field_sources"]
+        assert len(sources) == len(output)
+        # Whichever completion order the pool returns them in, every entity
+        # still sits beside its own quotes.
+        for value, sidecar in zip(output, sources):
+            if isinstance(value, dict) and value.get("Award") == "$1":
+                assert sidecar == {"Award": {"quote": "one"}}
+            elif isinstance(value, dict) and value.get("Award") == "$2":
+                assert sidecar == {"Award": {"quote": "two"}}
+            else:
+                assert sidecar == {}
+
+    def test_no_sidecar_anywhere_omits_the_key(self):
+        from app.services.workflow_engine import MultiTaskNode
+
+        wrapper = MultiTaskNode("Prose")
+        wrapper.add_task(_StubTask({"output": "just prose", "step_name": "Prose"}))
+        out = wrapper.process({"output": "in", "step_name": "Prev"})
+        assert "field_sources" not in out

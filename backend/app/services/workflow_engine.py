@@ -301,11 +301,6 @@ def _build_extraction_inputs(
     return pairs
 
 
-def _build_extraction_texts(data: dict, inputs: dict, sources: list[str]) -> list[str]:
-    """The texts half of :func:`_build_extraction_inputs`."""
-    return [text for text, _ in _build_extraction_inputs(data, inputs, sources)]
-
-
 # ---------------------------------------------------------------------------
 # LLM helper functions (sync, for nodes)
 # ---------------------------------------------------------------------------
@@ -532,10 +527,11 @@ class MultiTaskNode(Node):
                 fill_report.extend(report)
             # Same treatment for extraction provenance: a sidecar that the
             # wrapper drops means a multi-task step silently loses the quotes
-            # its own Extraction task captured.
+            # its own Extraction task captured. Held until the output count is
+            # known — see the alignment note below.
             entity_sources = result.get("field_sources")
-            if isinstance(entity_sources, list):
-                field_sources.extend(entity_sources)
+            if not isinstance(entity_sources, list):
+                entity_sources = []
             if isinstance(result.get("filled_values"), dict):
                 filled_values.update(result["filled_values"])
             warning = result.get("warning")
@@ -551,8 +547,22 @@ class MultiTaskNode(Node):
                 continue
             elif isinstance(result_output, list):
                 collected.extend(result_output)
+                added = len(result_output)
             else:
                 collected.append(result_output)
+                added = 1
+            # `field_sources` is positional against `output`: index i holds the
+            # quotes for output i, which is the contract ExtractionNode builds
+            # and the one a reader has to be able to rely on. `collected` takes
+            # a slot from every task in the step while only an Extraction task
+            # contributes a sidecar, so extending by the sidecar alone skews the
+            # two lists apart — a step of [Prompt, Extraction] would attribute
+            # the extraction's quotes to the prompt's output. Each task claims
+            # exactly as many slots as it added outputs, padding with {}.
+            field_sources.extend(
+                entity_sources[i] if i < len(entity_sources) else {}
+                for i in range(added)
+            )
             # Preserve the underlying task step_name for downstream routing
             if result.get("step_name"):
                 task_step_name = result["step_name"]
