@@ -593,6 +593,13 @@ async def get_library_items(
                     sys_cfg = await SystemConfig.get_config()
                     deref["quality_tier"] = compute_quality_tier(score, sys_cfg.get_quality_config())
                     deref["last_validated_at"] = latest.get("created_at")
+                    # Stated, not left absent. A flagged item always has a
+                    # metadata row so this branch cannot currently carry a
+                    # regression, but the extraction and workflow routers say
+                    # False explicitly in their fallbacks for the same reason:
+                    # a reader of this payload should never have to know which
+                    # branch produced it to know what the missing key means.
+                    deref["regression_pending_review"] = False
 
             results.append(deref)
 
