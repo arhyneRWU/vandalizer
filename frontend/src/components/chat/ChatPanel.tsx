@@ -6,10 +6,11 @@ import { ChatInput } from './ChatInput'
 import { AttachmentList } from './AttachmentList'
 import { ContextMeter } from './ContextMeter'
 import { ContextLimitDialog } from './ContextLimitDialog'
+import { AttachKBModal } from './AttachKBModal'
 import { useChat } from '../../hooks/useChat'
 import { useProject } from '../../hooks/useProjects'
 import { useOnboarding } from '../../hooks/useOnboarding'
-import { useWorkspace, type PendingChatMessage } from '../../contexts/WorkspaceContext'
+import { useWorkspace, MAX_ATTACHED_KBS, type PendingChatMessage } from '../../contexts/WorkspaceContext'
 import { useToast } from '../../contexts/ToastContext'
 import { useBranding } from '../../contexts/BrandingContext'
 import { useShareLink } from '../../lib/shareLink'
@@ -87,7 +88,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     setActivity,
   } = useChat()
 
-  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBUuid, activeKBTitle, activateKB, deactivateKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal, setWorkspaceMode } = useWorkspace()
+  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal, setWorkspaceMode } = useWorkspace()
 
   // When scoped to a project, surface its file/index status so the empty state
   // reflects the project (not a generic assistant) and sets honest expectations.
@@ -113,6 +114,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
   const [urlAttachments, setUrlAttachments] = useState<UrlAttachment[]>([])
   const [attachLoading, setAttachLoading] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>('')
+  const [showAttachKB, setShowAttachKB] = useState(false)
   const [modelsList, setModelsList] = useState<ModelInfo[]>([])
   const [showContextDialog, setShowContextDialog] = useState(false)
   const contextDialogShownRef = useRef(false)
@@ -343,7 +345,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     // In first-session mode, every message uses the first-session system prompt.
     // Use the locked ref so remounts / refetches can't flip this mid-conversation.
     const firstSession = effectiveFirstSession && !hasDocContext && !activeKBUuid && !activeProjectUuid
-    send(message, selectedDocUuids, selectedModel || undefined, activeKBUuid || undefined, includeOnboardingContext, selectedFolderUuids, firstSession || undefined, activeProjectUuid || undefined)
+    send(message, selectedDocUuids, selectedModel || undefined, activeKBs.map(kb => kb.uuid), includeOnboardingContext, selectedFolderUuids, firstSession || undefined, activeProjectUuid || undefined)
     // Defer markFirstSessionComplete until the user has had enough exchanges
     // to experience the value discovery (at least 3 user messages).
     // messages.length counts both user + assistant; 4 = 2 full exchanges done.
@@ -940,9 +942,10 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
 
 
 
-      {/* KB active badge */}
-      {activeKBUuid && (
+      {/* One row per attached knowledge base — chat searches all of them. */}
+      {activeKBs.map(kb => (
         <div
+          key={kb.uuid}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -956,9 +959,9 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
           }}
         >
           <BookOpen size={14} />
-          <span style={{ flex: 1 }}>Knowledge Base: {activeKBTitle}</span>
+          <span style={{ flex: 1 }}>Knowledge Base: {kb.title}</span>
           <button
-            onClick={() => shareLink('kb', activeKBUuid, activeKBTitle || undefined)}
+            onClick={() => shareLink('kb', kb.uuid, kb.title || undefined)}
             title="Copy share link"
             style={{
               background: 'transparent',
@@ -973,7 +976,8 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
             <Link2 size={14} />
           </button>
           <button
-            onClick={deactivateKB}
+            onClick={() => detachKB(kb.uuid)}
+            aria-label={`Detach knowledge base: ${kb.title}`}
             style={{
               background: 'transparent',
               border: 'none',
@@ -987,6 +991,22 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
             <X size={14} />
           </button>
         </div>
+      ))}
+
+      {showAttachKB && (
+        <AttachKBModal
+          attachedUuids={activeKBs.map(kb => kb.uuid)}
+          maxAttached={MAX_ATTACHED_KBS}
+          onAttach={(kbs) => {
+            for (const kb of kbs) {
+              if (!attachKB(kb.uuid, kb.title)) {
+                toast(`Chat can search at most ${MAX_ATTACHED_KBS} knowledge bases`, 'error')
+                break
+              }
+            }
+          }}
+          onClose={() => setShowAttachKB(false)}
+        />
       )}
 
       {/* Input */}
@@ -994,7 +1014,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
         onSend={handleSend}
         onAttachFile={handleAttachFile}
         onAttachLink={handleAttachLink}
-        onAddKnowledge={() => setWorkspaceMode('knowledge')}
+        onAddKnowledge={() => setShowAttachKB(true)}
         disabled={isStreaming}
         selectedModel={selectedModel}
         onModelChange={handleModelChange}

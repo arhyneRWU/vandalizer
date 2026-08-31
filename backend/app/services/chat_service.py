@@ -440,6 +440,9 @@ async def chat_stream(
     settings=None,
     model_override: Optional[str] = None,
     kb_uuid: Optional[str] = None,
+    # Several knowledge bases attached to one turn, as [(uuid, title)]. Takes
+    # precedence over ``kb_uuid``, which stays for the single-KB callers.
+    kbs: Optional[list[tuple[str, str]]] = None,
     include_onboarding_context: bool = False,
     is_first_session: bool = False,
 ) -> AsyncGenerator[str, None]:
@@ -600,23 +603,39 @@ async def chat_stream(
         )
 
     # KB context: query ChromaDB for relevant chunks and add as a segment.
+    active_kbs: list[tuple[str, str]] = list(kbs or [])
+    if not active_kbs and kb_uuid:
+        active_kbs = [(kb_uuid, "")]
     kb_sources: list[dict] = []
     kb_manifest: list[dict] = []
-    if kb_uuid:
+    manifests: dict[str, list[dict]] = {}
+    if active_kbs:
+        from app.services.knowledge_service import get_kb_manifest
+
+        for uuid, title in active_kbs:
+            try:
+                entries = await get_kb_manifest(uuid)
+            except Exception as e:
+                logger.warning("KB manifest fetch failed for kb_uuid=%s: %s", uuid, e)
+                continue
+            # With several KBs attached the manifest is a union, and a bare
+            # filename in it would not say which KB holds it.
+            if len(active_kbs) > 1 and title:
+                entries = [{**e, "kb_title": title} for e in entries]
+            manifests[uuid] = entries
+            kb_manifest.extend(entries)
         try:
-            from app.services.knowledge_service import get_kb_manifest
-            kb_manifest = await get_kb_manifest(kb_uuid)
-        except Exception as e:
-            logger.warning("KB manifest fetch failed for kb_uuid=%s: %s", kb_uuid, e)
-        try:
-            kb_segment, kb_sources = await _build_kb_segment(
-                kb_uuid, message, model_name, manifest=kb_manifest,
+            kb_segment, kb_sources = await _build_multi_kb_segment(
+                active_kbs, message, model_name, manifests=manifests,
                 history=previous_messages, user_id=user_id,
             )
             if kb_segment:
                 doc_segments.insert(0, kb_segment)
         except Exception as e:
-            logger.error("KB context retrieval failed for kb_uuid=%s: %s", kb_uuid, e)
+            logger.error(
+                "KB context retrieval failed for kb_uuids=%s: %s",
+                [u for u, _ in active_kbs], e,
+            )
             kb_sources = []
 
     # Select system prompt based on whether we have document context.
@@ -627,7 +646,7 @@ async def chat_stream(
     system_prompt: Optional[str] = select_chat_system_prompt(
         kb_sources=kb_sources,
         have_context=have_context,
-        kb_uuid=kb_uuid,
+        kb_uuid=active_kbs[0][0] if active_kbs else None,
         is_first_session=is_first_session,
         include_onboarding_context=include_onboarding_context,
         manifest_block=_build_manifest_block(kb_manifest),
@@ -1069,7 +1088,14 @@ def _build_manifest_block(manifest: list[dict]) -> str:
         if not name:
             continue
         status = entry.get("status")
-        line = f"- {name}" + (" (still indexing)" if status and status != "ready" else "")
+        kb_title = entry.get("kb_title")
+        line = f"- {name}"
+        # Only set when several knowledge bases are attached, where a bare
+        # filename would not say which one holds the document.
+        if kb_title:
+            line += f" — {kb_title}"
+        if status and status != "ready":
+            line += " (still indexing)"
         if total_chars + len(line) > _MANIFEST_MAX_CHARS:
             break
         lines.append(line)
@@ -1544,6 +1570,95 @@ async def _build_kb_segment(
     the KB's tuned relevance floor, so the caller falls through to the empty-KB
     prompt and the model abstains instead of answering from junk.
     """
+    results = await _retrieve_kb_results(
+        kb_uuid, message, model_name,
+        manifest=manifest, history=history,
+    )
+    if not results:
+        return None, []
+    return await _render_kb_segment(results, message, user_id=user_id)
+
+
+# One KB contributes its own tuned ``k`` (typically 8) snippets. Three at full
+# budget would triple the prompt for one question, so a multi-KB turn shares a
+# single ceiling: each KB is retrieved at its own settings, then the pools are
+# round-robined — so every attached KB is represented before the trim — and cut
+# to this many snippets in total.
+MULTI_KB_SNIPPET_BUDGET = 12
+
+
+async def _build_multi_kb_segment(
+    kbs: list[tuple[str, str]],
+    message: str,
+    model_name: str,
+    manifests: Optional[dict[str, list[dict]]] = None,
+    history: Optional[list[ModelMessage]] = None,
+    user_id: Optional[str] = None,
+) -> tuple[Optional[DocumentSegment], list[dict]]:
+    """Retrieve across several knowledge bases for one chat turn.
+
+    ``kbs`` is ``[(kb_uuid, kb_title)]``. Each KB is retrieved with its own
+    tuned config — they differ, and a shared floor would either drown a strict
+    KB in a loose one's near-misses or discard a strict KB's good hits. The
+    pools are then merged round-robin so a KB that ranks lower overall still
+    reaches the prompt, and every snippet carries the KB it came from.
+
+    A KB whose retrieval fails is skipped rather than failing the turn: the
+    answer is then grounded in the ones that did respond, which is what the
+    model is told it has.
+    """
+    if not kbs:
+        return None, []
+    if len(kbs) == 1:
+        kb_uuid, kb_title = kbs[0]
+        results = await _retrieve_kb_results(
+            kb_uuid, message, model_name,
+            manifest=(manifests or {}).get(kb_uuid), history=history,
+        )
+        for r in results:
+            r["kb_title"] = kb_title
+            r["kb_uuid"] = kb_uuid
+        if not results:
+            return None, []
+        return await _render_kb_segment(results, message, user_id=user_id)
+
+    pools = await asyncio.gather(*[
+        _retrieve_kb_results(
+            kb_uuid, message, model_name,
+            manifest=(manifests or {}).get(kb_uuid), history=history,
+        )
+        for kb_uuid, _ in kbs
+    ], return_exceptions=True)
+
+    tagged: list[list[dict]] = []
+    for (kb_uuid, kb_title), pool in zip(kbs, pools):
+        if isinstance(pool, BaseException):
+            logger.error("KB retrieval failed for kb_uuid=%s: %s", kb_uuid, pool)
+            continue
+        for r in pool:
+            r["kb_title"] = kb_title
+            r["kb_uuid"] = kb_uuid
+        tagged.append(pool)
+
+    merged = _round_robin_merge(tagged)[:MULTI_KB_SNIPPET_BUDGET]
+    if not merged:
+        logger.warning(
+            "KB query returned no results across %d knowledge bases", len(kbs),
+        )
+        return None, []
+    return await _render_kb_segment(merged, message, user_id=user_id)
+
+
+async def _retrieve_kb_results(
+    kb_uuid: str,
+    message: str,
+    model_name: str,
+    manifest: Optional[list[dict]] = None,
+    history: Optional[list[ModelMessage]] = None,
+) -> list[dict]:
+    """The ranked chunks one KB contributes to a turn, already trimmed to its
+    tuned ``k``. Split out from ``_build_kb_segment`` so a multi-KB turn can
+    fan out over it and merge the pools before any prompt text is built."""
     from app.services.kb_validation_service import (
         _ensure_system_config_loaded,
         condense_retrieval_query,
@@ -1628,6 +1743,21 @@ async def _build_kb_segment(
     )
     if not kb_results:
         logger.warning("KB query returned no results for kb_uuid=%s", kb_uuid)
+    return kb_results
+
+
+async def _render_kb_segment(
+    kb_results: list[dict],
+    message: str,
+    user_id: Optional[str] = None,
+) -> tuple[Optional[DocumentSegment], list[dict]]:
+    """Turn ranked chunks into the prompt segment and the citation list.
+
+    Knowledge-base agnostic: a chunk carrying ``kb_title`` (a multi-KB turn)
+    is labelled with it, so the model — and the reader — can tell which
+    knowledge base a claim came from when several are attached.
+    """
+    if not kb_results:
         return None, []
 
     kb_sources: list[dict] = []
@@ -1646,6 +1776,9 @@ async def _build_kb_segment(
         page, page_end, approximate = cited["page"], cited["page_end"], cited["page_approximate"]
         locator = format_page_range(page, page_end, approximate) if page is not None else locator_for_meta(meta)
         label = f"{src} ({locator})" if locator else src
+        kb_title = r.get("kb_title")
+        if kb_title:
+            label = f"{label} — {kb_title}"
         any_approximate = any_approximate or approximate
         annotated = annotate_chunk_pages(content, meta)
         any_spanning = any_spanning or annotated != content
@@ -1661,6 +1794,11 @@ async def _build_kb_segment(
             "score": r.get("score"),
             "similarity": r.get("similarity"),
             "content_preview": (r.get("content") or "")[:240],
+            # Which knowledge base this snippet came from. Only set on a
+            # multi-KB turn; the UI shows it beside the filename so a merged
+            # answer stays auditable.
+            "kb_title": kb_title,
+            "kb_uuid": r.get("kb_uuid"),
         })
     kb_text = (
         "\n\n## Retrieved Knowledge Base Snippets\n"

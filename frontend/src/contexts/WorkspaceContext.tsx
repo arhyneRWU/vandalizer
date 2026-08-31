@@ -89,9 +89,19 @@ interface ChatStateContextValue {
     options?: { documentUuids?: string[]; folderUuids?: string[] },
   ) => void
   clearPendingChatMessage: () => void
+  // Knowledge bases attached to the chat. Several can be attached at once;
+  // retrieval fans out across them. activeKBUuid/Title are the first one,
+  // kept for the surfaces that only ever deal with a single KB.
+  activeKBs: AttachedKB[]
   activeKBUuid: string | null
   activeKBTitle: string | null
+  // Replace whatever is attached with this KB and start a fresh chat — what
+  // "Chat with this KB" does from the knowledge surfaces.
   activateKB: (uuid: string, title: string) => void
+  // Add a KB to the current chat without disturbing it. No-op when already
+  // attached or at MAX_ATTACHED_KBS; returns false when it did not attach.
+  attachKB: (uuid: string, title: string) => boolean
+  detachKB: (uuid: string) => void
   deactivateKB: () => void
   // Project scope — the whole workspace (files, chat, …) re-scoped to one project.
   activeProjectUuid: string | null
@@ -215,6 +225,34 @@ function setStoredRaw(key: string, value: string | null): void {
 const PROJECT_STORAGE_KEY = 'workspace:project'
 const KB_STORAGE_KEY = 'workspace:kb'
 
+export interface AttachedKB {
+  uuid: string
+  title: string
+}
+
+// Each attached KB is retrieved separately before the results are merged, so
+// the ceiling is about how long a turn takes and what it costs. Mirrors
+// MAX_CHAT_KNOWLEDGE_BASES in backend/app/routers/chat.py, which enforces it.
+export const MAX_ATTACHED_KBS = 3
+
+function storedKBValue(kbs: AttachedKB[]): string {
+  return JSON.stringify(kbs.map(kb => kb.uuid))
+}
+
+/** Attached-KB uuids from storage, tolerating the pre-multi-KB single uuid. */
+function parseStoredKBs(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((u): u is string => typeof u === 'string' && !!u)
+    }
+  } catch {
+    // Not JSON: a single uuid written before chat took more than one KB.
+  }
+  return [raw]
+}
+
 type WorkspaceSearchState = {
   mode: WorkspaceMode | undefined
   tab: RightTab | undefined
@@ -301,8 +339,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     },
     [],
   )
-  const [activeKBUuid, setActiveKBUuid] = useState<string | null>(null)
-  const [activeKBTitle, setActiveKBTitle] = useState<string | null>(null)
+  const [activeKBs, setActiveKBs] = useState<AttachedKB[]>([])
+  const activeKBUuid = activeKBs[0]?.uuid ?? null
+  const activeKBTitle = activeKBs[0]?.title ?? null
   const [activeProjectUuid, setActiveProjectUuid] = useState<string | null>(null)
   const [activeProjectTitle, setActiveProjectTitle] = useState<string | null>(null)
   const [activeProjectRootFolder, setActiveProjectRootFolder] = useState<string | null>(null)
@@ -393,8 +432,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setPendingChatMessage(null)
     setHighlightTerms([])
     setStoredRaw(KB_STORAGE_KEY, null)
-    setActiveKBUuid(null)
-    setActiveKBTitle(null)
+    setActiveKBs([])
     setStoredRaw(PROJECT_STORAGE_KEY, null)
     setActiveProjectUuid(null)
     setActiveProjectTitle(null)
@@ -434,18 +472,36 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const activateKB = useCallback((uuid: string, title: string) => {
-    setStoredRaw(KB_STORAGE_KEY, uuid)
-    setActiveKBUuid(uuid)
-    setActiveKBTitle(title)
+    setStoredRaw(KB_STORAGE_KEY, storedKBValue([{ uuid, title }]))
+    setActiveKBs([{ uuid, title }])
     setNewChatSignal(prev => prev + 1)
     localStorage.setItem('workspace:mode', 'chat')
     updateSearch((prev) => ({ ...prev, mode: undefined, workflow: undefined, extraction: undefined, automation: undefined, tab: undefined }))
   }, [updateSearch])
 
+  const attachKB = useCallback((uuid: string, title: string) => {
+    let attached = false
+    setActiveKBs(prev => {
+      if (prev.some(kb => kb.uuid === uuid) || prev.length >= MAX_ATTACHED_KBS) return prev
+      attached = true
+      const next = [...prev, { uuid, title }]
+      setStoredRaw(KB_STORAGE_KEY, storedKBValue(next))
+      return next
+    })
+    return attached
+  }, [])
+
+  const detachKB = useCallback((uuid: string) => {
+    setActiveKBs(prev => {
+      const next = prev.filter(kb => kb.uuid !== uuid)
+      setStoredRaw(KB_STORAGE_KEY, next.length ? storedKBValue(next) : null)
+      return next
+    })
+  }, [])
+
   const deactivateKB = useCallback(() => {
     setStoredRaw(KB_STORAGE_KEY, null)
-    setActiveKBUuid(null)
-    setActiveKBTitle(null)
+    setActiveKBs([])
   }, [])
 
   const activateProject = useCallback((uuid: string, title: string) => {
@@ -457,8 +513,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setActiveProjectTitle(title)
     // Entering a project starts a fresh, project-scoped chat.
     setStoredRaw(KB_STORAGE_KEY, null)
-    setActiveKBUuid(null)
-    setActiveKBTitle(null)
+    setActiveKBs([])
     setNewChatSignal(prev => prev + 1)
     localStorage.setItem('workspace:mode', 'chat')
     updateSearch((prev) => ({ ...prev, mode: undefined, workflow: undefined, extraction: undefined, automation: undefined, tab: undefined }))
@@ -495,9 +550,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     import('../api/knowledge').then(({ getKnowledgeBase }) => {
       getKnowledgeBase(kbParam)
         .then((kb) => {
-          setStoredRaw(KB_STORAGE_KEY, kbParam)
-          setActiveKBUuid(kbParam)
-          setActiveKBTitle(kb.title)
+          setStoredRaw(KB_STORAGE_KEY, storedKBValue([{ uuid: kbParam, title: kb.title }]))
+          setActiveKBs([{ uuid: kbParam, title: kb.title }])
           localStorage.setItem('workspace:mode', 'chat')
           navigate({
             search: (prev) => ({ ...emptyWorkspaceSearch(), ...prev, kb: undefined, mode: undefined, workflow: undefined, extraction: undefined, automation: undefined, tab: undefined }),
@@ -535,8 +589,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           setActiveProjectTeamId(project.team_id ?? null)
           setActiveProjectRole(project.role)
           setStoredRaw(KB_STORAGE_KEY, null)
-          setActiveKBUuid(null)
-          setActiveKBTitle(null)
+          setActiveKBs([])
           setNewChatSignal(prev => prev + 1)
           // Land in whatever mode was requested (e.g. ?project=X&mode=files),
           // defaulting to chat. Viewers (shared-in PIs) are chat-only.
@@ -597,15 +650,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    const storedKB = getStoredRaw(KB_STORAGE_KEY)
-    if (storedKB) {
+    const storedKBUuids = parseStoredKBs(getStoredRaw(KB_STORAGE_KEY))
+    if (storedKBUuids.length) {
       import('../api/knowledge').then(({ getKnowledgeBase }) => {
-        getKnowledgeBase(storedKB)
-          .then((kb) => {
-            setActiveKBUuid(storedKB)
-            setActiveKBTitle(kb.title)
+        // Titles are re-fetched rather than persisted, so a renamed KB never
+        // shows stale chrome. A KB that no longer resolves is dropped; the
+        // rest of the attachment survives.
+        Promise.allSettled(storedKBUuids.map(uuid => getKnowledgeBase(uuid)))
+          .then(results => {
+            const restored: AttachedKB[] = []
+            results.forEach((res, i) => {
+              if (res.status === 'fulfilled') {
+                restored.push({ uuid: storedKBUuids[i], title: res.value.title })
+              }
+            })
+            setActiveKBs(restored)
+            setStoredRaw(KB_STORAGE_KEY, restored.length ? storedKBValue(restored) : null)
           })
-          .catch(() => { setStoredRaw(KB_STORAGE_KEY, null) })
       }).catch(() => {})
     }
     // Run once on mount; search params are read for the deep-link guard only.
@@ -633,8 +694,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setActiveProjectTeamId(null)
     setActiveProjectRole(null)
     setStoredRaw(KB_STORAGE_KEY, null)
-    setActiveKBUuid(null)
-    setActiveKBTitle(null)
+    setActiveKBs([])
   }, [currentTeam?.uuid])
 
   // ── UI callbacks ────────────────────────────────────────────────────────
@@ -697,7 +757,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     newChatSignal, triggerNewChat,
     focusChatSignal, focusChat,
     pendingChatMessage, sendChatMessage, clearPendingChatMessage,
-    activeKBUuid, activeKBTitle, activateKB, deactivateKB,
+    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB,
     activeProjectUuid, activeProjectTitle, activeProjectRootFolder, activeProjectTeamId, activeProjectRole, activateProject, deactivateProject, refreshActiveProject,
     processingDoc, setProcessingDoc,
     selectedDocsProcessing, setSelectedDocsProcessing,
@@ -706,7 +766,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     newChatSignal, triggerNewChat,
     focusChatSignal, focusChat,
     pendingChatMessage, sendChatMessage, clearPendingChatMessage,
-    activeKBUuid, activeKBTitle, activateKB, deactivateKB,
+    activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB,
     activeProjectUuid, activeProjectTitle, activeProjectRootFolder, activeProjectTeamId, activeProjectRole, activateProject, deactivateProject, refreshActiveProject,
     processingDoc,
     selectedDocsProcessing, setSelectedDocsProcessing,
