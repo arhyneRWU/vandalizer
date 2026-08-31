@@ -1042,6 +1042,11 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
             team_id=str(user.current_team) if user.current_team else None,
             activity_id=str(activity.id),
         ):
+            # Degraded inputs the run should disclose: text that is garbled,
+            # or that is only part of the document. Chat already warns about
+            # these; a wrong extracted deadline or dollar amount is the more
+            # expensive place to stay quiet.
+            document_warnings: list[dict] = []
             results = await svc.run_extraction_sync(
                 search_set_uuid=req.search_set_uuid,
                 document_uuids=document_uuids,
@@ -1050,6 +1055,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 extraction_config_override=req.extraction_config_override,
                 combined_context=req.combined_context,
                 capture_sources=True,
+                document_warnings=document_warnings,
             )
         # A run that produced no values at all extracted nothing; recording
         # it as completed gives History a green tick with nothing behind it.
@@ -1149,6 +1155,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 "sources": sources,
                 "cross_field": None,
                 "cross_field_sets": [],
+                "document_warnings": document_warnings,
                 "error": EXTRACTION_NO_VALUES_ERROR,
             }
 
@@ -1161,6 +1168,7 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
             "sources": sources,
             "cross_field": cross_field,
             "cross_field_sets": cross_field_sets,
+            "document_warnings": document_warnings,
         }
     except Exception as e:
         await activity_service.activity_finish(
@@ -1301,12 +1309,25 @@ async def run_extraction_integrated(
     assert activity.id is not None
 
     try:
+        # Same disclosure the in-app run makes: a document whose text is only
+        # partly there produces answers that look exactly like answers read
+        # from all of it. An API caller has even less chance of noticing.
+        document_warnings: list[dict] = []
         results = await svc.run_extraction_sync(
             search_set_uuid=search_set_uuid,
             document_uuids=all_doc_uuids,
             user_id=user.user_id,
+            document_warnings=document_warnings,
         )
-        await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
+        # The same all-null run /run-sync now fails. Reporting it "completed"
+        # here just moves the confident set of "not found" answers onto the
+        # external API, where the caller has even less chance of noticing.
+        no_values = not any(_entity_has_values(e) for e in results)
+        await activity_service.activity_finish(
+            activity.id,
+            ActivityStatus.FAILED if no_values else ActivityStatus.COMPLETED,
+            error=EXTRACTION_NO_VALUES_ERROR if no_values else None,
+        )
         await activity_service.activity_update(activity.id, documents_touched=len(all_doc_uuids))
 
         # Per-document diagnostics. Empty results when uploading a file are
@@ -1329,10 +1350,12 @@ async def run_extraction_integrated(
                 })
 
         return {
-            "status": "completed",
+            "status": "error" if no_values else "completed",
             "activity_id": str(activity.id),
             "results": results,
             "documents": doc_diagnostics,
+            "document_warnings": document_warnings,
+            **({"error": EXTRACTION_NO_VALUES_ERROR} if no_values else {}),
         }
     except Exception as e:
         await activity_service.activity_finish(activity.id, ActivityStatus.FAILED, error=str(e))
@@ -2340,6 +2363,26 @@ async def apply_extraction_optimization(
 
     # Normalize missing body to a defaults instance — UI callers don't send one.
     body = req or ApplyExtractionOptimizationRequest()
+
+    # The same condition the optimizer refuses to auto-apply on. A judge
+    # outage during the baseline-default trial withholds the baseline, and
+    # `tied_with_baseline` is False both when the winner genuinely beat the
+    # baseline and when there was no baseline to beat — so without this the
+    # significance gate silently becomes no gate, by hand, with no 409.
+    if run.baseline_default_score is None and not body.force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "no_baseline",
+                "message": (
+                    "This run has no baseline score to measure the winner "
+                    "against — the judge was unavailable when the baseline was "
+                    "measured, so there is no evidence the winning "
+                    "configuration is an improvement. Re-run the optimization, "
+                    "or re-submit with force=true to apply anyway."
+                ),
+            },
+        )
 
     if run.tied_with_baseline and not body.force:
         raise HTTPException(
