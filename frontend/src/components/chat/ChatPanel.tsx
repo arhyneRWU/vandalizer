@@ -88,7 +88,7 @@ export function ChatPanel({ conversationToLoad, pendingMessage, onPendingMessage
     setActivity,
   } = useChat()
 
-  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, deactivateKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal, setWorkspaceMode } = useWorkspace()
+  const { bumpActivitySignal, processingDoc, selectedDocsProcessing, selectedDocUuids, setSelectedDocUuids, selectedDocNames, setSelectedDocNames, selectedFolderUuids, activeKBs, activeKBUuid, activeKBTitle, activateKB, attachKB, detachKB, activeProjectUuid, activeProjectTitle, setCurrentConversationUuid, focusChatSignal } = useWorkspace()
 
   // When scoped to a project, surface its file/index status so the empty state
   // reflects the project (not a generic assistant) and sets honest expectations.
