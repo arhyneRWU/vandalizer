@@ -166,6 +166,17 @@ export function fieldSupportState(src?: ExtractionFieldSource | null): FieldSupp
 
 export type ExtractionSourceMap = Record<string, ExtractionFieldSource>
 
+/**
+ * Cross-field rule outcomes for one extraction run. Evaluated on every run
+ * that has rules — these are the checks that catch a wrong number (a budget
+ * that doesn't add up, an end date before a start date), so they are part of
+ * extracting rather than a separate button.
+ */
+export interface CrossFieldRunReport {
+  results: CrossFieldRuleResult[]
+  summary: CrossFieldSummary
+}
+
 export function runExtractionSync(data: {
   search_set_uuid: string
   document_uuids: string[]
@@ -176,7 +187,18 @@ export function runExtractionSync(data: {
   // `sources` is index-aligned with `results` (per-field source map per entity).
   // `error` is set when the run produced no values: the backend records
   // the run as failed with this reason rather than completed.
-  return apiFetch<{ results: unknown[]; sources?: ExtractionSourceMap[]; error?: string }>('/api/extractions/run-sync', {
+  // `cross_field` is absent when the set defines no rules — absent means
+  // "nothing to check", never "everything passed".
+  return apiFetch<{
+    results: unknown[]
+    sources?: ExtractionSourceMap[]
+    cross_field?: CrossFieldRunReport | null
+    /** One report per result set, index-aligned with `results`. `cross_field`
+     * is the merged-values report, which on a multi-document run describes the
+     * last document only — read this instead when showing one set. */
+    cross_field_sets?: (CrossFieldRunReport | null)[]
+    error?: string
+  }>('/api/extractions/run-sync', {
     method: 'POST',
     body: JSON.stringify(data),
     signal,

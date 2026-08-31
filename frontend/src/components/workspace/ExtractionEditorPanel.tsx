@@ -34,7 +34,7 @@ import {
 } from '../../api/extractions'
 import { RunHistoryTab } from './RunHistoryTab'
 import { ApiError } from '../../api/client'
-import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap, FieldSupportState } from '../../api/extractions'
+import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap, CrossFieldRunReport, FieldSupportState } from '../../api/extractions'
 import { fieldSupportState } from '../../api/extractions'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
@@ -124,6 +124,12 @@ export function ExtractionEditorPanel() {
   const [resultDocNames, setResultDocNames] = useState<string[]>([])
   const [activeResultIdx, setActiveResultIdx] = useState(0)
   const [combinedContext, setCombinedContext] = useState(false)
+  // Cross-field rule outcomes for the last run. null = the set defines no
+  // rules; an empty-failure report is a different thing from no report.
+  // Index-aligned with resultSets. The strip shows the report for the set the
+  // user is actually looking at — a single merged report over a multi-document
+  // run describes the last document and nothing else.
+  const [crossFieldSets, setCrossFieldSets] = useState<(CrossFieldRunReport | null)[]>([])
 
   const results = resultSets[activeResultIdx] ?? {}
   const resultSources = resultSourceSets[activeResultIdx] ?? {}
@@ -179,6 +185,14 @@ export function ExtractionEditorPanel() {
     setResultSourceSets(pending ? [pending.sources ?? {}] : [])
     setResultDocNames([])
     setActiveResultIdx(0)
+    // A previous run's rule outcomes must not sit under a new run's values —
+    // the run path already resets this; the open path (rail click, or a
+    // different set entirely) did not, so a red "2 of 3 failed" strip survived
+    // onto a run that never produced it. A run reopened from the rail carries
+    // its own verdict in the same snapshot as its values, so restore that
+    // rather than clearing to nothing: values without the strip re-open a run
+    // that failed a rule looking exactly like one that passed.
+    setCrossFieldSets(pending?.crossFieldSets ?? [])
     setActiveTab('design')
     getSearchSet(openExtractionId)
       .then(setSearchSet)
@@ -256,6 +270,8 @@ export function ExtractionEditorPanel() {
     // picks up the running record the backend creates — otherwise no entry
     // shows until this sync request returns.
     bumpActivitySignal()
+    // A previous run's rule outcomes must not sit under a new run's values.
+    setCrossFieldSets([])
     // Snapshot doc names at run time so exports stay correct if the user
     // changes selection afterward.
     const runDocNames: string[] = combinedContext && docUuids.length > 1
@@ -293,6 +309,7 @@ export function ExtractionEditorPanel() {
       setResultSets(finalSets)
       setResultSourceSets(sets.length > 0 ? srcSets : [{}])
       setResultDocNames(finalSets.map((_, i) => runDocNames[i] ?? `Result ${i + 1}`))
+      setCrossFieldSets(resp.cross_field_sets ?? (resp.cross_field ? [resp.cross_field] : []))
       setActiveResultIdx(0)
     } catch (err) {
       if (err instanceof ApiError && err.status === 0) {
@@ -301,13 +318,16 @@ export function ExtractionEditorPanel() {
         // land here instead of only in the History tab.
         const run = await recoverRunFromHistory(openExtractionId)
         if (run?.status === 'completed') {
-          const snap = run.result_snapshot as { normalized?: Record<string, unknown>; sources?: ExtractionSourceMap } | undefined
+          const snap = run.result_snapshot as { normalized?: Record<string, unknown>; sources?: ExtractionSourceMap; cross_field?: CrossFieldRunReport | null; cross_field_sets?: (CrossFieldRunReport | null)[] } | undefined
           const map: Record<string, string> = {}
           for (const [k, v] of Object.entries(snap?.normalized ?? {})) {
             map[k] = v === null ? 'N/A' : String(v)
           }
           setResultSets([map])
           setResultSourceSets([snap?.sources ?? {}])
+          setCrossFieldSets(
+            snap?.cross_field_sets ?? (snap?.cross_field ? [snap.cross_field] : []),
+          )
           // The history snapshot merges all documents into one value map, so
           // a multi-doc run recovers as a single combined result set.
           setResultDocNames([docUuids.length > 1 ? `Combined (${docUuids.length} docs)` : runDocNames[0] ?? 'Result 1'])
@@ -850,6 +870,7 @@ export function ExtractionEditorPanel() {
           searchSetUuid={openExtractionId ?? undefined}
           onValueClick={handleValueClick}
           sources={resultSources}
+          crossField={crossFieldSets[activeResultIdx] ?? null}
           resultSets={resultSets}
           activeResultIdx={activeResultIdx}
           onSetActiveResultIdx={setActiveResultIdx}
@@ -1146,6 +1167,63 @@ function useRotatingTip(running: boolean, config: ExtractionConfig, docCount: nu
   return running && applicable.length > 0 ? applicable[tipIdx % applicable.length].text : null
 }
 
+/** Cross-field rule outcomes for the run just shown, above the values.
+ *
+ * These checks used to live behind a separate button in the Validate tab, so a
+ * production extraction shipped with none of them applied. A failure is the
+ * loudest thing on the panel because it is the one signal here that says a
+ * number is wrong rather than merely untraced. `null` means the set defines no
+ * rules and nothing is claimed either way; `unparseable` counts are shown
+ * rather than folded into "passed", because a rule the parser could not
+ * evaluate is not a rule that passed.
+ */
+function CrossFieldRunStrip({ report }: { report: CrossFieldRunReport | null }) {
+  if (!report || !report.results.length) return null
+  const { summary } = report
+  const failures = report.results.filter(r => r.status === 'fail')
+  const failed = failures.length > 0
+  // No rule reached a verdict — every one was unparseable. "All 0 checks
+  // passed" in green is the exact claim this strip exists to avoid: the
+  // checks did not run, and a budget that came back as "TBD" is the case
+  // that produces it. Absent is not passing.
+  const decisive = summary.pass + summary.fail
+  const inconclusive = decisive === 0
+  return (
+    <div
+      role={failed ? 'alert' : undefined}
+      style={{
+        margin: '8px 0',
+        padding: '8px 10px',
+        borderRadius: 6,
+        fontSize: 12,
+        border: `1px solid ${failed ? '#fca5a5' : inconclusive ? '#e5e7eb' : '#bbf7d0'}`,
+        background: failed ? '#fef2f2' : inconclusive ? '#f9fafb' : '#f0fdf4',
+        color: failed ? '#991b1b' : inconclusive ? '#4b5563' : '#166534',
+      }}
+    >
+      <div style={{ fontWeight: 600 }}>
+        {failed
+          ? `${summary.fail} of ${decisive} cross-field check${decisive === 1 ? '' : 's'} failed`
+          : inconclusive
+            ? `No cross-field check could be evaluated on these values`
+            : `All ${summary.pass} cross-field check${summary.pass === 1 ? '' : 's'} passed`}
+        {summary.unparseable > 0 && (
+          <span style={{ fontWeight: 400, color: '#6b7280' }}>
+            {' '}· {summary.unparseable} could not be evaluated
+          </span>
+        )}
+      </div>
+      {failed && (
+        <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+          {failures.map((r, i) => (
+            <li key={r.rule_id ?? i} style={{ marginBottom: 2 }}>{r.message}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /** How each support state renders beside a value.
  *
  * Four states, not two. The old badge had only "traced to p. N" and
@@ -1238,6 +1316,7 @@ function DesignTab({
   searchSetUuid,
   onValueClick,
   sources,
+  crossField,
   resultSets,
   activeResultIdx,
   onSetActiveResultIdx,
@@ -1259,6 +1338,7 @@ function DesignTab({
   searchSetUuid?: string
   onValueClick: (field: string, value: string) => void
   sources: ExtractionSourceMap
+  crossField: CrossFieldRunReport | null
   resultSets: Record<string, string>[]
   activeResultIdx: number
   onSetActiveResultIdx: (idx: number) => void
@@ -1472,6 +1552,8 @@ function DesignTab({
           <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }`}</style>
         </div>
       )}
+
+      <CrossFieldRunStrip report={crossField} />
 
       {/* Result set selector for multi-document extractions */}
       {resultSets.length > 1 && (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -975,6 +976,36 @@ def _entity_has_values(entity) -> bool:
     )
 
 
+def _evaluate_cross_field_rules(search_set, values: dict) -> Optional[dict]:
+    """Run a search set's cross-field rules over one run's merged values.
+
+    Returns ``{"results", "summary"}``, or None when the set has no rules — so
+    the response shape is self-describing: absent means "nothing to check",
+    not "everything passed". Never raises: a rule engine fault must not fail
+    an extraction that already produced values.
+    """
+    if not search_set or not getattr(search_set, "cross_field_rules", None):
+        return None
+    try:
+        from app.services.cross_field_validation import (
+            CrossFieldValidator,
+            summarize_results,
+        )
+
+        rules = search_set.normalized_cross_field_rules()
+        results = CrossFieldValidator().validate(values, rules)
+        if not results:
+            return None
+        return {"results": results, "summary": summarize_results(results)}
+
+    except Exception:
+        logger.exception(
+            "Cross-field evaluation failed for search set %s",
+            getattr(search_set, "uuid", "?"),
+        )
+        return None
+
+
 @router.post("/run-sync")
 @limiter.limit("30/minute")
 async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, user: User = Depends(get_current_user)) -> dict:
@@ -1057,20 +1088,73 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
             if isinstance(entity, dict):
                 normalized.update(entity)
                 merged_sources.update(entity_sources)
+        # Cross-field rules run on every run that has them, not only when
+        # someone remembers to open the Validate tab. These are the checks that
+        # catch a wrong number — a budget that doesn't add up, an end date
+        # before a start date, a required field missing given its trigger — and
+        # leaving them behind a separate button meant a production extraction
+        # shipped with none of them applied. Read-only: evaluation counters
+        # stay tied to validation runs, where the user can mark a false
+        # positive, so this doesn't quietly move a rule toward auto-disable.
+        # Off the event loop: a `custom_expression` rule runs through
+        # `execute_sandboxed_code`, which joins a worker thread with a 5s
+        # timeout plus stop-grace. On the opt-in Validate button that stalled
+        # one request; on the hot path of every extraction it would stall the
+        # whole server, repeatedly, for one bad expression.
+        # One report per result set, index-aligned with `results` exactly like
+        # `sources` — because `normalized` is a last-document-wins merge. On a
+        # 5-proposal run the merged map is document 5's values, so a single
+        # report rendered above a per-document selector told a user reading
+        # document 1 that document 5's budget added up. Rules are per-document
+        # claims; the report has to be too.
+        cross_field_sets: list[Optional[dict]] = []
+        if not no_values:
+            for entity in results:
+                cross_field_sets.append(
+                    await asyncio.to_thread(
+                        _evaluate_cross_field_rules,
+                        ss,
+                        entity if isinstance(entity, dict) else {},
+                    )
+                )
+        # The merged report stays for the combined-context case and for any
+        # consumer that wants one answer for the run. For a single result set
+        # it is the same evaluation, so reuse it rather than paying for it
+        # twice — a `custom_expression` rule costs up to 5s of thread time per
+        # evaluation, and N+1 of those on a 20-document run is a minute of
+        # worker time bought for nothing.
+        if no_values:
+            cross_field = None
+        elif len(cross_field_sets) == 1:
+            cross_field = cross_field_sets[0]
+        else:
+            cross_field = await asyncio.to_thread(
+                _evaluate_cross_field_rules, ss, normalized,
+            )
+
         await activity_service.activity_update(
             activity.id,
             documents_touched=len(document_uuids),
             result_snapshot={
                 "normalized": normalized,
                 "sources": merged_sources,
+                "cross_field": cross_field,
+                "cross_field_sets": cross_field_sets,
                 "document_uuids": document_uuids,
                 "search_set_uuid": req.search_set_uuid,
             },
         )
 
         if no_values:
+            # Same keys as the success return. A caller should not have to
+            # branch on which shape it got to know that no rules ran — the
+            # values are absent, so the rule outcomes are too, and saying so
+            # explicitly is cheaper than an optional key with two meanings.
             return {
-                "results": results, "sources": sources,
+                "results": results,
+                "sources": sources,
+                "cross_field": None,
+                "cross_field_sets": [],
                 "document_warnings": document_warnings,
                 "error": EXTRACTION_NO_VALUES_ERROR,
             }
@@ -1080,7 +1164,10 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
         auto_validate_extraction.delay(req.search_set_uuid, user.user_id, req.model)
 
         return {
-            "results": results, "sources": sources,
+            "results": results,
+            "sources": sources,
+            "cross_field": cross_field,
+            "cross_field_sets": cross_field_sets,
             "document_warnings": document_warnings,
         }
     except Exception as e:
