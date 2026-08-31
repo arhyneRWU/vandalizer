@@ -185,3 +185,35 @@ def test_an_answer_about_something_else_still_fails(monkeypatch, engine):
 def test_an_empty_envelope_is_not_a_false_success(monkeypatch, engine):
     payload = '{"entities": []}'
     assert _run(monkeypatch, engine, payload, KEYS) == []
+
+
+def test_quotes_inside_an_enveloped_object_reach_the_sidecar(monkeypatch, engine):
+    """The list branch looks in the item *and* the envelope; the dict branch
+    looked only in the envelope, which for this shape holds nothing but the
+    "entities" key — so every quote was silently dropped and the values
+    rendered untraced."""
+    from app.services.extraction_sources import SOURCE_KEY
+
+    payload = (
+        '{"entities": {"Award Amount": "$500,000", '
+        '"_sources": {"Award Amount": "The award is $500,000."}}}'
+    )
+    out = _run(monkeypatch, engine, payload, KEYS, capture_sources=True)
+    assert out[0]["Award amount"] == "$500,000"
+    assert out[0][SOURCE_KEY]["Award amount"]["quote"] == "The award is $500,000."
+
+
+def test_remap_is_a_classmethod_not_an_accidental_instance_method(engine):
+    """``_unwrap_entities_envelope`` carried ``@classmethod`` stacked on
+    ``@staticmethod`` and ``_remap_to_requested_keys`` — which takes ``cls`` —
+    carried no decorator at all. It worked only because CPython chained the
+    two descriptors, which 3.13 removed. Bind both off the class."""
+    body, envelope = ExtractionEngine._unwrap_entities_envelope({"entities": {"a": 1}})
+    assert body == {"a": 1}
+    assert envelope == {"entities": {"a": 1}}
+
+    entity, matched, _ = ExtractionEngine._remap_to_requested_keys(
+        {"Award Amount": "$1"}, ["Award amount"],
+    )
+    assert matched == 1
+    assert entity == {"Award amount": "$1"}

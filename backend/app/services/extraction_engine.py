@@ -1013,7 +1013,6 @@ class ExtractionEngine:
         """Case/punctuation/whitespace-insensitive form of a field name."""
         return re.sub(r"[^a-z0-9]", "", str(key).lower())
 
-    @classmethod
     @staticmethod
     def _unwrap_entities_envelope(parsed):
         """Return ``(body, envelope)`` for a parsed fallback payload.
@@ -1034,6 +1033,7 @@ class ExtractionEngine:
                 return body, parsed
         return parsed, parsed
 
+    @classmethod
     def _remap_to_requested_keys(
         cls, parsed: dict, keys: list[str],
     ) -> tuple[dict, int, set]:
@@ -1214,7 +1214,16 @@ class ExtractionEngine:
                             f"requested fields (got: {list(body)[:10]})"
                         )
                     if capture_sources:
-                        sidecar = self._fallback_sources_sidecar(envelope, entity)
+                        # Quotes may sit on the entity itself or once on the
+                        # envelope, the same two places the list branch below
+                        # looks. Checking only the envelope drops every quote
+                        # for an {"entities": {...}} payload whose _sources
+                        # block is inside the object, since the envelope holds
+                        # nothing but the "entities" key.
+                        sidecar = (
+                            self._fallback_sources_sidecar(body, entity)
+                            or self._fallback_sources_sidecar(envelope, entity)
+                        )
                         if sidecar:
                             entity[SOURCE_KEY] = sidecar
                     return [entity]
