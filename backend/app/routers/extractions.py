@@ -648,19 +648,35 @@ async def upload_pdf_template(
     settings = Settings()
     file_bytes = await file.read()
 
+    # Read the form fields BEFORE writing anything: this template file is
+    # named after the search set, so saving first meant a PDF that turns out
+    # to have no fields overwrote the bytes of the template already attached.
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        raw_fields = reader.get_fields() or {}
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="That file could not be read as a PDF. Attach a fillable PDF.",
+        )
+    if not raw_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This PDF has no form fields, so there is nothing to build "
+                "extraction fields from. Attach Template needs a fillable PDF "
+                "(one with form fields you can type into). To build fields from "
+                "a regular document, use From Document instead."
+            ),
+        )
+
     # Save template file
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     template_filename = f"{uuid}_template.pdf"
     template_path = upload_dir / template_filename
     template_path.write_bytes(file_bytes)
-
-    # Extract form field names
-    import io
-    reader = PdfReader(io.BytesIO(file_bytes))
-    raw_fields = reader.get_fields() or {}
-    if not raw_fields:
-        raise HTTPException(status_code=422, detail="No form fields found in PDF")
 
     # Build field info dict: {field_name: value_or_options}
     field_info: dict[str, object] = {}
