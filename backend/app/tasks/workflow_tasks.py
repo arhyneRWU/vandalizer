@@ -7,7 +7,7 @@ Task names use 'tasks.workflow_next.*' to coexist with Flask's 'tasks.workflow.*
 import logging
 
 from app.celery_app import celery_app
-from app.services.form_fill import document_meta
+from app.services.form_fill import DOC_META_TASKS, document_meta
 from app.tasks import TRANSIENT_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
@@ -282,9 +282,10 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
                         len(doc_uuids),
                     )
                 task_data["doc_texts"] = doc_texts
-                if task_doc.get("name") == "FormFiller":
-                    # Aligned 1:1 with doc_texts: the fill report attributes each
-                    # value to a document and page through these.
+                if task_doc.get("name") in DOC_META_TASKS:
+                    # Aligned 1:1 with doc_texts: the fill report and the
+                    # extraction source sidecar both attribute a value to a
+                    # document and page through these.
                     task_data["doc_metas"] = doc_metas
 
             # Pre-load specific document text when select_document is selected
@@ -292,7 +293,7 @@ def _build_steps_data(db, workflow_doc, workflow_id, trigger_step_data):
                 sel_doc = db.smart_document.find_one({"uuid": task_data["selected_document_uuid"]})
                 if sel_doc and sel_doc.get("raw_text"):
                     task_data["selected_doc_text"] = sel_doc["raw_text"]
-                    if task_doc.get("name") == "FormFiller":
+                    if task_doc.get("name") in DOC_META_TASKS:
                         task_data["selected_doc_meta"] = document_meta(sel_doc)
 
             if task_doc.get("name") == "FormFiller":
@@ -1235,7 +1236,7 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
             doc_texts.append(doc["raw_text"])
             doc_metas.append(document_meta(doc))
     task_data["doc_texts"] = doc_texts
-    if task_name == "FormFiller":
+    if task_name in DOC_META_TASKS:
         task_data["doc_metas"] = doc_metas
 
     # Pre-load specific document text when select_document is selected
@@ -1243,7 +1244,7 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
         sel_doc = db.smart_document.find_one({"uuid": task_data["selected_document_uuid"]})
         if sel_doc and sel_doc.get("raw_text"):
             task_data["selected_doc_text"] = sel_doc["raw_text"]
-            if task_name == "FormFiller":
+            if task_name in DOC_META_TASKS:
                 task_data["selected_doc_meta"] = document_meta(sel_doc)
 
     if task_name == "FormFiller":
