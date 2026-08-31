@@ -65,12 +65,14 @@ vi.mock('../../hooks/useProjectPins', () => ({
 }))
 
 const refreshKBSource = vi.fn().mockResolvedValue({ ok: true, status: 'queued', source_uuid: 'src-1' })
+const cloneKnowledgeBase = vi.fn().mockResolvedValue({ uuid: 'kb-copy', title: 'Export Control Regulations (copy)' })
 
 vi.mock('../../api/knowledge', () => ({
   getKnowledgeBase: (uuid: string) => getKnowledgeBase(uuid),
   getKBQuality: vi.fn().mockResolvedValue({}),
   getKBSourceHealth: vi.fn().mockResolvedValue({}),
   refreshKBSource: (uuid: string, sourceUuid: string) => refreshKBSource(uuid, sourceUuid),
+  cloneKnowledgeBase: (uuid: string) => cloneKnowledgeBase(uuid),
 }))
 
 vi.mock('../../api/organizations', () => ({
@@ -308,6 +310,35 @@ describe('KnowledgePanel source whose document was deleted', () => {
 
     expect(screen.getByText('Award Letter.pdf')).toBeInTheDocument()
     expect(screen.queryByText(/source deleted/i)).not.toBeInTheDocument()
+  }, 30000)
+})
+
+// Support ticket: Clone was on the KB cards but nowhere on the page you land
+// on after opening a KB — which is where someone decides they want a copy.
+describe('KnowledgePanel clone on an open KB', () => {
+  beforeEach(() => {
+    getKnowledgeBase.mockClear()
+    cloneKnowledgeBase.mockClear()
+  })
+
+  it('offers Clone and copies the open knowledge base', async () => {
+    detail.current = makeDetail({ can_manage: true, total_sources: 2 })
+    await openDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Clone$/ }))
+    await waitFor(() => expect(cloneKnowledgeBase).toHaveBeenCalledWith('kb-1'))
+  }, 30000)
+
+  it('disables Clone on a knowledge base with nothing to copy', async () => {
+    detail.current = makeDetail({
+      can_manage: true, total_sources: 0, sources_ready: 0, total_chunks: 0, status: 'empty',
+    })
+    await openDetail()
+
+    const clone = screen.getByRole('button', { name: /^Clone$/ })
+    expect(clone).toBeDisabled()
+    fireEvent.click(clone)
+    expect(cloneKnowledgeBase).not.toHaveBeenCalled()
   }, 30000)
 })
 
