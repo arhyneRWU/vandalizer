@@ -156,6 +156,28 @@ describe('OptimizerInbox', () => {
     expect(screen.queryByRole('button', { name: /Dismiss/i })).not.toBeInTheDocument()
   })
 
+  it('opens an item in a new tab so the worklist survives', async () => {
+    mockGet.mockResolvedValue(makeResponse([makeItem()]))
+    render(<OptimizerInbox />)
+
+    const open = await screen.findByRole('link', { name: /Open/i })
+    expect(open).toHaveAttribute('href', '/?workflow=wf-1')
+    expect(open).toHaveAttribute('target', '_blank')
+    expect(open).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('acknowledges a refresh that returns the same rows', async () => {
+    mockGet.mockResolvedValue(makeResponse([makeItem()]))
+    render(<OptimizerInbox />)
+
+    await screen.findByText('Proposal intake')
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2))
+    // Identical data comes back — the confirmation is the only visible change.
+    expect(await screen.findByText(/Updated just now/i)).toBeInTheDocument()
+  })
+
   it('offers nothing to apply on a tied candidate', async () => {
     mockGet.mockResolvedValue(makeResponse([
       makeItem({ category: 'no_change', tied_with_baseline: true }),

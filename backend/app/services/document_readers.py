@@ -127,12 +127,18 @@ def _pymupdf_extract_with_pages(pdf_path: str) -> tuple[str, list[dict]]:
     return "\n".join(parts), markers
 
 
-def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
+def ocr_extract_text_from_pdf(
+    pdf_path: str, retries: int = 3, report: dict | None = None,
+) -> str:
     """Extract text from a PDF using the configured OCR endpoint.
 
     The request/response contract depends on the configured provider — see
     ``app.services.ocr_client``. Falls back gracefully (returns "") if the OCR
     service is unavailable or misconfigured; callers then use PyMuPDF.
+
+    ``report``, when given, is filled in with what the returned string cannot
+    say — notably ``{"partial": True}`` when the converter only managed part of
+    the document. Optional so existing callers are unaffected.
     """
     # OCR endpoint is stored in the database via admin config (SystemConfig)
     from app.services import ocr_client
@@ -186,6 +192,7 @@ def ocr_extract_text_from_pdf(pdf_path: str, retries: int = 3) -> str:
                     provider=provider,
                     options=options,
                     use_async=use_async,
+                    report=report,
                 )
         except ocr_client.OcrRequestError as e:
             last_error = e
@@ -827,7 +834,9 @@ def _local_markdown_extract_from_pdf(pdf_path: str) -> tuple[str, list[dict]] | 
     return text, markers
 
 
-def _extract_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
+def _extract_pdf_text_and_markers(
+    file_path: str, report: dict | None = None,
+) -> tuple[str, list[dict]]:
     """The one PDF path: read the text, then remove what the page hides.
 
     Every reader below — the local Markdown fast path, the OCR service,
@@ -838,11 +847,13 @@ def _extract_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
     here, at the single point every caller goes through, rather than
     defended against separately in each prompt downstream.
     """
-    text, markers = _read_pdf_text_and_markers(file_path)
+    text, markers = _read_pdf_text_and_markers(file_path, report=report)
     return pdf_hidden_text.scrub_pdf(file_path, text, markers)
 
 
-def _read_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
+def _read_pdf_text_and_markers(
+    file_path: str, report: dict | None = None,
+) -> tuple[str, list[dict]]:
     """Extract a PDF's text and page markers with the best reader available."""
     if not pdf_has_ocrable_content(file_path):
         logger.warning(
@@ -862,7 +873,7 @@ def _read_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
     from app.services import ocr_client
 
     try:
-        ocr_text = ocr_extract_text_from_pdf(file_path)
+        ocr_text = ocr_extract_text_from_pdf(file_path, report=report)
     except ocr_client.OcrUnavailableError:
         # Deliberately not swallowed: a transient outage must reach the task
         # layer so the whole extraction is retried later, rather than being
@@ -874,6 +885,13 @@ def _read_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
     if ocr_text and len(ocr_text.strip()) >= MIN_PDF_TEXT_LENGTH:
         num_pages = pdf_page_count(file_path)
         return ocr_text, _interpolate_page_markers(ocr_text, num_pages)
+    # Falling back means the partial OCR text is not what we return, so the
+    # partial-conversion warning must not survive onto the PyMuPDF result.
+    ocr_report_partial = bool(report and report.get("partial"))
+    ocr_report_errors = list(report.get("errors") or []) if report else []
+    if report is not None:
+        report.pop("partial", None)
+        report.pop("errors", None)
     # OCR unavailable / too little text — PyMuPDF gives us exact boundaries.
     # The PyMuPDF pass is a page-boundary refinement over the OCR text, not a
     # hard requirement. If it fails (corrupt PDF, or the source file was
@@ -888,13 +906,19 @@ def _read_pdf_text_and_markers(file_path: str) -> tuple[str, list[dict]]:
                 "PyMuPDF page extraction failed for %s (%s); using OCR text",
                 file_path, e,
             )
+            if report is not None and ocr_report_partial:
+                # We are shipping the partial OCR text after all.
+                report["partial"] = True
+                report["errors"] = ocr_report_errors
             return ocr_text, _interpolate_page_markers(
                 ocr_text, pdf_page_count(file_path)
             )
         raise
 
 
-def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str, list[dict]]:
+def extract_text_with_markers(
+    file_path: str, file_extension: str, report: dict | None = None,
+) -> tuple[str, list[dict]]:
     """Like extract_text_from_file, but also returns per-location char offsets.
 
     Markers are a list of ``{"char_offset": int, "kind": "page"|"sheet",
@@ -908,7 +932,7 @@ def extract_text_with_markers(file_path: str, file_extension: str) -> tuple[str,
     ext = file_extension.lower().lstrip(".")
 
     if ext == "pdf":
-        return _extract_pdf_text_and_markers(file_path)
+        return _extract_pdf_text_and_markers(file_path, report=report)
 
     if ext == "xlsx":
         text = extract_text_from_xlsx(file_path)

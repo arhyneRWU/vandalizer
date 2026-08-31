@@ -112,6 +112,10 @@ export function OptimizerInbox() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showDismissed, setShowDismissed] = useState(false)
+  // Stamped on every successful load so Refresh has something to show for
+  // itself — a reload that returns identical rows otherwise looks like a
+  // no-op button.
+  const [loadedAt, setLoadedAt] = useState<string | null>(null)
   const [busyRun, setBusyRun] = useState<string | null>(null)
   const [previewFor, setPreviewFor] = useState<OptimizerInboxItem | null>(null)
 
@@ -120,6 +124,7 @@ export function OptimizerInbox() {
     setError(null)
     try {
       setData(await getOptimizerInbox({ includeDismissed }))
+      setLoadedAt(new Date().toISOString())
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load tuning suggestions')
     } finally {
@@ -128,6 +133,21 @@ export function OptimizerInbox() {
   }, [])
 
   useEffect(() => { void load(showDismissed) }, [load, showDismissed])
+
+  // A manual refresh that returns the same rows looks like a dead button, so
+  // acknowledge it explicitly for a beat after the request lands.
+  const [justRefreshed, setJustRefreshed] = useState(false)
+  useEffect(() => {
+    if (!justRefreshed) return
+    const t = setTimeout(() => setJustRefreshed(false), 2500)
+    return () => clearTimeout(t)
+  }, [justRefreshed])
+
+  const handleRefresh = useCallback(async () => {
+    setJustRefreshed(false)
+    await load(showDismissed)
+    setJustRefreshed(true)
+  }, [load, showDismissed])
 
   const applyItem = useCallback(async (item: OptimizerInboxItem) => {
     setBusyRun(item.run_uuid)
@@ -247,9 +267,22 @@ export function OptimizerInbox() {
             />
             Show dismissed
           </label>
-          <button onClick={() => void load(showDismissed)} style={secondaryButton} disabled={loading}>
-            <RotateCcw style={{ width: 12, height: 12 }} />
-            Refresh
+          {loadedAt && !loading && (
+            <span style={{
+              fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4,
+              color: justRefreshed ? '#166534' : '#9ca3af',
+            }}>
+              {justRefreshed && <CheckCircle2 style={{ width: 11, height: 11 }} />}
+              Updated {relativeTime(loadedAt).toLowerCase()}
+            </span>
+          )}
+          <button onClick={() => void handleRefresh()} style={secondaryButton} disabled={loading}>
+            {loading ? (
+              <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />
+            ) : (
+              <RotateCcw style={{ width: 12, height: 12 }} />
+            )}
+            {loading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
       </div>
@@ -473,7 +506,15 @@ function Row({ item, busy, onApply, onDismiss, onRestore }: {
               Restore
             </button>
           )}
-          <a href={item.link} style={{ ...secondaryButton, textDecoration: 'none' }}>
+          {/* New tab: the inbox is a worklist you triage down a row at a time,
+              and the item pages it links to have no route back here. */}
+          <a
+            href={item.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`${meta.openLabel} in a new tab`}
+            style={{ ...secondaryButton, textDecoration: 'none' }}
+          >
             <ExternalLink style={{ width: 12, height: 12 }} />
             Open
           </a>
