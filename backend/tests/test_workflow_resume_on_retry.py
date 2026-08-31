@@ -125,3 +125,41 @@ class TestFinalizeIsClaimedOnce:
 
         assert "finalized_at" in WorkflowResult.model_fields
         assert WorkflowResult.model_fields["finalized_at"].default is None
+
+    def test_every_task_that_counts_a_run_claims_it_first(self):
+        """`execute_workflow_task` was given the claim; the approval-gated
+        resume — same `autoretry_for`, same `max_retries=3`, same increment
+        sitting after execute() — was not, so a blip in its tail counted one
+        run up to four times. Asserted over every incrementing task, because
+        the defect is a guard that reaches one path and not its sibling."""
+        import ast
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "app" / "tasks" / "workflow_tasks.py"
+        ).read_text()
+        tree = ast.parse(src)
+
+        incrementing = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.get_source_segment(src, node) or ""
+            if '"num_executions"' in body:
+                incrementing.append((node.name, body))
+
+        # Guards the guard: a rename or a moved counter must not pass vacuously.
+        assert {n for n, _ in incrementing} == {
+            "execute_workflow_task",
+            "resume_workflow_after_approval",
+        }, [n for n, _ in incrementing]
+
+        unclaimed = [
+            name for name, body in incrementing
+            if "finalized_at" not in body or "modified_count" not in body
+        ]
+        assert not unclaimed, (
+            "these tasks increment a workflow's execution count without "
+            f"claiming finalization first, so a retry recounts the run: {unclaimed}"
+        )

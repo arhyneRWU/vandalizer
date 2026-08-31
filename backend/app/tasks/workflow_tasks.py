@@ -1620,10 +1620,33 @@ def resume_workflow_after_approval(self, approval_uuid):
         }},
     )
 
-    db.workflow.update_one(
-        {"_id": ObjectId(workflow_id)},
-        {"$inc": {"num_executions": 1}},
+    # Same claim the non-approval path makes, for the same reason: this task
+    # carries autoretry_for with max_retries=3, and everything above it is
+    # idempotent ($set) while the increment is not. A failure after execute()
+    # succeeds — the final-result write, a Mongo blip — retries the whole task,
+    # the resume correctly skips every step, and execution lands right back
+    # here to count the same run a second, third and fourth time.
+    #
+    # `{"finalized_at": None}` matches a missing field too, so an approval-gated
+    # run that predates this is claimable exactly once. It also means this path
+    # finally stamps `finalized_at`, which it never did — leaving every
+    # approval-gated run permanently unclaimed.
+    import datetime as _dt
+
+    claimed = db.workflow_result.update_one(
+        {"_id": ObjectId(workflow_result_id), "finalized_at": None},
+        {"$set": {"finalized_at": _dt.datetime.now(_dt.timezone.utc)}},
     )
+    if claimed.modified_count:
+        db.workflow.update_one(
+            {"_id": ObjectId(workflow_id)},
+            {"$inc": {"num_executions": 1}},
+        )
+    else:
+        logger.info(
+            "Approval-gated workflow %s finalize side effects already ran; "
+            "skipping on retry", workflow_result_id,
+        )
 
     # Finalize the activity. The resume path used to skip this entirely, so a
     # run that passed through an approval gate left its activity stuck at
