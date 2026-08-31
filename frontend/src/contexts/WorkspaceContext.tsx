@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useTeams } from '../hooks/useTeams'
-import type { ExtractionSourceMap } from '../api/extractions'
+import type { CrossFieldRunReport, ExtractionSourceMap } from '../api/extractions'
 
 type RightTab = 'assistant' | 'library'
 export type WorkspaceMode = 'chat' | 'files' | 'automations' | 'knowledge' | 'projects'
@@ -18,6 +18,12 @@ export interface ViewDocumentRequest {
 export interface PendingExtractionResults {
   values: Record<string, string>
   sources?: ExtractionSourceMap
+  /** Cross-field rule outcomes for the restored run. The panel clears its
+   * strip on open so a previous run's verdict can't sit under new values;
+   * without carrying these, reopening a completed run from the Activity rail
+   * restored the values and the page badges but silently dropped the "1 of 2
+   * cross-field checks failed" strip that ran with them. */
+  crossFieldSets?: (CrossFieldRunReport | null)[]
 }
 
 // ---------------------------------------------------------------------------
@@ -39,7 +45,7 @@ interface NavigationContextValue {
   // runs of the same workflow in the Activity rail).
   workflowOpenSignal: number
   openExtractionId: string | null
-  openExtraction: (uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap) => void
+  openExtraction: (uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap, initialCrossFieldSets?: (CrossFieldRunReport | null)[]) => void
   closeExtraction: () => void
   consumeExtractionResults: () => PendingExtractionResults | null
   // Same as workflowOpenSignal, for the extraction panel.
@@ -353,9 +359,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return s
   }, [])
 
-  const openExtraction = useCallback((uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap) => {
+  const openExtraction = useCallback((uuid: string, initialResults?: Record<string, string>, initialSources?: ExtractionSourceMap, initialCrossFieldSets?: (CrossFieldRunReport | null)[]) => {
     pendingExtractionResultsRef.current = initialResults
-      ? { values: initialResults, sources: initialSources }
+      ? { values: initialResults, sources: initialSources, crossFieldSets: initialCrossFieldSets }
       : null
     setExtractionOpenSignal(prev => prev + 1)
     updateSearch((prev) => ({ ...prev, extraction: uuid, workflow: undefined, automation: undefined }))
