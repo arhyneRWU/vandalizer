@@ -149,9 +149,10 @@ export function OptimizerInbox() {
 
   const handleRefresh = useCallback(async () => {
     setJustRefreshed(false)
-    // Only on success: a failed refresh renders its own error banner, and a
-    // green "✓ Updated just now" beside it against the *previous* load's
-    // timestamp tells the user their data is fresh when it isn't.
+    // Only on success. State hygiene rather than a visible fix: a failed load
+    // replaces this whole panel with the error banner (see the `if (error)`
+    // return below), so a stamp set here could not be seen anyway. Gated so
+    // that stays true if the error ever renders inline instead.
     if (await load(showDismissed)) setJustRefreshed(true)
   }, [load, showDismissed])
 
