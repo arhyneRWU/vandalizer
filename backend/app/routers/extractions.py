@@ -954,6 +954,27 @@ EXTRACTION_NO_VALUES_ERROR = (
 )
 
 
+def _entity_has_values(entity) -> bool:
+    """Whether an extracted entity carries at least one real value.
+
+    A dict of nothing but nulls is not a result. Testing the dict for
+    truthiness (the previous check) passed it, so a run where every field came
+    back null — a key-mismatched fallback parse, a document whose text never
+    loaded — was recorded as completed and rendered as a confident set of
+    "not found" answers. The source sidecar is skipped: it is metadata about
+    the values, not a value.
+    """
+    from app.services.extraction_sources import SOURCE_KEY
+
+    if not isinstance(entity, dict):
+        return False
+    return any(
+        value not in (None, "", [], {})
+        for key, value in entity.items()
+        if key != SOURCE_KEY
+    )
+
+
 @router.post("/run-sync")
 @limiter.limit("30/minute")
 async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, user: User = Depends(get_current_user)) -> dict:
@@ -999,12 +1020,13 @@ async def run_extraction_sync(request: Request, req: RunExtractionSyncRequest, u
                 combined_context=req.combined_context,
                 capture_sources=True,
             )
-        # A run that produced no entities at all extracted nothing; recording
+        # A run that produced no values at all extracted nothing; recording
         # it as completed gives History a green tick with nothing behind it.
         # It is finished as failed with the reason, and the client is told
         # so on the response rather than being pointed at details that
-        # don't exist.
-        no_values = not any(isinstance(e, dict) and e for e in results)
+        # don't exist. "No values" covers both shapes: no entities, and
+        # entities whose every field is null.
+        no_values = not any(_entity_has_values(e) for e in results)
         if no_values:
             await activity_service.activity_finish(
                 activity.id, ActivityStatus.FAILED, error=EXTRACTION_NO_VALUES_ERROR,
@@ -1192,7 +1214,15 @@ async def run_extraction_integrated(
             document_uuids=all_doc_uuids,
             user_id=user.user_id,
         )
-        await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
+        # The same all-null run /run-sync now fails. Reporting it "completed"
+        # here just moves the confident set of "not found" answers onto the
+        # external API, where the caller has even less chance of noticing.
+        no_values = not any(_entity_has_values(e) for e in results)
+        await activity_service.activity_finish(
+            activity.id,
+            ActivityStatus.FAILED if no_values else ActivityStatus.COMPLETED,
+            error=EXTRACTION_NO_VALUES_ERROR if no_values else None,
+        )
         await activity_service.activity_update(activity.id, documents_touched=len(all_doc_uuids))
 
         # Per-document diagnostics. Empty results when uploading a file are
@@ -1215,10 +1245,11 @@ async def run_extraction_integrated(
                 })
 
         return {
-            "status": "completed",
+            "status": "error" if no_values else "completed",
             "activity_id": str(activity.id),
             "results": results,
             "documents": doc_diagnostics,
+            **({"error": EXTRACTION_NO_VALUES_ERROR} if no_values else {}),
         }
     except Exception as e:
         await activity_service.activity_finish(activity.id, ActivityStatus.FAILED, error=str(e))
