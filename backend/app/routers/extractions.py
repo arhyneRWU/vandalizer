@@ -1200,10 +1200,15 @@ async def run_extraction_integrated(
     assert activity.id is not None
 
     try:
+        # Same disclosure the in-app run makes: a document whose text is only
+        # partly there produces answers that look exactly like answers read
+        # from all of it. An API caller has even less chance of noticing.
+        document_warnings: list[dict] = []
         results = await svc.run_extraction_sync(
             search_set_uuid=search_set_uuid,
             document_uuids=all_doc_uuids,
             user_id=user.user_id,
+            document_warnings=document_warnings,
         )
         await activity_service.activity_finish(activity.id, ActivityStatus.COMPLETED)
         await activity_service.activity_update(activity.id, documents_touched=len(all_doc_uuids))
@@ -1232,6 +1237,7 @@ async def run_extraction_integrated(
             "activity_id": str(activity.id),
             "results": results,
             "documents": doc_diagnostics,
+            "document_warnings": document_warnings,
         }
     except Exception as e:
         await activity_service.activity_finish(activity.id, ActivityStatus.FAILED, error=str(e))

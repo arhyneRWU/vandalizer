@@ -216,3 +216,44 @@ class TestSurfacing:
         from app.services.chat_service import partially_ingested_titles
 
         assert partially_ingested_titles([doc]) == []
+
+
+class TestEveryRunPathDiscloses:
+    """The failure mode this guards is not a wrong value but a fix applied to
+    one path and quietly not to its siblings: the in-app run disclosed a
+    half-read document while `/run-integrated` and the management API, given
+    the identical input, said nothing. Asserted structurally because the point
+    is coverage of *every* call site, which no single request-level test can
+    show."""
+
+    def _call_sites(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers"
+        sites = []
+        for path in (root / "extractions.py", root / "mgmt.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if isinstance(fn, ast.Attribute) and fn.attr == "run_extraction_sync":
+                    sites.append((path.name, node.lineno,
+                                  {k.arg for k in node.keywords}))
+        return sites
+
+    def test_there_are_call_sites_to_check(self):
+        # Guards the guard: a renamed method would otherwise pass vacuously.
+        assert len(self._call_sites()) >= 3
+
+    def test_no_run_path_swallows_a_degraded_document(self):
+        missing = [
+            f"{name}:{lineno}"
+            for name, lineno, kwargs in self._call_sites()
+            if "document_warnings" not in kwargs
+        ]
+        assert not missing, (
+            "these run paths extract from a possibly half-read document and "
+            f"report nothing about it: {missing}"
+        )
