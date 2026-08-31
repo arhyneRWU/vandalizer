@@ -16,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from app.dependencies import get_api_key_user, get_current_user
+from app.dependencies import get_api_key_user, get_current_user, get_current_user_or_api_key
 from app.exceptions import TrialSpendBlockedError
 from app.models.user import User
 from app.services import access_control
@@ -222,8 +222,15 @@ async def list_workflows(
 async def get_workflow_status(
     session_id: str,
     share_token: str | None = Query(default=None),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_or_api_key),
 ):
+    """Poll a workflow run by session id.
+
+    Accepts a session cookie (the UI) or an ``x-api-key`` header — the run
+    started by ``POST /run-integrated`` is polled here, and that endpoint is
+    key-authenticated, so this one has to be too. Authorization is unchanged:
+    the service resolves the result against the caller.
+    """
     status = await svc.get_workflow_status(session_id, user=user, share_token=share_token)
     if not status:
         raise HTTPException(status_code=404, detail="Workflow result not found")
@@ -246,7 +253,7 @@ async def get_batch_status(
 async def stream_workflow_status(
     session_id: str,
     share_token: str | None = Query(default=None),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_or_api_key),
 ):
     """SSE endpoint that streams workflow status updates until completion."""
     initial_status = await svc.get_workflow_status(session_id, user=user, share_token=share_token)
