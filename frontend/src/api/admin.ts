@@ -714,6 +714,10 @@ export interface JudgeModelCalibration {
   accuracy: number | null
   measured_at: string | null
   n_runs: number
+  /** Whether THIS model has the 3 runs a trailing median needs. The drift
+   * check is scoped to one model, so a pooled count would report a ledger of
+   * one run each for three models as detectable when it can never fire. */
+  drift_detectable: boolean
 }
 
 export interface JudgeSurfaceCalibration {
@@ -725,8 +729,9 @@ export interface JudgeSurfaceCalibration {
   models: JudgeModelCalibration[]
   measured_models: string[]
   ledger_entries: number
-  /** False when the ledger holds fewer than 3 entries — a regression cannot
-   * be detected at all below that, however far agreement moves. */
+  /** True when at least one model has enough of its own history for a
+   * regression to be detectable. Not a count over the whole ledger: the check
+   * never compares one model's κ against another's. */
   drift_detectable: boolean
 }
 

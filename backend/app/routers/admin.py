@@ -2176,9 +2176,10 @@ async def get_judge_calibration(user: User = Depends(get_current_user)):
     calibrated or not *for that model*, and an uncalibrated one carries no κ
     at all rather than borrowing one.
 
-    ``drift_detectable`` says whether the ledger holds enough history for the
-    regression check to fire — below three entries it cannot, however far
-    agreement moves.
+    ``drift_detectable`` says whether the regression check can fire, counted
+    per model rather than over the ledger as a whole: the check never compares
+    one model's κ against another's, so a ledger holding a single run each for
+    three models has no baseline for any of them.
     """
     await _require_admin(user)
     from app.services import judge_contract, judge_drift

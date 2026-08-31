@@ -193,7 +193,11 @@ def trailing_median(
         history = [e for e in history if e.judge_model == judge_model]
     if len(history) < 3:
         return None
-    recent = history[-window:]
+    # By timestamp, not file order, for the reason `calibration_for` gives:
+    # line order is only chronological while the file is strictly appended, and
+    # the commit-back flow can reorder it on a conflict resolution. "The most
+    # recent `window` entries" has to mean the most recent ones.
+    recent = sorted(history, key=lambda e: e.timestamp)[-window:]
     return statistics.median(e.kappa for e in recent)
 
 
@@ -205,6 +209,7 @@ def assert_no_regression(
     max_regression: float = MAX_KAPPA_REGRESSION,
     path: Path | None = None,
     judge_model: str | None = None,
+    baseline: float | None = None,
 ) -> None:
     """Raise AssertionError if ``new_kappa`` regresses > max_regression
     vs the trailing-``window`` median.
@@ -213,10 +218,19 @@ def assert_no_regression(
     establish a baseline, we *don't* fail — a brand-new surface can't have
     drifted from a non-existent past. The κ gate in the calibration test
     catches absolute floor violations; this catches *relative* drift.
+
+    ``baseline`` lets a caller that records its measurement *before* asserting
+    — which the tier-3 job does, so a run that trips the absolute floor still
+    reaches the ledger — pass the median it captured beforehand. Without it the
+    new entry sits inside the baseline it is being judged against: with exactly
+    two prior runs for the model, a κ of 0.60 against a prior [0.80, 0.60]
+    medians to 0.60 and silently clears a check the ledger was still too thin
+    to make.
     """
-    baseline = trailing_median(
-        surface, window=window, path=path, judge_model=judge_model,
-    )
+    if baseline is None:
+        baseline = trailing_median(
+            surface, window=window, path=path, judge_model=judge_model,
+        )
     if baseline is None:
         return
     if baseline - new_kappa > max_regression:
@@ -294,9 +308,12 @@ def calibration_status(
     models = []
     for model in judge_models:
         measured = calibration_for(surface, model, path=path)
+        # Per model, because that is the scope the check actually runs at.
+        n_for_model = sum(1 for e in history if e.judge_model == model)
         models.append({
             "judge_model": model,
             "calibrated": measured is not None,
+            "drift_detectable": n_for_model >= 3,
             **(measured or {"kappa": None, "accuracy": None,
                             "measured_at": None, "n_runs": 0}),
         })
@@ -306,7 +323,11 @@ def calibration_status(
         "models": models,
         "measured_models": measured_models(surface, path=path),
         "ledger_entries": len(history),
-        # trailing_median needs three entries; below that a regression cannot
-        # be detected no matter how far κ moves.
-        "drift_detectable": len(history) >= 3,
+        # Counted per model, not pooled. `trailing_median` needs three entries
+        # *for the model being checked*, so a ledger holding one run each for
+        # three different models has no baseline for any of them — pooling the
+        # count claimed drift was detectable while `assert_no_regression` could
+        # never fire for any model, which is the model-substitution error this
+        # file exists to prevent, in the field that reports whether it works.
+        "drift_detectable": any(m["drift_detectable"] for m in models),
     }

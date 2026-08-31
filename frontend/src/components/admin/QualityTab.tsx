@@ -572,7 +572,7 @@ export function QualityTab() {
                     fontSize: 11, padding: '1px 6px', borderRadius: 4,
                     background: '#fffbeb', border: '1px solid #fde68a', color: '#a16207',
                   }}>
-                    drift undetectable — {surface.ledger_entries} of 3 ledger entries
+                    drift undetectable — no model has 3 runs yet ({surface.ledger_entries} in the ledger)
                   </span>
                 )}
               </div>
@@ -580,23 +580,38 @@ export function QualityTab() {
                 {surface.models.length === 0 && (
                   <span style={{ fontSize: 12, color: '#6b7280' }}>No models configured.</span>
                 )}
-                {surface.models.map(m => (
-                  <span
-                    key={m.judge_model}
-                    title={m.calibrated
-                      ? `κ ${m.kappa?.toFixed(3)} over ${m.n_runs} run(s), last measured ${m.measured_at}`
-                      : 'This model has never been measured against human-labeled cases on this surface.'}
-                    style={{
-                      fontSize: 11, padding: '2px 8px', borderRadius: 4,
-                      border: `1px solid ${m.calibrated ? '#bbf7d0' : '#e5e7eb'}`,
-                      background: m.calibrated ? '#f0fdf4' : '#f9fafb',
-                      color: m.calibrated ? '#15803d' : '#6b7280',
-                      fontFamily: 'ui-monospace, monospace',
-                    }}
-                  >
-                    {m.judge_model}: {m.calibrated ? `κ ${m.kappa?.toFixed(2)}` : 'κ unmeasured'}
-                  </span>
-                ))}
+                {surface.models.map(m => {
+                  // Three states, not two. A model measured once has a κ but no
+                  // baseline to detect drift against — presenting that as the
+                  // same settled green as a model with a real history is the
+                  // over-claim this panel exists to stop. `calibration_for`
+                  // says it plainly: one run is a data point, not a baseline.
+                  const thin = m.calibrated && !m.drift_detectable
+                  const palette = !m.calibrated
+                    ? { border: '#e5e7eb', background: '#f9fafb', color: '#6b7280' }
+                    : thin
+                      ? { border: '#fde68a', background: '#fffbeb', color: '#a16207' }
+                      : { border: '#bbf7d0', background: '#f0fdf4', color: '#15803d' }
+                  return (
+                    <span
+                      key={m.judge_model}
+                      title={m.calibrated
+                        ? `κ ${m.kappa?.toFixed(3)} over ${m.n_runs} run(s), last measured ${m.measured_at}`
+                          + (thin ? ' — too few runs for drift detection (needs 3)' : '')
+                        : 'This model has never been measured against human-labeled cases on this surface.'}
+                      style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                        border: `1px solid ${palette.border}`,
+                        background: palette.background,
+                        color: palette.color,
+                        fontFamily: 'ui-monospace, monospace',
+                      }}
+                    >
+                      {m.judge_model}: {m.calibrated ? `κ ${m.kappa?.toFixed(2)}` : 'κ unmeasured'}
+                      {thin && ` (${m.n_runs} of 3 runs)`}
+                    </span>
+                  )
+                })}
               </div>
             </div>
           ))}

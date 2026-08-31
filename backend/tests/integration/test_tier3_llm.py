@@ -306,6 +306,12 @@ class TestExtractionJudgeCalibration:
         # ledger only ever held passing runs and the workflow's `if: always()`
         # had nothing to commit.
         from app.services import judge_drift
+
+        # Captured before recording: `record` appends this very measurement, so
+        # a median taken afterwards would include the value under test.
+        drift_baseline = judge_drift.trailing_median(
+            "extraction", judge_model=_llm_model(),
+        )
         judge_drift.record(
             "extraction",
             judge_model=_llm_model(),
@@ -332,6 +338,7 @@ class TestExtractionJudgeCalibration:
         # because a model rotation is a step change, not drift.
         judge_drift.assert_no_regression(
             "extraction", kappa, judge_model=_llm_model(),
+            baseline=drift_baseline,
         )
 
         # Per-field-type κ — surface regressions in low-frequency types (dates,

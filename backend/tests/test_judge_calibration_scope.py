@@ -182,3 +182,80 @@ class TestLatestMeansNewest:
         got = judge_drift.calibration_for("extraction", "m", path=path)
         assert got["kappa"] == 0.95
         assert got["measured_at"] == "2026-08-15T06:00:00+00:00"
+
+
+class TestTheBaselineExcludesTheRunUnderTest:
+    """The tier-3 job records before it asserts, so that a run tripping the
+    absolute floor still reaches the ledger. That ordering puts the new entry
+    inside the baseline it is judged against unless the caller captures the
+    median first."""
+
+    def test_a_recorded_run_would_otherwise_pad_its_own_baseline(self, tmp_path):
+        led = tmp_path / "ledger.jsonl"
+        for k in (0.80, 0.60):
+            judge_drift.record(
+                "extraction", judge_model="m1", kappa=k, accuracy=0.9,
+                bias_metric_name="b", bias_rate=0.0, n_cases=10, path=led,
+            )
+        assert len(judge_drift.load_history("extraction", path=led)) == 2
+
+        # Two prior runs: too thin for a baseline, so no check can be made.
+        captured = judge_drift.trailing_median("extraction", path=led, judge_model="m1")
+        assert captured is None
+
+        # A fresh run measuring the same κ. Accuracy differs so the same-minute
+        # idempotency guard (keyed on surface/model/κ/accuracy/minute) doesn't
+        # fold it into the previous entry; a real weekly run differs by minute.
+        judge_drift.record(
+            "extraction", judge_model="m1", kappa=0.60, accuracy=0.91,
+            bias_metric_name="b", bias_rate=0.0, n_cases=10, path=led,
+        )
+        assert len(judge_drift.load_history("extraction", path=led)) == 3
+        # Recording made the ledger look deep enough — on its own value.
+        assert judge_drift.trailing_median("extraction", path=led, judge_model="m1") == 0.60
+
+        # Handed the captured baseline, the check correctly declines to fire.
+        judge_drift.assert_no_regression(
+            "extraction", 0.60, path=led, judge_model="m1", baseline=captured,
+        )
+
+
+class TestDriftDetectableIsScopedLikeTheCheck:
+    """`assert_no_regression` is scoped to one model. A pooled count claimed
+    drift was detectable while the check could never fire for any model."""
+
+    def test_one_run_each_for_three_models_is_not_detectable(self, tmp_path):
+        led = tmp_path / "ledger.jsonl"
+        for model in ("m1", "m2", "m3"):
+            judge_drift.record(
+                "extraction", judge_model=model, kappa=0.8, accuracy=0.9,
+                bias_metric_name="b", bias_rate=0.0, n_cases=10, path=led,
+            )
+        status = judge_drift.calibration_status(
+            "extraction", ["m1", "m2", "m3"], path=led,
+        )
+        assert status["ledger_entries"] == 3
+        assert status["drift_detectable"] is False
+        assert all(m["drift_detectable"] is False for m in status["models"])
+        # And the check itself agrees.
+        for model in ("m1", "m2", "m3"):
+            assert judge_drift.trailing_median(
+                "extraction", path=led, judge_model=model,
+            ) is None
+
+    def test_three_runs_for_one_model_is_detectable_for_that_model_only(self, tmp_path):
+        led = tmp_path / "ledger.jsonl"
+        for k in (0.80, 0.82, 0.81):
+            judge_drift.record(
+                "extraction", judge_model="m1", kappa=k, accuracy=0.9,
+                bias_metric_name="b", bias_rate=0.0, n_cases=10, path=led,
+            )
+        judge_drift.record(
+            "extraction", judge_model="m2", kappa=0.8, accuracy=0.9,
+            bias_metric_name="b", bias_rate=0.0, n_cases=10, path=led,
+        )
+        status = judge_drift.calibration_status("extraction", ["m1", "m2"], path=led)
+        by_model = {m["judge_model"]: m for m in status["models"]}
+        assert by_model["m1"]["drift_detectable"] is True
+        assert by_model["m2"]["drift_detectable"] is False
+        assert status["drift_detectable"] is True
