@@ -119,14 +119,18 @@ export function OptimizerInbox() {
   const [busyRun, setBusyRun] = useState<string | null>(null)
   const [previewFor, setPreviewFor] = useState<OptimizerInboxItem | null>(null)
 
-  const load = useCallback(async (includeDismissed: boolean) => {
+  /** Returns whether the fetch succeeded, so a caller can tell a real refresh
+   *  from one that only produced an error banner. */
+  const load = useCallback(async (includeDismissed: boolean): Promise<boolean> => {
     setLoading(true)
     setError(null)
     try {
       setData(await getOptimizerInbox({ includeDismissed }))
       setLoadedAt(new Date().toISOString())
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load tuning suggestions')
+      return false
     } finally {
       setLoading(false)
     }
@@ -145,8 +149,10 @@ export function OptimizerInbox() {
 
   const handleRefresh = useCallback(async () => {
     setJustRefreshed(false)
-    await load(showDismissed)
-    setJustRefreshed(true)
+    // Only on success: a failed refresh renders its own error banner, and a
+    // green "✓ Updated just now" beside it against the *previous* load's
+    // timestamp tells the user their data is fresh when it isn't.
+    if (await load(showDismissed)) setJustRefreshed(true)
   }, [load, showDismissed])
 
   const applyItem = useCallback(async (item: OptimizerInboxItem) => {
