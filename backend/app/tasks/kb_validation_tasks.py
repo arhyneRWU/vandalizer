@@ -316,54 +316,52 @@ async def _optimization_janitor_async() -> dict:
     reaped = 0
     scanned = 0
 
-    # KB and workflow runs share the reap shape: no Celery task id on the run
-    # to revoke, so finalizing the document is the whole job. The query
-    # matches status in {queued, running} so a never-picked-up run (broker
-    # dropped the task) is also recovered. Workflow runs additionally carry
-    # stopped_reason, which every other terminal write on them populates.
-    for model_cls, extra_fields in (
-        (KBOptimizationRun, {}),
-        (WorkflowOptimizationRun, {"stopped_reason": "failed"}),
-    ):
-        stuck = await model_cls.find(
-            {"status": {"$in": ["queued", "running"]}, "started_at": {"$lt": cutoff}},
-        ).to_list()
-        scanned += len(stuck)
-        for run in stuck:
-            run.status = "failed"
-            run.phase = "failed"
-            for field, value in extra_fields.items():
-                setattr(run, field, value)
-            run.error_message = (
-                "Optimization run abandoned — worker crashed or exceeded the "
-                f"{ORPHAN_RUN_AGE_SECONDS // 60}-minute soft cap. Run was reaped "
-                "by tasks.passive.optimization_janitor."
-            )
-            run.completed_at = _dt.datetime.now(tz=_dt.timezone.utc)
-            try:
-                await run.save()
-                reaped += 1
-            except Exception as e:  # pragma: no cover — defensive
-                logger.warning("Janitor could not save run %s: %s", run.uuid, e)
+    # KB runs are finalized inline: no Celery task id on the doc to revoke,
+    # so finalizing it is the whole job. The query matches status in
+    # {queued, running} so a never-picked-up run (broker dropped the task)
+    # is also recovered.
+    stuck = await KBOptimizationRun.find(
+        {"status": {"$in": ["queued", "running"]}, "started_at": {"$lt": cutoff}},
+    ).to_list()
+    scanned += len(stuck)
+    for run in stuck:
+        run.status = "failed"
+        run.phase = "failed"
+        run.error_message = (
+            "Optimization run abandoned — worker crashed or exceeded the "
+            f"{ORPHAN_RUN_AGE_SECONDS // 60}-minute soft cap. Run was reaped "
+            "by tasks.passive.optimization_janitor."
+        )
+        run.completed_at = _dt.datetime.now(tz=_dt.timezone.utc)
+        try:
+            await run.save()
+            reaped += 1
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("Janitor could not save run %s: %s", run.uuid, e)
 
-    # Extraction runs have their own reap_one — it also revokes the Celery
-    # task (the run stores its task id) and honors the cancel grace window —
-    # so delegate rather than duplicate. reap_one no-ops on a run that is
+    # Extraction and workflow runs each have their own reap_one — both revoke
+    # the run's Celery task (so a still-queued copy can't resurrect the doc)
+    # and honor a user-requested cancel — so delegate rather than duplicate
+    # the finalization write in a second place. reap_one no-ops on a run
     # young enough to still be legitimately executing.
     from app.models.extraction_optimization_run import ExtractionOptimizationRun
-    from app.services.extraction_optimizer import reap_one
+    from app.services import extraction_optimizer, workflow_optimizer
 
-    candidates = await ExtractionOptimizationRun.find(
-        {"status": {"$in": ["queued", "running"]}},
-    ).to_list()
-    scanned += len(candidates)
-    for run in candidates:
-        try:
-            updated = await reap_one(run)
-            if updated is not None and updated.status not in ("queued", "running"):
-                reaped += 1
-        except Exception as e:  # pragma: no cover — defensive
-            logger.warning("Janitor could not reap extraction run %s: %s", run.uuid, e)
+    for model_cls, reap_one in (
+        (ExtractionOptimizationRun, extraction_optimizer.reap_one),
+        (WorkflowOptimizationRun, workflow_optimizer.reap_one),
+    ):
+        candidates = await model_cls.find(
+            {"status": {"$in": ["queued", "running"]}},
+        ).to_list()
+        scanned += len(candidates)
+        for run in candidates:
+            try:
+                updated = await reap_one(run)
+                if updated is not None and updated.status not in ("queued", "running"):
+                    reaped += 1
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("Janitor could not reap run %s: %s", run.uuid, e)
 
     if reaped:
         logger.info("Optimization janitor reaped %d orphan run(s)", reaped)

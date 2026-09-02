@@ -122,14 +122,39 @@ def _as_aware(dt: datetime.datetime | None) -> datetime.datetime | None:
     return dt
 
 
+def _revoke_task(run_doc: WorkflowOptimizationRun) -> None:
+    """Best-effort hard-kill of the run's Celery task.
+
+    Mirrors extraction_optimizer._revoke_task. Without this, reaping a run
+    whose task was merely *queued* behind a backlog resurrected it: the doc
+    was marked failed, the 409 cleared, a replacement run started — and when
+    workers caught up the old task picked its doc back up, flipped it to
+    running, and both optimizations executed concurrently.
+    """
+    task_id = getattr(run_doc, "celery_task_id", None)
+    if not task_id:
+        return
+    try:
+        from app.celery_app import celery_app
+
+        celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+    except Exception:
+        logger.warning(
+            "Could not revoke Celery task %s for workflow optimization run %s",
+            task_id, run_doc.uuid, exc_info=True,
+        )
+
+
 async def reap_one(run_doc: WorkflowOptimizationRun | None) -> WorkflowOptimizationRun | None:
     """Recover a single orphaned run; no-op unless it's genuinely stuck.
 
     A run left queued/running past the worker's hard time limit was
     hard-limit killed or lost its worker; nothing will ever finalize it.
-    Unlike the extraction equivalent there is no Celery task id on the run
-    to revoke — finalizing the document is the whole job. Returns the
-    (possibly updated) run.
+    The run's Celery task is revoked first (see _revoke_task) so a
+    still-queued copy cannot resurrect the doc later. A run the user had
+    already asked to cancel is finalized as cancelled, not failed — the
+    worker dying before the next cancel check must not turn a deliberate
+    stop into a scary failure. Returns the (possibly updated) run.
     """
     if run_doc is None or run_doc.status not in ("queued", "running"):
         return run_doc
@@ -139,13 +164,20 @@ async def reap_one(run_doc: WorkflowOptimizationRun | None) -> WorkflowOptimizat
     if started is None or (now - started).total_seconds() <= STALE_RUN_TIMEOUT_SECONDS:
         return run_doc
 
-    run_doc.status = "failed"
-    run_doc.phase = "failed"
-    run_doc.stopped_reason = "failed"
-    run_doc.error_message = (
-        "Optimization run abandoned — the worker crashed or was killed at the "
-        "hard time limit before it could record a result."
-    )
+    _revoke_task(run_doc)
+    if run_doc.cancel_requested:
+        run_doc.status = "cancelled"
+        run_doc.phase = "cancelled"
+        run_doc.stopped_reason = "cancelled"
+        run_doc.progress_message = "Cancelled (the worker did not respond)."
+    else:
+        run_doc.status = "failed"
+        run_doc.phase = "failed"
+        run_doc.stopped_reason = "failed"
+        run_doc.error_message = (
+            "Optimization run abandoned — the worker crashed or was killed at "
+            "the hard time limit before it could record a result."
+        )
     run_doc.completed_at = now
     await run_doc.save()
     logger.info("Reaped orphaned workflow optimization run %s", run_doc.uuid)
@@ -196,6 +228,17 @@ async def run_optimization(
     run_doc = await WorkflowOptimizationRun.find_one({"uuid": run_uuid})
     if not run_doc:
         raise ValueError(f"WorkflowOptimizationRun not found: {run_uuid}")
+
+    # A run the reaper (or a user) already finalized must stay finalized.
+    # Without this, a task that sat queued long enough to be reaped as
+    # abandoned would pick its doc back up, flip failed -> running, and
+    # execute concurrently with whatever replacement run the reap unblocked.
+    if run_doc.status not in ("queued", "running"):
+        logger.info(
+            "Skipping workflow optimization %s — run is already terminal (%s)",
+            run_uuid, run_doc.status,
+        )
+        return run_doc
 
     try:
         await _update(run_doc, status="running", phase="preparing",

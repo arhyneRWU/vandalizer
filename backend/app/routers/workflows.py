@@ -1850,10 +1850,14 @@ async def start_workflow_optimization(
     await run.insert()
 
     from app.tasks.workflow_optimization_tasks import optimize_workflow_task
-    optimize_workflow_task.delay(
+    async_result = optimize_workflow_task.delay(
         workflow_id, user.user_id, run.uuid,
         token_budget, apply_on_finish, max_candidates, include_judge,
     )
+    # Stored so the reaper can revoke a still-queued task rather than let it
+    # resurrect a doc already finalized as abandoned (same as extraction).
+    run.celery_task_id = async_result.id
+    await run.save()
     return {"run_uuid": run.uuid, "status": "queued"}
 
 

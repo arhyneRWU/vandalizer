@@ -23,6 +23,11 @@ def _make_stuck_run(uuid="opt-stuck", status="running", age_seconds=4 * 3600):
     rd.started_at = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(seconds=age_seconds)
     rd.completed_at = None
     rd.error_message = None
+    # Explicit falsy values: on a bare MagicMock these attributes are truthy
+    # mocks, which would silently route reap_one into the cancelled branch
+    # and the revoke path.
+    rd.cancel_requested = False
+    rd.celery_task_id = None
     rd.save = AsyncMock()
     return rd
 
@@ -33,7 +38,7 @@ def _query(rows=()):
     return q
 
 
-def _janitor_patches(kb=(), wf=(), ext=(), reap_one=None):
+def _janitor_patches(kb=(), wf=(), ext=(), reap_one=None, wf_reap_one=None):
     return (
         patch("app.database.init_db", new=AsyncMock()),
         patch("app.models.kb_optimization_run.KBOptimizationRun.find", return_value=_query(kb)),
@@ -49,12 +54,16 @@ def _janitor_patches(kb=(), wf=(), ext=(), reap_one=None):
             "app.services.extraction_optimizer.reap_one",
             new=reap_one or AsyncMock(side_effect=lambda r: r),
         ),
+        patch(
+            "app.services.workflow_optimizer.reap_one",
+            new=wf_reap_one or AsyncMock(side_effect=lambda r: r),
+        ),
     )
 
 
 async def _run_janitor(**kwargs):
     patches = _janitor_patches(**kwargs)
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         return await kb_validation_tasks._optimization_janitor_async()
 
 
@@ -76,22 +85,24 @@ async def test_janitor_marks_abandoned_kb_runs_failed():
 
 
 @pytest.mark.asyncio
-async def test_janitor_reaps_workflow_runs_with_stopped_reason():
+async def test_janitor_delegates_workflow_runs_to_workflow_reap_one():
     """WorkflowOptimizationRun had NO reaper at all: a hard-limit kill left it
     "running" forever, and start_workflow_optimization 409s on it with no
-    sweep — permanently blocking re-optimization of that workflow."""
+    sweep — permanently blocking re-optimization of that workflow. The
+    janitor delegates to workflow_optimizer.reap_one (which also revokes the
+    Celery task and honors a user cancel) so the finalization write exists in
+    exactly one place."""
     stuck = _make_stuck_run("wf-1", status="running")
-    stuck.stopped_reason = None
 
-    result = await _run_janitor(wf=[stuck])
+    async def _finalize(run):
+        run.status = "failed"
+        return run
 
+    reap = AsyncMock(side_effect=_finalize)
+    result = await _run_janitor(wf=[stuck], wf_reap_one=reap)
+
+    reap.assert_awaited_once_with(stuck)
     assert result == {"reaped": 1, "scanned": 1}
-    assert stuck.status == "failed"
-    # Every other terminal write on this model populates stopped_reason; the
-    # janitor must too, or downstream consumers see a failed run that claims
-    # it never stopped.
-    assert stuck.stopped_reason == "failed"
-    stuck.save.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -133,7 +144,7 @@ async def test_janitor_filter_uses_correct_cutoff_and_status_set():
     patches = _janitor_patches()
     with patches[0], patch(
         "app.models.kb_optimization_run.KBOptimizationRun.find", side_effect=fake_find,
-    ), patches[2], patches[3], patches[4]:
+    ), patches[2], patches[3], patches[4], patches[5]:
         await kb_validation_tasks._optimization_janitor_async()
 
     assert captured["filt"]["status"] == {"$in": ["queued", "running"]}
@@ -169,17 +180,46 @@ def test_orphan_age_is_2x_optimize_soft_time_limit():
     assert kb_validation_tasks.ORPHAN_RUN_AGE_SECONDS >= optimize_workflow_task.time_limit
 
 
+def test_workflow_stale_timeout_exceeds_the_task_hard_limit():
+    """STALE_RUN_TIMEOUT_SECONDS hard-codes the task's time_limit + slack; if
+    someone raises the task limit (e.g. a Thorough tier) without this
+    constant, every near-limit run gets reaped while still executing. This
+    assertion is what goes red."""
+    from app.services import workflow_optimizer as wo
+    from app.tasks.workflow_optimization_tasks import optimize_workflow_task
+
+    assert wo.STALE_RUN_TIMEOUT_SECONDS >= optimize_workflow_task.time_limit
+
+
 class TestWorkflowOptimizerReapOne:
     @pytest.mark.asyncio
-    async def test_stale_run_is_finalized_as_failed(self):
+    async def test_stale_run_is_finalized_as_failed_and_task_revoked(self):
         from app.services import workflow_optimizer as wo
 
         run = _make_stuck_run("wf-stale", age_seconds=wo.STALE_RUN_TIMEOUT_SECONDS + 60)
-        out = await wo.reap_one(run)
+        with patch.object(wo, "_revoke_task") as revoke:
+            out = await wo.reap_one(run)
         assert out.status == "failed"
         assert out.stopped_reason == "failed"
         assert "abandoned" in out.error_message
+        # Without the revoke, a still-queued copy of the task later picks the
+        # doc up, flips failed -> running, and runs concurrently with the
+        # replacement run the reap unblocked.
+        revoke.assert_called_once_with(run)
         run.save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_then_died_finalizes_as_cancelled_not_failed(self):
+        """The user asked for the stop; the worker dying before its next
+        cancel check must not turn that into a scary failure."""
+        from app.services import workflow_optimizer as wo
+
+        run = _make_stuck_run("wf-cancel", age_seconds=wo.STALE_RUN_TIMEOUT_SECONDS + 60)
+        run.cancel_requested = True
+        with patch.object(wo, "_revoke_task"):
+            out = await wo.reap_one(run)
+        assert out.status == "cancelled"
+        assert out.stopped_reason == "cancelled"
 
     @pytest.mark.asyncio
     async def test_young_run_is_left_alone(self):
@@ -198,6 +238,24 @@ class TestWorkflowOptimizerReapOne:
         out = await wo.reap_one(run)
         assert out.status == "completed"
         run.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_refuses_to_resurrect_a_terminal_run():
+    """A task that sat queued long enough to be reaped must not pick its doc
+    back up and flip failed -> running over the reaper's verdict."""
+    from app.services import workflow_optimizer as wo
+
+    run = _make_stuck_run("wf-reaped", status="failed")
+    with patch(
+        "app.models.workflow_optimization_run.WorkflowOptimizationRun.find_one",
+        new=AsyncMock(return_value=run),
+    ), patch.object(wo, "_update", new=AsyncMock()) as update:
+        out = await wo.run_optimization("wf-1", "user-1", "wf-reaped")
+
+    assert out is run
+    assert out.status == "failed"
+    update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
