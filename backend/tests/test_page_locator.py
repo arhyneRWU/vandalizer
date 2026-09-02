@@ -231,3 +231,61 @@ class TestWithMarkerProvenance:
         out = with_marker_provenance(mixed)
         assert all(m.get("approximate") for m in out if m["kind"] == "page")
         assert not any(m.get("approximate") for m in out if m["kind"] == "sheet")
+
+
+class TestProvenanceReachesTheMissedSurfaces:
+    """The review found two production surfaces consuming stored markers
+    without the legacy normalization: the combined-context merge (which
+    destroys the uniform-spacing signature before the one wrapped consumer
+    ever sees the list) and form-fill attribution reports.
+    """
+
+    def _legacy_markers(self, n=5, step=100):
+        return [
+            {"char_offset": i * step, "kind": "page", "value": i + 1}
+            for i in range(n)
+        ]
+
+    def test_combined_context_merge_normalizes_per_document_before_shifting(self):
+        """Merged offsets have irregular deltas (the inter-doc separator), so
+        detection after the merge is impossible; it must happen per doc. And
+        one modern doc's flagged markers must not exempt a legacy sibling's
+        via the any(approximate) early-return."""
+        from app.services.search_set_service import merge_combined_context
+
+        legacy_doc = "x" * 500
+        modern_doc = "y" * 400
+        merged_text, meta = merge_combined_context(
+            [legacy_doc, modern_doc],
+            [
+                {"uuid": "L", "title": "Legacy scan", "text_markers": self._legacy_markers()},
+                {"uuid": "M", "title": "Modern", "text_markers": [
+                    {"char_offset": 0, "kind": "page", "value": 1, "approximate": True},
+                    {"char_offset": 137, "kind": "page", "value": 2, "approximate": True},
+                    {"char_offset": 305, "kind": "page", "value": 3, "approximate": True},
+                ]},
+            ],
+        )
+        assert "x" in merged_text and "y" in merged_text
+        legacy_merged = [m for m in meta["text_markers"] if m["char_offset"] < 500]
+        assert len(legacy_merged) == 5
+        assert all(m.get("approximate") is True for m in legacy_merged)
+        # Spans still attribute offsets to the right document.
+        assert meta["doc_spans"][0]["uuid"] == "L"
+        assert meta["doc_spans"][1]["uuid"] == "M"
+
+    def test_form_fill_report_hedges_legacy_interpolated_pages(self):
+        from app.services.form_fill import resolve_fill
+
+        report = resolve_fill(
+            {"total": "485,000"},
+            [{
+                "uuid": "d1", "title": "Legacy scan",
+                "text": "x" * 150 + " total 485,000 appears here " + "x" * 300,
+                "text_markers": self._legacy_markers(),
+            }],
+        )
+        entry = next(e for e in report if e["name"] == "total")
+        assert entry["status"] == "supported"
+        assert entry["page"] == 2
+        assert entry.get("page_approximate") is True
