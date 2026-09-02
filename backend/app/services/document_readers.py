@@ -605,15 +605,20 @@ def read_docx_markdown(docx_path: str) -> str:
     yielded different text depending on how it entered the system. Both now
     come through here. Note the fallback is not an edge case: the Docker
     image installs no pandoc binary, so on the supported deploy pypandoc
-    raises on every call and MarkItDown does all the work — which is why the
-    fallback is logged at info, not warning.
+    raises OSError on every call and MarkItDown does all the work — which is
+    why a *missing binary* logs at info. Any other pypandoc failure means a
+    host that normally converts with pandoc just switched readers for this
+    one document (different table/list rendering than its neighbors), which
+    is worth a warning.
 
     ``--track-changes=accept`` is passed explicitly (insertions kept,
     deletions dropped from the body). That is pandoc's documented default,
     but the default was an assumption about whichever pandoc binary a host
     happens to have; struck-through text in a budget must not depend on it.
     Deleted text is not lost — ``extract_docx_extras`` reports it, labeled
-    as deleted. MarkItDown's mammoth backend likewise accepts revisions.
+    as deleted. MarkItDown's mammoth backend likewise accepts revisions
+    (``w:ins`` content is read, ``w:del`` is in its ignored-elements list —
+    pinned by test against the installed package).
     """
     try:
         import pypandoc
@@ -621,12 +626,22 @@ def read_docx_markdown(docx_path: str) -> str:
         body = pypandoc.convert_file(
             docx_path, "markdown", extra_args=["--track-changes=accept"],
         )
+    except OSError as e:
+        # "No pandoc was found" — the expected state on the Docker deploy.
+        logger.info("pandoc not available for %s (%s); reading with MarkItDown", docx_path, e)
+        body = None
     except Exception as e:
-        logger.info(
-            "pypandoc unavailable or failed for %s (%s); reading with MarkItDown",
+        logger.warning(
+            "pypandoc failed to convert %s (%s); reading with MarkItDown",
             docx_path, e,
         )
-        return convert_to_markdown(docx_path, keep_data_uris=False)
+        body = None
+    if body is None:
+        body = convert_to_markdown(docx_path, keep_data_uris=False)
+    # Applied on BOTH branches: leaving image refs in only the MarkItDown
+    # output would make the same docx read differently on Docker (no pandoc)
+    # vs a pandoc host — the per-environment divergence this function exists
+    # to kill.
     return remove_images_from_markdown(body)
 
 

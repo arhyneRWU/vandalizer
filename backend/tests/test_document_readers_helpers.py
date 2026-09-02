@@ -705,3 +705,120 @@ class TestReadDocxMarkdown:
             out = dr.extract_text_from_file(path, "docx")
         mock_read.assert_called_once_with(path)
         assert "unified body" in out
+
+
+def _tracked_changes_docx(tmp_path):
+    """A minimal but structurally valid .docx with one insertion + deletion."""
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    document_xml = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{ns}"><w:body>'
+        f'<w:p><w:r><w:t xml:space="preserve">The budget totals </w:t></w:r>'
+        f'<w:ins w:author="PI" w:date="2026-04-01">'
+        f'<w:r><w:t>485,000</w:t></w:r>'
+        f'</w:ins>'
+        f'<w:del w:author="OSP" w:date="2026-04-02">'
+        f'<w:r><w:delText>512,000</w:delText></w:r>'
+        f'</w:del>'
+        f'</w:p>'
+        f'</w:body></w:document>'
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '</Types>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        '</Relationships>'
+    )
+    docx = tmp_path / "tracked_real.docx"
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/document.xml", document_xml)
+    return str(docx)
+
+
+class TestDocxBodyTrackedChangeSemantics:
+    """The extras design rests on the BODY readers accepting revisions
+    (insertions in once, deletions out). That is third-party behavior —
+    mammoth for MarkItDown, pandoc where installed — and an upgrade that
+    changes it would silently make inserted figures vanish (or deleted ones
+    reappear) everywhere on the Docker deploy while the extras tests stayed
+    green. This pins it against the installed packages.
+    """
+
+    def test_markitdown_body_keeps_insertions_and_drops_deletions(self, tmp_path):
+        from app.services.document_readers import convert_to_markdown
+
+        body = convert_to_markdown(_tracked_changes_docx(tmp_path), keep_data_uris=False)
+        assert "485,000" in body   # inserted text is part of the body
+        assert "512,000" not in body  # deleted text is not
+
+    def test_read_docx_markdown_via_fallback_matches(self, tmp_path):
+        """The full shared reader, on a host with no pandoc (the Docker
+        reality): same semantics, and the image-strip post-process applies
+        on the fallback branch too."""
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        no_pandoc = MagicMock()
+        no_pandoc.convert_file.side_effect = OSError("No pandoc was found")
+        with patch.dict(sys.modules, {"pypandoc": no_pandoc}):
+            body = dr.read_docx_markdown(_tracked_changes_docx(tmp_path))
+        assert "485,000" in body
+        assert "512,000" not in body
+
+
+class TestReadDocxMarkdownLogLevels:
+    def test_missing_pandoc_logs_info_not_warning(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        fake = MagicMock()
+        fake.convert_file.side_effect = OSError("No pandoc was found")
+        with patch.dict(sys.modules, {"pypandoc": fake}), \
+             patch.object(dr, "convert_to_markdown", return_value="md"), \
+             patch.object(dr, "logger") as mock_logger:
+            dr.read_docx_markdown("a.docx")
+        assert mock_logger.info.called
+        mock_logger.warning.assert_not_called()
+
+    def test_real_pandoc_failure_logs_warning(self):
+        """On a pandoc host, one document switching readers relative to its
+        neighbors must be visible at default (warning+) log levels."""
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        fake = MagicMock()
+        fake.convert_file.side_effect = RuntimeError("pandoc died parsing")
+        with patch.dict(sys.modules, {"pypandoc": fake}), \
+             patch.object(dr, "convert_to_markdown", return_value="md"), \
+             patch.object(dr, "logger") as mock_logger:
+            dr.read_docx_markdown("a.docx")
+        assert mock_logger.warning.called
+
+    def test_fallback_strips_images_like_the_pandoc_branch(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        fake = MagicMock()
+        fake.convert_file.side_effect = OSError("No pandoc was found")
+        with patch.dict(sys.modules, {"pypandoc": fake}), \
+             patch.object(dr, "convert_to_markdown",
+                          return_value="Before ![chart](media/img1.png) after"):
+            out = dr.read_docx_markdown("a.docx")
+        assert "media/img1.png" not in out
+        assert "Before" in out and "after" in out
