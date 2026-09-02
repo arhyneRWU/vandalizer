@@ -595,3 +595,113 @@ class TestExtractTextFromFileMissingFile:
         assert "[Error extracting content" not in result
         mock_logger.error.assert_not_called()
         mock_logger.warning.assert_called()
+
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _docx_with_tracked_changes(tmp_path):
+    document_xml = (
+        f'<w:document xmlns:w="{_W_NS}"><w:body>'
+        f'  <w:p><w:r><w:t>The budget totals </w:t></w:r>'
+        f'    <w:ins w:author="PI" w:date="2026-04-01">'
+        f'      <w:r><w:t>485,000</w:t></w:r>'
+        f'    </w:ins>'
+        f'    <w:del w:author="OSP" w:date="2026-04-02">'
+        f'      <w:r><w:delText>512,000</w:delText></w:r>'
+        f'    </w:del>'
+        f'  </w:p>'
+        f'</w:body></w:document>'
+    )
+    docx = tmp_path / "tracked.docx"
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr("word/document.xml", document_xml)
+    return str(docx)
+
+
+class TestDocxTrackedChangeExtras:
+    """The body is read with tracked changes accepted (insertions in,
+    deletions out), so the extras must report deletions — review history
+    worth seeing, labeled as deleted — and must NOT re-list insertions,
+    which are already in the body: listing them again put every inserted
+    figure into the context window twice, and a "sum the personnel costs"
+    prompt double-counted them.
+    """
+
+    def test_deletions_are_reported_and_labeled(self, tmp_path):
+        out = extract_docx_extras(_docx_with_tracked_changes(tmp_path))
+        assert "## Tracked changes" in out
+        assert "**Deleted** by OSP" in out
+        assert "512,000" in out
+        # The section says what it is: text NOT in the body.
+        assert "NOT part of the document body" in out
+
+    def test_insertions_are_not_listed_twice(self, tmp_path):
+        out = extract_docx_extras(_docx_with_tracked_changes(tmp_path))
+        assert "485,000" not in out
+        assert "Inserted" not in out
+
+    def test_parse_failures_are_logged_not_silent(self, tmp_path):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        docx = tmp_path / "bad.docx"
+        with zipfile.ZipFile(docx, "w") as zf:
+            zf.writestr("word/comments.xml", "<not valid xml")
+            zf.writestr("word/document.xml", "<also broken")
+        with patch.object(dr, "logger") as mock_logger:
+            out = extract_docx_extras(str(docx))
+        assert out == ""
+        assert mock_logger.warning.call_count == 2
+
+
+class TestReadDocxMarkdown:
+    """One DOCX reader for every path. Upload ingestion used pypandoc with a
+    silent fallback; chat attachments used MarkItDown only — the same file
+    read differently depending on how it entered the system. And the Docker
+    image ships no pandoc binary, so on the supported deploy the "fallback"
+    is the path every document takes; it must be logged, not swallowed bare.
+    """
+
+    def test_pandoc_is_told_explicitly_to_accept_tracked_changes(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        fake = MagicMock()
+        fake.convert_file.return_value = "body"
+        with patch.dict(sys.modules, {"pypandoc": fake}):
+            out = dr.read_docx_markdown("some.docx")
+        assert out == "body"
+        kwargs = fake.convert_file.call_args.kwargs
+        assert kwargs["extra_args"] == ["--track-changes=accept"]
+
+    def test_pypandoc_failure_falls_back_to_markitdown_with_a_log(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        import app.services.document_readers as dr
+
+        fake = MagicMock()
+        fake.convert_file.side_effect = OSError("No pandoc was found")
+        with patch.dict(sys.modules, {"pypandoc": fake}), \
+             patch.object(dr, "convert_to_markdown", return_value="md body") as mock_md, \
+             patch.object(dr, "logger") as mock_logger:
+            out = dr.read_docx_markdown("some.docx")
+        assert out == "md body"
+        mock_md.assert_called_once_with("some.docx", keep_data_uris=False)
+        assert mock_logger.info.called
+
+    def test_chat_attachment_path_uses_the_same_reader(self, tmp_path):
+        """extract_text_from_file('docx') must go through read_docx_markdown,
+        not straight to MarkItDown — otherwise upload and chat attachment
+        diverge again."""
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        path = str(tmp_path / "a.docx")
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("[Content_Types].xml", "<x/>")
+        with patch.object(dr, "read_docx_markdown", return_value="unified body") as mock_read:
+            out = dr.extract_text_from_file(path, "docx")
+        mock_read.assert_called_once_with(path)
+        assert "unified body" in out

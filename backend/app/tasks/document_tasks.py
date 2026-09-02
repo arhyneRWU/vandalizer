@@ -304,7 +304,6 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         convert_to_markdown,
         extract_docx_extras,
         extract_text_from_file,
-        remove_images_from_markdown,
     )
 
     db = get_sync_db()
@@ -346,13 +345,13 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
             raw_text = convert_to_markdown(str(absolute_path))
 
         elif extension in ("docx", "doc"):
-            try:
-                import pypandoc
+            # The shared reader (also used for chat attachments): pypandoc
+            # with tracked changes explicitly accepted, logged fallback to
+            # MarkItDown. Two divergent readers meant the same file produced
+            # different text depending on how it entered the system.
+            from app.services.document_readers import read_docx_markdown
 
-                raw_text = pypandoc.convert_file(str(absolute_path), "markdown")
-                raw_text = remove_images_from_markdown(raw_text)
-            except Exception:
-                raw_text = convert_to_markdown(str(absolute_path), keep_data_uris=False)
+            raw_text = read_docx_markdown(str(absolute_path))
 
             if extension == "docx":
                 extras = extract_docx_extras(str(absolute_path))
