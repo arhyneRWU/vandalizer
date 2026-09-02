@@ -35,7 +35,13 @@ from app.services.model_routing import (
     choose_document_model,
     suggest_document_model,
 )
-from app.services.page_locator import annotate_chunk_pages, cited_pages, format_page_range, locator_for_meta
+from app.services.page_locator import (
+    annotate_chunk_pages,
+    cited_pages,
+    format_page_range,
+    locator_for_meta,
+    with_marker_provenance,
+)
 from app.services.llm_service import (
     build_project_kb_empty_prompt,
     create_chat_agent,
@@ -145,6 +151,10 @@ def annotate_pages(text: str, markers: list[dict] | None) -> str:
     if not text or not markers:
         return text
 
+    # Restores the `approximate` flag on markers interpolated before it
+    # existed, so legacy scanned documents hedge instead of citing exact pages.
+    markers = with_marker_provenance(markers)
+
     positions: list[tuple[int, int, bool]] = []
     for m in markers:
         if not isinstance(m, dict) or m.get("kind") != "page":
@@ -222,7 +232,7 @@ def _has_approximate_pages(markers: list[dict] | None) -> bool:
     """True when any usable page marker came from interpolation, not measurement."""
     return any(
         isinstance(m, dict) and m.get("kind") == "page" and m.get("approximate")
-        for m in markers or []
+        for m in with_marker_provenance(markers) or []
     )
 
 

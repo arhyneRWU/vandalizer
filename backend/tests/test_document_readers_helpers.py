@@ -595,3 +595,50 @@ class TestExtractTextFromFileMissingFile:
         assert "[Error extracting content" not in result
         mock_logger.error.assert_not_called()
         mock_logger.warning.assert_called()
+
+
+class TestPartialOcrSuppressesPageMarkers:
+    """Interpolation spreads the source PDF's page count uniformly over the
+    OCR text. When the conversion was partial, the text covers an unknown
+    fraction of those pages — spreading 400 page numbers over text from 30
+    pages is systematically wrong on every marker, hedge or not. No page
+    beats a wrong page: partial conversions get no page markers at all, and
+    citations fall back to the document title.
+    """
+
+    def _read(self, tmp_path, partial: bool, report=None):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        long_text = "line of ocr text\n" * 500
+
+        def fake_ocr(path, report=None):
+            if partial and report is not None:
+                report["partial"] = True
+                report["errors"] = ["page 31: conversion failed"]
+            return long_text
+
+        with patch.object(dr, "pdf_has_ocrable_content", return_value=True), \
+             patch.object(dr, "_local_markdown_extract_from_pdf", return_value=None), \
+             patch.object(dr, "ocr_extract_text_from_pdf", side_effect=fake_ocr), \
+             patch.object(dr, "pdf_page_count", return_value=400):
+            return dr._read_pdf_text_and_markers(str(tmp_path / "scan.pdf"), report=report)
+
+    def test_partial_conversion_emits_no_page_markers(self, tmp_path):
+        report: dict = {}
+        text, markers = self._read(tmp_path, partial=True, report=report)
+        assert text
+        assert markers == []
+        # The disclosure signal still reaches the ingestion layer.
+        assert report.get("partial") is True
+
+    def test_partial_is_suppressed_even_when_no_caller_wants_the_report(self, tmp_path):
+        text, markers = self._read(tmp_path, partial=True, report=None)
+        assert text
+        assert markers == []
+
+    def test_full_conversion_still_interpolates_hedged_markers(self, tmp_path):
+        text, markers = self._read(tmp_path, partial=False)
+        assert text
+        assert len(markers) == 400
+        assert all(m["approximate"] is True for m in markers)

@@ -855,6 +855,11 @@ def _read_pdf_text_and_markers(
     file_path: str, report: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Extract a PDF's text and page markers with the best reader available."""
+    # A local dict when the caller passed none: the partial-conversion signal
+    # the OCR client records here decides below whether page markers can be
+    # emitted at all, so it is needed even when no caller wants the report.
+    if report is None:
+        report = {}
     if not pdf_has_ocrable_content(file_path):
         logger.warning(
             "PDF %s rendered blank on every page — skipping OCR so the "
@@ -883,15 +888,27 @@ def _read_pdf_text_and_markers(
         logger.warning("OCR raised, falling back to PyMuPDF: %s", e)
         ocr_text = ""
     if ocr_text and len(ocr_text.strip()) >= MIN_PDF_TEXT_LENGTH:
+        # Interpolation spreads the *source PDF's* page count uniformly over
+        # whatever text OCR returned. When the conversion was partial, the
+        # text covers some unknown fraction of those pages, so every marker —
+        # hedged or not — is systematically wrong (400 page numbers spread
+        # over text from 30 pages). No page beats a wrong page: citations
+        # fall back to the document title.
+        if report.get("partial"):
+            logger.warning(
+                "OCR conversion of %s was partial — suppressing page markers, "
+                "citations will carry no page numbers",
+                file_path,
+            )
+            return ocr_text, []
         num_pages = pdf_page_count(file_path)
         return ocr_text, _interpolate_page_markers(ocr_text, num_pages)
     # Falling back means the partial OCR text is not what we return, so the
     # partial-conversion warning must not survive onto the PyMuPDF result.
-    ocr_report_partial = bool(report and report.get("partial"))
-    ocr_report_errors = list(report.get("errors") or []) if report else []
-    if report is not None:
-        report.pop("partial", None)
-        report.pop("errors", None)
+    ocr_report_partial = bool(report.get("partial"))
+    ocr_report_errors = list(report.get("errors") or [])
+    report.pop("partial", None)
+    report.pop("errors", None)
     # OCR unavailable / too little text — PyMuPDF gives us exact boundaries.
     # The PyMuPDF pass is a page-boundary refinement over the OCR text, not a
     # hard requirement. If it fails (corrupt PDF, or the source file was
@@ -906,10 +923,13 @@ def _read_pdf_text_and_markers(
                 "PyMuPDF page extraction failed for %s (%s); using OCR text",
                 file_path, e,
             )
-            if report is not None and ocr_report_partial:
-                # We are shipping the partial OCR text after all.
+            if ocr_report_partial:
+                # We are shipping the partial OCR text after all — and, as
+                # above, page markers interpolated against the full PDF's
+                # page count over partial text would all be wrong.
                 report["partial"] = True
                 report["errors"] = ocr_report_errors
+                return ocr_text, []
             return ocr_text, _interpolate_page_markers(
                 ocr_text, pdf_page_count(file_path)
             )

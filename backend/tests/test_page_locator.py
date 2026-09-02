@@ -163,3 +163,71 @@ class TestFormatPageRange:
         assert format_page_range(2, None, False) == "p. 2"
         assert format_page_range(2, 2, False) == "p. 2"
         assert format_page_range(None, 3, False) is None
+
+
+class TestWithMarkerProvenance:
+    """Markers interpolated before the `approximate` flag existed carry no key
+    and read as exact, so a legacy scanned 400-pager rendered confident
+    "p. 234" off evenly-spread guesses. The interpolator has always placed
+    page N at exactly N * (len(text) // num_pages), so uniform spacing across
+    three or more page markers is its signature.
+    """
+
+    def _interpolated_legacy(self, n=5, step=100):
+        return [
+            {"char_offset": i * step, "kind": "page", "value": i + 1}
+            for i in range(n)
+        ]
+
+    def test_legacy_uniform_markers_are_flagged_approximate(self):
+        from app.services.page_locator import with_marker_provenance
+
+        out = with_marker_provenance(self._interpolated_legacy())
+        assert all(m["approximate"] is True for m in out)
+        # Everything else about the markers is preserved.
+        assert [m["value"] for m in out] == [1, 2, 3, 4, 5]
+        assert [m["char_offset"] for m in out] == [0, 100, 200, 300, 400]
+
+    def test_measured_markers_are_left_exact(self):
+        from app.services.page_locator import with_marker_provenance
+
+        measured = [
+            {"char_offset": 0, "kind": "page", "value": 1},
+            {"char_offset": 1893, "kind": "page", "value": 2},
+            {"char_offset": 3121, "kind": "page", "value": 3},
+        ]
+        out = with_marker_provenance(measured)
+        assert out is measured
+        assert not any(m.get("approximate") for m in out)
+
+    def test_already_flagged_markers_pass_through(self):
+        from app.services.page_locator import with_marker_provenance
+
+        flagged = [
+            {"char_offset": i * 100, "kind": "page", "value": i + 1, "approximate": True}
+            for i in range(5)
+        ]
+        assert with_marker_provenance(flagged) is flagged
+
+    def test_two_pages_prove_nothing_and_stay_exact(self):
+        from app.services.page_locator import with_marker_provenance
+
+        two = self._interpolated_legacy(n=2)
+        assert with_marker_provenance(two) is two
+
+    def test_sheet_markers_and_none_are_untouched(self):
+        from app.services.page_locator import with_marker_provenance
+
+        sheets = [{"char_offset": 0, "kind": "sheet", "value": "Budget"}]
+        assert with_marker_provenance(sheets) is sheets
+        assert with_marker_provenance(None) is None
+
+    def test_mixed_list_flags_only_the_page_markers(self):
+        from app.services.page_locator import with_marker_provenance
+
+        mixed = self._interpolated_legacy() + [
+            {"char_offset": 50, "kind": "sheet", "value": "Notes"},
+        ]
+        out = with_marker_provenance(mixed)
+        assert all(m.get("approximate") for m in out if m["kind"] == "page")
+        assert not any(m.get("approximate") for m in out if m["kind"] == "sheet")
