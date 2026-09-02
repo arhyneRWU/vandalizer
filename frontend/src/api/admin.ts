@@ -685,6 +685,19 @@ export function getQualitySummary() {
   return apiFetch<QualitySummary>('/api/admin/quality/summary')
 }
 
+export interface ModelQualityRow {
+  model: string | null
+  run_count: number
+  items_validated: number
+  avg_score: number
+  kinds: Record<string, { run_count: number; avg_score: number }>
+  last_run_at: string | null
+}
+
+export function getQualityByModel(days = 90) {
+  return apiFetch<{ models: ModelQualityRow[] }>(`/api/admin/quality/by-model?days=${days}`)
+}
+
 export function getQualityTimeline(days = 90, itemKind?: string) {
   let url = `/api/admin/quality/timeline?days=${days}`
   if (itemKind) url += `&item_kind=${encodeURIComponent(itemKind)}`

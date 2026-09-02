@@ -2117,6 +2117,17 @@ async def quality_timeline(
 # 15. POST /quality/regression-suite  - Run regression on all verified items
 # ---------------------------------------------------------------------------
 
+@router.get("/quality/by-model")
+async def quality_by_model(
+    days: int = Query(default=90, ge=1, le=MAX_ANALYTICS_DAYS),
+    user: User = Depends(get_current_user),
+):
+    """Validation quality grouped by the model that executed each run."""
+    await _require_admin(user)
+    from app.services.quality_service import get_quality_by_model
+    return {"models": await get_quality_by_model(days)}
+
+
 @router.post("/quality/regression-suite")
 async def regression_suite(
     model: str | None = None,

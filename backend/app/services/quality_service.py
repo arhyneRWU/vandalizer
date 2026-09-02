@@ -623,6 +623,52 @@ async def get_quality_timeline(
     ]
 
 
+async def get_quality_by_model(days: int = 90) -> list[dict]:
+    """Fleet-wide validation quality grouped by the model that ran.
+
+    The per-item version of this (``model_comparison`` in
+    ``get_quality_item_detail``) answers "which model is best for THIS item";
+    this answers "how does each model do across everything we measured".
+    Runs with ``model=None`` are reported under their own row rather than
+    dropped — pre-attribution history and workflow runs graded over mixed
+    models are a visible coverage gap, not something to hide.
+    """
+    cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=days)
+    runs = await ValidationRun.find(ValidationRun.created_at >= cutoff).to_list()
+
+    by_model: dict[Optional[str], dict] = {}
+    for r in runs:
+        entry = by_model.setdefault(r.model, {
+            "scores": [], "items": set(), "kinds": {}, "last_run_at": None,
+        })
+        entry["scores"].append(r.score)
+        entry["items"].add((r.item_kind, r.item_id))
+        kind_entry = entry["kinds"].setdefault(r.item_kind, {"scores": []})
+        kind_entry["scores"].append(r.score)
+        if entry["last_run_at"] is None or (r.created_at and r.created_at > entry["last_run_at"]):
+            entry["last_run_at"] = r.created_at
+
+    rows = []
+    for model_name, e in by_model.items():
+        rows.append({
+            "model": model_name,
+            "run_count": len(e["scores"]),
+            "items_validated": len(e["items"]),
+            "avg_score": round(sum(e["scores"]) / len(e["scores"]), 1),
+            "kinds": {
+                kind: {
+                    "run_count": len(k["scores"]),
+                    "avg_score": round(sum(k["scores"]) / len(k["scores"]), 1),
+                }
+                for kind, k in e["kinds"].items()
+            },
+            "last_run_at": e["last_run_at"].isoformat() if e["last_run_at"] else None,
+        })
+    # Attributed models first, best average first; the unattributed bucket last.
+    rows.sort(key=lambda r: (r["model"] is None, -(r["avg_score"] or 0)))
+    return rows
+
+
 async def run_regression_suite(
     user_id: str,
     model: Optional[str] = None,

@@ -8,10 +8,10 @@ import {
 } from 'recharts'
 
 import {
-  acknowledgeAlert, getJudgeCalibration, getQualityAlerts, getQualityItemDetail,
-  getQualityItems, getQualitySummary, getQualityTimeline, getRegressionSuiteRun,
-  getRegressionSuiteRuns, getSystemConfig, runRegressionSuite,
-  type JudgeSurfaceCalibration,
+  acknowledgeAlert, getJudgeCalibration, getQualityAlerts, getQualityByModel,
+  getQualityItemDetail, getQualityItems, getQualitySummary, getQualityTimeline,
+  getRegressionSuiteRun, getRegressionSuiteRuns, getSystemConfig, runRegressionSuite,
+  type JudgeSurfaceCalibration, type ModelQualityRow,
   type QualityAlert, type QualityItem, type QualityItemDetail, type QualitySummary,
   type QualityTimelinePoint, type RegressionItemResult, type RegressionSuiteRunDetail,
   type RegressionSuiteRunSummary, type SystemConfigData,
@@ -32,6 +32,7 @@ export function QualityTab() {
   const [regressionStarting, setRegressionStarting] = useState(false)
   const [regressionModel, setRegressionModel] = useState('')
   const [suiteRuns, setSuiteRuns] = useState<RegressionSuiteRunSummary[]>([])
+  const [modelRows, setModelRows] = useState<ModelQualityRow[]>([])
   const [activeSuite, setActiveSuite] = useState<RegressionSuiteRunDetail | null>(null)
   const [compareSuite, setCompareSuite] = useState<RegressionSuiteRunDetail | null>(null)
   const [cfg, setCfg] = useState<SystemConfigData | null>(null)
@@ -93,6 +94,14 @@ export function QualityTab() {
   const loadSuiteRuns = useCallback(() => {
     getRegressionSuiteRuns().then(d => setSuiteRuns(d.runs)).catch(() => {})
   }, [])
+
+  // By-model rollup. Refetched when a sweep finishes so its runs count in.
+  useEffect(() => {
+    if (activeSuite?.status === 'running') return
+    let cancelled = false
+    getQualityByModel(days).then(d => { if (!cancelled) setModelRows(d.models) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [days, activeSuite?.status])
 
   useEffect(() => {
     loadSuiteRuns()
@@ -532,6 +541,61 @@ export function QualityTab() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Model Performance (by-model rollup) */}
+      <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 'var(--ui-radius, 12px)', padding: 20 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Model Performance</h3>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 12px' }}>
+          Validation quality over the last {days} days, grouped by the model that executed each run.
+        </p>
+        {modelRows.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: '#9ca3af', fontSize: 13 }}>
+            No validation runs in this window yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                  <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>Model</th>
+                  <th style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>Avg Score</th>
+                  <th style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>Runs</th>
+                  <th style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>Items</th>
+                  <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>By Kind</th>
+                  <th style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: '#6b7280', fontSize: 11, textTransform: 'uppercase' }}>Last Run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {modelRows.map((row, i) => {
+                  const scoreColor = row.avg_score >= 90 ? '#16a34a'
+                    : row.avg_score >= 70 ? '#2563eb'
+                    : row.avg_score >= 50 ? '#f59e0b'
+                    : '#dc2626'
+                  return (
+                    <tr key={i} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                      <td style={{ padding: '8px 12px', fontWeight: 500, color: row.model ? '#111827' : '#9ca3af' }}
+                        title={row.model ? undefined : 'Runs that recorded no task model — older history, and workflow validations graded over mixed-model executions'}>
+                        {row.model || '(unattributed)'}
+                      </td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontWeight: 700, color: scoreColor }}>
+                        {row.avg_score}%
+                      </td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>{row.run_count}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>{row.items_validated}</td>
+                      <td style={{ padding: '8px 12px', color: '#6b7280', fontSize: 12 }}>
+                        {Object.entries(row.kinds).map(([kind, k]) => `${kind.replace('_', ' ')}: ${k.avg_score}% (${k.run_count})`).join(' · ')}
+                      </td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', color: '#6b7280', fontSize: 12 }}>
+                        {row.last_run_at ? relativeTime(row.last_run_at) : '-'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
