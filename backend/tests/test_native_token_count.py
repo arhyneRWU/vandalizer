@@ -546,3 +546,146 @@ class TestNativeCountResult:
         )
         with pytest.raises(Exception):
             result.tokens = 20  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# native_count_for -- the baseline that makes the provider's figure a ratio
+# ---------------------------------------------------------------------------
+
+
+class FakePart:
+    """One part of a pydantic-ai ModelMessage, as `count_message_tokens` reads it."""
+
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeMessage:
+    def __init__(self, *contents):
+        self.parts = [FakePart(c) for c in contents]
+
+
+class TestNativeCountFor:
+    """The baseline has to cover exactly the text the provider counted.
+
+    The margin is `tokens / baseline_tokens`. If the two numbers describe
+    different text the ratio is not a measurement of anything -- and because a
+    low ratio clamps to 1.0, a baseline that includes text the provider never
+    saw under-budgets a tiktoken figure that was already reading low. That is
+    the direction that hard-fails a request, so the component set is asserted
+    on both sides of the `covers_system_prompt` asymmetry.
+    """
+
+    MODEL = "anthropic/claude-sonnet-4-5"
+    SYSTEM = "You are a careful research administrator. " * 40
+    USER = "What is the total budget? " * 200
+
+    def _result(self, *, covers: bool, tokens: int = 12345):
+        return NativeCountResult(
+            tokens=tokens,
+            covers_system_prompt=covers,
+            source="anthropic" if covers else "google",
+        )
+
+    def _call(self, *, covers: bool, history=None, tokens: int = 12345):
+        return ntc.native_count_for(
+            self._result(covers=covers, tokens=tokens),
+            model_name=self.MODEL,
+            model_config=None,
+            system_prompt=self.SYSTEM,
+            user_message=self.USER,
+            history=history or [],
+        )
+
+    def test_anthropic_baseline_includes_the_system_prompt(self):
+        """Anthropic's `_messages_count_tokens` sends `system=`, so the prompt
+        is on the provider's side of the ratio and must be on ours."""
+        from app.services.context_budget import count_raw_tokens
+
+        native = self._call(covers=True)
+        assert native is not None
+        assert native.baseline_tokens == (
+            count_raw_tokens(self.SYSTEM, self.MODEL, None)
+            + count_raw_tokens(self.USER, self.MODEL, None)
+        )
+
+    def test_google_baseline_omits_the_system_prompt(self):
+        """`google-gla` never attaches `system_instruction` to the count config,
+        so counting it locally would inflate the baseline against a provider
+        figure that never saw it -- shrinking the ratio toward the 1.0 clamp."""
+        from app.services.context_budget import count_raw_tokens
+
+        native = self._call(covers=False)
+        assert native is not None
+        assert native.baseline_tokens == count_raw_tokens(self.USER, self.MODEL, None)
+
+    def test_the_system_prompt_is_the_only_difference_between_the_two(self):
+        from app.services.context_budget import count_raw_tokens
+
+        with_prompt = self._call(covers=True)
+        without = self._call(covers=False)
+        assert with_prompt is not None and without is not None
+        assert with_prompt.baseline_tokens - without.baseline_tokens == (
+            count_raw_tokens(self.SYSTEM, self.MODEL, None)
+        )
+
+    def test_history_is_counted_because_the_provider_counted_it(self):
+        """`_ask_provider` sends `list(history)` ahead of this turn's message."""
+        empty = self._call(covers=True)
+        with_history = self._call(
+            covers=True, history=[FakeMessage("an earlier answer " * 100)]
+        )
+        assert empty is not None and with_history is not None
+        assert with_history.baseline_tokens > empty.baseline_tokens
+
+    def test_the_baseline_carries_no_safety_margin(self):
+        """A margin on the baseline would divide itself back out of the ratio
+        and report the provider as cheaper than it is."""
+        from app.services.context_budget import count_tokens
+
+        native = self._call(covers=False)
+        assert native is not None
+        # This model has no local vocabulary, so `count_tokens` inflates by 1.5.
+        inflated = count_tokens(self.USER, self.MODEL, None)
+        assert native.baseline_tokens < inflated
+
+    def test_the_count_is_labelled_with_the_model_it_was_measured_for(self):
+        native = self._call(covers=True)
+        assert native is not None
+        assert native.model_name == self.MODEL
+        assert native.tokens == 12345
+
+    def test_an_unusable_result_produces_no_count(self):
+        for result in (
+            NativeCountResult(tokens=None, covers_system_prompt=False, source="unavailable:x"),
+            NativeCountResult(tokens=0, covers_system_prompt=True, source="anthropic"),
+        ):
+            assert ntc.native_count_for(
+                result,
+                model_name=self.MODEL,
+                model_config=None,
+                system_prompt=self.SYSTEM,
+                user_message=self.USER,
+                history=[],
+            ) is None
+
+    def test_an_empty_payload_produces_no_count(self):
+        """A zero baseline is not a measurement; `_native_margin` would reject
+        it anyway, but handing it on would be handing on a divide by zero."""
+        assert ntc.native_count_for(
+            self._result(covers=False),
+            model_name=self.MODEL,
+            model_config=None,
+            system_prompt="",
+            user_message="",
+            history=[],
+        ) is None
+
+    def test_the_resulting_margin_is_the_measured_ratio(self):
+        """End of the chain: what the planner actually does with the pair."""
+        from app.services.context_budget import token_safety_margin
+
+        native = self._call(covers=False, tokens=999_999)
+        assert native is not None
+        margin = token_safety_margin(self.MODEL, None, native=native)
+        assert margin == pytest.approx(native.tokens / native.baseline_tokens)

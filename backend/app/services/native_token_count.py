@@ -38,6 +38,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from app.services.context_budget import (
+    NativeCount,
+    count_message_tokens,
+    count_raw_tokens,
+)
 from app.services.llm_service import (
     build_thinking_model_settings,
     detect_api_protocol,
@@ -282,3 +287,79 @@ async def _ask_provider(
     )
 
     return await model.count_tokens(messages, settings, ModelRequestParameters())
+
+
+# A model config with the safety margin pinned to 1.0, so a count taken through
+# `count_message_tokens` comes back raw.
+#
+# The alternative was to re-implement that function's "4 tokens of role wrapper
+# plus each part's content" here, which is the same logic in two places and
+# would drift the moment either side changed what a message costs. Every branch
+# of `token_safety_margin` returns 1.0 for a configured 1.0, and `_apply_margin`
+# on an integer total is then the identity, so this is exactly the margin-free
+# count with none of the duplication. The rest of the config is preserved: it
+# carries `tokenizer_path` and `tokenizer_cache_root`, and dropping those would
+# silently change which vocabulary did the counting.
+def _baseline_config(model_config: Optional[dict]) -> dict:
+    return {**(model_config or {}), "token_safety_margin": 1.0}
+
+
+def native_count_for(
+    result: NativeCountResult,
+    *,
+    model_name: str,
+    model_config: Optional[dict],
+    system_prompt: str,
+    user_message: str,
+    history: list,
+) -> Optional[NativeCount]:
+    """Pair the provider's figure with a local count of *exactly* the same text.
+
+    `context_budget` turns the pair into a margin of ``tokens /
+    baseline_tokens``. That division is only a measurement of tokenizer
+    divergence while both numbers describe the same characters. Count something
+    the provider never saw and the baseline inflates, the ratio shrinks, and —
+    because the ratio is clamped at a floor of 1.0 — the planner drops a 1.5
+    margin it needed onto a tiktoken figure that reads up to 45% low for
+    non-OpenAI models. That is the direction that hard-fails a request, so the
+    component set here is not a convenience: it is the correctness condition.
+
+    Which components those are is a property of `_ask_provider` above, which is
+    why this lives next to it rather than at the call site. It sends
+    ``list(history)`` followed by this turn's user message, with the system
+    prompt riding as ``instructions``:
+
+    * Anthropic forwards the instructions as ``system=`` and counts them, so
+      ``covers_system_prompt`` is True and the prompt belongs in the baseline.
+    * ``google-gla`` never attaches ``system_instruction`` to the count config,
+      so the prompt is on neither side. For KB chat that is a multi-kilobyte
+      grounding preamble, and adding it to the baseline alone would be the
+      inflation described above at its worst.
+
+    Returns None rather than a coherent-looking zero whenever there is nothing
+    to measure — an unusable result, or an empty payload.
+
+    Not the request's *total*: the caller is buying a ratio to apply per
+    component, because the planner recounts text it has trimmed. A recorded
+    total stops being true at the first trim.
+    """
+    if not result.usable or result.tokens is None:
+        return None
+
+    baseline_config = _baseline_config(model_config)
+    baseline = count_raw_tokens(user_message, model_name, model_config)
+    baseline += sum(
+        count_message_tokens(m, model_name, baseline_config) for m in history
+    )
+    if result.covers_system_prompt and system_prompt:
+        baseline += count_raw_tokens(system_prompt, model_name, model_config)
+
+    if baseline <= 0:
+        # No text on our side of the ratio. `_native_margin` would reject this
+        # anyway; handing it on would be handing on a divide by zero waiting to
+        # be relaxed.
+        return None
+
+    return NativeCount(
+        model_name=model_name, tokens=result.tokens, baseline_tokens=baseline
+    )
