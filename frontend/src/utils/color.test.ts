@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { contrastRatio, getContrastTextColor, getAccessibleOnLight, getAccessibleOnDark, hexToRgb, rgbToHsl } from './color'
+import { contrastRatio, getContrastTextColor, getAccessibleOnLight, getAccessibleOnDark, getPanelDark, hexToRgb, rgbToHsl } from './color'
 
 describe('contrastRatio', () => {
   it('is 21:1 for black on white', () => {
@@ -90,5 +90,55 @@ describe('getAccessibleOnDark', () => {
     const mid = '#808080'
     expect(lightnessOf(getAccessibleOnLight(mid, '#ffffff', 7))).toBeLessThan(lightnessOf(mid))
     expect(lightnessOf(getAccessibleOnDark(mid, '#0a0a0a', 7))).toBeGreaterThan(lightnessOf(mid))
+  })
+})
+
+describe('getPanelDark', () => {
+  const NEUTRAL = '#191919' // the chrome color before it followed the brand
+
+  function saturationOf(hex: string): number {
+    const { r, g, b } = hexToRgb(hex)
+    return rgbToHsl(r, g, b).s
+  }
+  function hueOf(hex: string): number {
+    const { r, g, b } = hexToRgb(hex)
+    return rgbToHsl(r, g, b).h
+  }
+
+  it('tints the navy brand without meaningfully moving contrast against white', () => {
+    const out = getPanelDark('#163A64')
+    expect(out).not.toBe(NEUTRAL)
+    // Pinning lightness is the whole point: the chrome changes hue, not legibility.
+    // #163A64 -> #0f1d2e is 16.997:1 on white vs 17.582:1 for #191919.
+    expect(
+      Math.abs(contrastRatio(out, '#ffffff') - contrastRatio(NEUTRAL, '#ffffff')),
+    ).toBeLessThan(1.5)
+  })
+
+  it('preserves the brand hue', () => {
+    for (const hex of ['#163A64', '#1D3C34', '#eab308', '#4a1030']) {
+      expect(Math.abs(hueOf(getPanelDark(hex)) - hueOf(hex))).toBeLessThan(3)
+    }
+  })
+
+  it('returns an effectively neutral chrome for a greyscale brand', () => {
+    expect(saturationOf(getPanelDark('#808080'))).toBeLessThan(0.02)
+  })
+
+  it('caps a fully saturated brand instead of returning a muddy stain', () => {
+    for (const hex of ['#ff0000', '#00ff00', '#0000ff']) {
+      expect(saturationOf(getPanelDark(hex))).toBeLessThanOrEqual(0.52)
+    }
+  })
+
+  it('pins lightness across wildly different brand colors', () => {
+    const navy = lightnessOf(getPanelDark('#163A64'))
+    const gold = lightnessOf(getPanelDark('#eab308'))
+    expect(navy).toBeCloseTo(gold, 2)
+    expect(navy).toBeCloseTo(0.12, 2)
+  })
+
+  it('honors an explicit lightness argument', () => {
+    expect(lightnessOf(getPanelDark('#163A64', 0.3))).toBeCloseTo(0.3, 2)
   })
 })

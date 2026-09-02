@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { BrandingProvider, useBranding, DEFAULT_ORG_NAME } from './BrandingContext'
-import { contrastRatio, getAccessibleOnDark } from '../utils/color'
+import { contrastRatio, getAccessibleOnDark, getPanelDark } from '../utils/color'
 import type { ThemeConfig } from '../api/config'
 
 vi.mock('../api/config', () => ({
@@ -127,5 +127,68 @@ describe('BrandingProvider derived CSS variables', () => {
     expect(document.documentElement.style.getPropertyValue('--highlight-on-dark')).toBe(
       getAccessibleOnDark('#163A64'),
     )
+  })
+
+  it('sets --panel-dark from the resolved theme', async () => {
+    vi.mocked(getThemeConfig).mockResolvedValue(theme({ highlight_color: '#163A64', org_name: 'Navy Co' }))
+
+    render(
+      <BrandingProvider>
+        <Probe />
+      </BrandingProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('Navy Co'))
+    const value = document.documentElement.style.getPropertyValue('--panel-dark')
+    expect(value).toBe(getPanelDark('#163A64'))
+    // Lightness is pinned, so the chrome stays as legible as the #191919 it replaces.
+    expect(contrastRatio(value, '#ffffff')).toBeGreaterThan(15)
+  })
+
+  it('sets --panel-dark from the cached theme on first render', () => {
+    localStorage.setItem(THEME_CACHE_KEY, JSON.stringify(theme({ highlight_color: '#163A64' })))
+    vi.mocked(getThemeConfig).mockReturnValue(new Promise(() => {}))
+
+    render(
+      <BrandingProvider>
+        <Probe />
+      </BrandingProvider>,
+    )
+
+    expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe(
+      getPanelDark('#163A64'),
+    )
+  })
+
+  it('leaves --panel-dark unset for the untouched default brand color', async () => {
+    // #eab308 is the theme default: the admin never picked a brand, so the
+    // chrome must stay the neutral #191919 that the :root fallback supplies.
+    vi.mocked(getThemeConfig).mockResolvedValue(theme({ highlight_color: '#eab308', org_name: 'Plain Co' }))
+
+    render(
+      <BrandingProvider>
+        <Probe />
+      </BrandingProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('Plain Co'))
+    expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe('')
+  })
+
+  it('clears a cached brand tint when the admin resets to the default color', async () => {
+    // First render paints navy from cache; the server then reports the default.
+    // Without removeProperty the stale navy would outlive the reset.
+    localStorage.setItem(THEME_CACHE_KEY, JSON.stringify(theme({ highlight_color: '#163A64' })))
+    vi.mocked(getThemeConfig).mockResolvedValue(theme({ highlight_color: '#eab308', org_name: 'Reset Co' }))
+
+    render(
+      <BrandingProvider>
+        <Probe />
+      </BrandingProvider>,
+    )
+
+    expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe(getPanelDark('#163A64'))
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('Reset Co'))
+    expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe('')
   })
 })

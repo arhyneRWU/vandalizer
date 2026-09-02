@@ -117,3 +117,16 @@ export function getHoverColor(hex: string): string {
   const { h, s, l } = rgbToHsl(r, g, b)
   return hslToHex(h, s, Math.max(l - 0.08, 0))
 }
+
+/** The app's dark chrome, tinted toward the brand. Takes the brand's hue and
+ *  saturation but pins lightness, so contrast against white chrome text stays
+ *  predictable whatever color an admin picks. */
+export function getPanelDark(hex: string, lightness = 0.12): string {
+  const { r, g, b } = hexToRgb(hex)
+  const { h, s } = rgbToHsl(r, g, b)
+  // Cap saturation: at this lightness a fully saturated hue reads as a muddy
+  // stain rather than a tint (e.g. #ff0000 -> a brown-red chrome). Half
+  // saturation is enough for the surface to read as "the brand, darkened".
+  // A greyscale brand (s ~ 0) is untouched by the cap and stays neutral.
+  return hslToHex(h, Math.min(s, 0.5), lightness)
+}
