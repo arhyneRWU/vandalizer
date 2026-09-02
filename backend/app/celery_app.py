@@ -14,6 +14,15 @@ celery = Celery(
 celery.conf.timezone = settings.celery_timezone
 celery.conf.task_soft_time_limit = 3600
 celery.conf.task_time_limit = 3660
+# Required by acks_late on the workflow tasks: the Redis transport redelivers
+# any message left unacked past this window, and its DEFAULT (3600s) is
+# SHORTER than the hard time limit above — a 61-minute run would be handed to
+# a second worker while the first was still executing it, and prefetched
+# messages waiting behind long runs age against the same clock. 12 hours makes
+# a live-duplicate delivery practically impossible; recovery from a silently
+# dead worker does not wait on it (the stale-run reaper fails the run within
+# ~2h, and the eventual redelivery hits the terminal-status guard and no-ops).
+celery.conf.broker_transport_options = {"visibility_timeout": 43200}
 celery.conf.result_expires = 86400
 celery.conf.task_default_queue = "default"
 celery.conf.task_routes = {
@@ -95,6 +104,13 @@ celery.conf.beat_schedule = {
     "activity-reap-stale-running": {
         "task": "tasks.activity.reap_stale_running",
         "schedule": 120.0,  # every 2 minutes
+    },
+    # Reap WorkflowResult rows a dead worker left at "running"/"pending_approval".
+    # Named tasks.activity.* so it routes to the default queue — on the
+    # workflows queue, the worker outage it detects would also silence it.
+    "activity-reap-stale-workflow-runs": {
+        "task": "tasks.activity.reap_stale_workflow_runs",
+        "schedule": 600.0,  # every 10 minutes; its strictest threshold is ~2h
     },
     # Self-heal documents whose task_status got stranded in an in-progress stage
     "document-reap-stuck": {
