@@ -497,25 +497,120 @@ class TestWebsiteNode:
 # ---------------------------------------------------------------------------
 
 class TestDescribeImageNode:
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_describe_image(self, mock_llm):
-        mock_llm.return_value = "A beautiful landscape"
-        node = DescribeImageNode({
-            "image_url": "https://example.com/img.png",
-            "prompt": "Describe colors",
-            "model": "gpt-4o",
-        })
-        result = node.process({"output": "prev"})
-        assert result["output"] == "A beautiful landscape"
-        assert result["step_name"] == "DescribeImage"
+    """The model must SEE the image. The old implementation pasted the URL
+    into a text prompt; the model, asked to describe an image it could not
+    see, complied — confident, invented output on a run marked Completed.
+    Every failure path must be a step error, never a text-only model call.
+    """
 
-    @patch("app.services.workflow_engine.llm_chat_model")
-    def test_default_prompt(self, mock_llm):
-        mock_llm.return_value = "description"
-        node = DescribeImageNode({"model": "gpt-4o"})
-        result = node.process({"output": None})
-        args, kwargs = mock_llm.call_args
-        assert "Describe this image" in kwargs.get("prompt", "") or "Describe this image" in args[1]
+    MULTIMODAL_CFG = {"available_models": [{"name": "gpt-4o", "multimodal": True}]}
+
+    def _node(self, sys_cfg=None, **data):
+        data.setdefault("image_url", "https://example.com/img.png")
+        data.setdefault("model", "gpt-4o")
+        node = DescribeImageNode(data)
+        node._sys_cfg = sys_cfg if sys_cfg is not None else self.MULTIMODAL_CFG
+        return node
+
+    def _http_response(self, content=b"\x89PNG...", content_type="image/png", status=200):
+        resp = MagicMock()
+        resp.content = content
+        resp.headers = {"content-type": content_type}
+        if status >= 400:
+            import httpx
+            resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "boom", request=MagicMock(), response=MagicMock(status_code=status),
+            )
+        return resp
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_fetches_the_image_and_sends_the_bytes_to_the_model(self, mock_client, mock_agent):
+        from pydantic_ai import BinaryContent
+
+        mock_client.return_value.__enter__.return_value.get.return_value = \
+            self._http_response(content=b"pngbytes")
+        mock_agent.return_value.run_sync.return_value = MagicMock(output="A landscape")
+
+        result = self._node(prompt="Describe colors").process({"output": "prev"})
+
+        assert result["output"] == "A landscape"
+        assert result["step_name"] == "DescribeImage"
+        assert "error" not in result
+        (parts,) = mock_agent.return_value.run_sync.call_args[0]
+        binary = [p for p in parts if isinstance(p, BinaryContent)]
+        assert len(binary) == 1
+        assert binary[0].data == b"pngbytes"
+        assert binary[0].media_type == "image/png"
+        text = [p for p in parts if isinstance(p, str)]
+        assert "Describe colors" in text[0]
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    def test_text_only_model_is_a_step_error_not_a_model_call(self, mock_agent):
+        """Some providers silently drop an attachment a text model can't take
+        and answer from the prompt alone — the exact fabrication this node
+        exists to prevent, so it must not even reach the model."""
+        cfg = {"available_models": [{"name": "gpt-4o", "multimodal": False}]}
+        result = self._node(sys_cfg=cfg).process({"output": "prev"})
+        assert "multimodal" in result["error"]
+        mock_agent.assert_not_called()
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    def test_missing_url_is_a_step_error(self, mock_agent):
+        result = self._node(image_url="  ").process({"output": None})
+        assert "no image URL" in result["error"]
+        mock_agent.assert_not_called()
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    def test_internal_url_is_blocked_before_any_fetch(self, mock_agent):
+        result = self._node(image_url="http://169.254.169.254/latest").process({"output": None})
+        assert "Blocked URL" in result["error"]
+        mock_agent.assert_not_called()
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_http_failure_is_a_step_error(self, mock_client, mock_agent):
+        mock_client.return_value.__enter__.return_value.get.return_value = \
+            self._http_response(status=404)
+        result = self._node().process({"output": None})
+        assert "404" in result["error"]
+        mock_agent.assert_not_called()
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_non_image_response_is_a_step_error(self, mock_client, mock_agent):
+        mock_client.return_value.__enter__.return_value.get.return_value = \
+            self._http_response(content=b"<html>", content_type="text/html")
+        result = self._node(image_url="https://example.com/page").process({"output": None})
+        assert "did not return an image" in result["error"]
+        mock_agent.assert_not_called()
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_octet_stream_with_image_extension_falls_back_to_the_url(self, mock_client, mock_agent):
+        from pydantic_ai import BinaryContent
+
+        mock_client.return_value.__enter__.return_value.get.return_value = \
+            self._http_response(content=b"jpg", content_type="application/octet-stream")
+        mock_agent.return_value.run_sync.return_value = MagicMock(output="desc")
+
+        result = self._node(image_url="https://example.com/photo.jpg").process({"output": None})
+
+        assert "error" not in result
+        (parts,) = mock_agent.return_value.run_sync.call_args[0]
+        binary = [p for p in parts if isinstance(p, BinaryContent)][0]
+        assert binary.media_type == "image/jpeg"
+
+    @patch("app.services.workflow_engine.create_chat_agent")
+    @patch("app.services.workflow_engine.httpx.Client")
+    def test_oversized_image_is_a_step_error(self, mock_client, mock_agent):
+        from app.services.workflow_engine import DESCRIBE_IMAGE_MAX_BYTES
+
+        mock_client.return_value.__enter__.return_value.get.return_value = \
+            self._http_response(content=b"x" * (DESCRIBE_IMAGE_MAX_BYTES + 1))
+        result = self._node().process({"output": None})
+        assert "too large" in result["error"]
+        mock_agent.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

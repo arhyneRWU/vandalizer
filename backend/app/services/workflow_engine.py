@@ -833,23 +833,124 @@ class AddDocumentNode(Node):
         return {"output": text, "input": inputs.get("output"), "step_name": self.name}
 
 
+# The LLM providers cap image payloads around this size; anything larger is
+# refused downstream anyway, so refuse it here with a message that names the
+# actual problem instead of surfacing a provider 4xx.
+DESCRIBE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+
 class DescribeImageNode(Node):
+    """Fetch a configured image URL and have a multimodal model describe it.
+
+    The model must actually SEE the image. This node used to paste the URL
+    into a text prompt — the model, asked to describe an image it could not
+    see, complied: confident, plausible, entirely invented output, and the run
+    marked Completed. Every failure here (no URL, blocked URL, fetch error,
+    not an image, model not multimodal) is a step error that fails the run;
+    fabrication is never the fallback.
+    """
+
     def __init__(self, data: dict) -> None:
         super().__init__("DescribeImage")
         self.data = data
         self.model = data.get("model")
 
+    def _error_result(self, message: str, inputs) -> dict:
+        return {
+            "output": message,
+            "error": message,
+            "input": inputs.get("output"),
+            "step_name": self.name,
+        }
+
+    def _fetch_image(self, image_url: str) -> "tuple[bytes, str] | str":
+        """Fetch the image; returns (bytes, media_type) or an error string."""
+        import mimetypes
+
+        from app.utils.url_validation import validate_outbound_url
+
+        try:
+            validate_outbound_url(image_url)
+        except ValueError as e:
+            return f"Blocked URL: {e}"
+
+        try:
+            with httpx.Client(timeout=30, follow_redirects=True) as client:
+                resp = client.get(image_url)
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            return f"Could not fetch the image: HTTP {e.response.status_code} from {image_url}"
+        except httpx.RequestError as e:
+            return f"Could not fetch the image: {e}"
+
+        media_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not media_type.startswith("image/"):
+            # Some hosts serve images as application/octet-stream; fall back
+            # to the URL's extension before giving up.
+            guessed, _ = mimetypes.guess_type(image_url)
+            if guessed and guessed.startswith("image/"):
+                media_type = guessed
+            else:
+                return (
+                    f"The URL did not return an image (Content-Type: "
+                    f"{media_type or 'unknown'}). Point the step at a direct "
+                    "image URL, not a page that displays one."
+                )
+
+        if len(resp.content) > DESCRIBE_IMAGE_MAX_BYTES:
+            return (
+                f"The image is too large to send to the model "
+                f"({len(resp.content) // (1024 * 1024)} MB; limit "
+                f"{DESCRIBE_IMAGE_MAX_BYTES // (1024 * 1024)} MB)."
+            )
+        return resp.content, media_type
+
     def process(self, inputs):
-        image_url = self.data.get("image_url", "")
+        from pydantic_ai import BinaryContent
+
+        image_url = (self.data.get("image_url") or "").strip()
         prompt = self.data.get("prompt", "Describe this image in detail.")
-        self.report_progress(f"Describing image: {image_url}")
-        full_prompt = f"Describe this image: {image_url}\n\nAdditional instructions: {prompt}"
-        response = llm_chat_model(
-            model=self.model, prompt=full_prompt, data=inputs.get("output"),
-            include_next_step=False, system_config_doc=self._sys_cfg,
-            usage_acc=self._usage_acc,
+
+        if not image_url:
+            return self._error_result(
+                "Describe Image: no image URL is configured on this step.", inputs,
+            )
+
+        # A text-only model cannot see the attachment; some providers silently
+        # drop it and answer from the prompt alone, which is exactly the
+        # fabrication this node exists to prevent.
+        model_cfg = next(
+            (m for m in (self._sys_cfg or {}).get("available_models", [])
+             if m.get("name") == self.model),
+            {},
         )
-        return {"output": response, "input": inputs.get("output"), "step_name": self.name}
+        if not model_cfg.get("multimodal"):
+            return self._error_result(
+                f"Describe Image needs a multimodal model, and '{self.model}' "
+                "is not marked multimodal in System Config. Pick a multimodal "
+                "model on this step, or enable the flag on the model if it "
+                "genuinely accepts images.",
+                inputs,
+            )
+
+        self.report_progress(f"Fetching image: {image_url}")
+        fetched = self._fetch_image(image_url)
+        if isinstance(fetched, str):
+            return self._error_result(fetched, inputs)
+        image_bytes, media_type = fetched
+
+        self.report_progress(f"Describing image: {image_url}")
+        full_prompt = (
+            "Describe the attached image.\n\n"
+            f"Additional instructions: {prompt}"
+        )
+        chat_agent = create_chat_agent(self.model, system_config_doc=self._sys_cfg)
+        result = chat_agent.run_sync(
+            [full_prompt, BinaryContent(data=image_bytes, media_type=media_type)],
+        )
+        if self._usage_acc:
+            self._usage_acc.record(result)
+        return {"output": result.output, "input": inputs.get("output"), "step_name": self.name}
 
 
 class CodeExecutionNode(Node):
