@@ -8,6 +8,7 @@ import io
 import logging
 import re
 from datetime import date, datetime, time
+from typing import NoReturn
 
 from markitdown import MarkItDown
 
@@ -962,6 +963,125 @@ def extract_text_with_markers(
     return extract_text_from_file(file_path, ext), []
 
 
+# Sample sizes for the binary sniff below. The head and tail are checked so a
+# binary with a clean text preamble (self-extracting archive, tar whose first
+# member is text) can't sneak its tail through, and the byte-level sniff runs
+# BEFORE the file is fully read so a 500 MB binary is refused without ever
+# materializing it as a Python str in the worker.
+_BINARY_SNIFF_BYTES = 1_000_000
+# Below this, one stray control byte dominates the ratio (a 19-byte DOS text
+# file with its historical \x1a EOF marker is 5.3% "junk"); the density test
+# is only meaningful over a real sample. NUL/decode checks still apply.
+_BINARY_SNIFF_MIN_LENGTH = 256
+
+# Fraction of never-printable characters above which content is judged to be
+# a binary, not text. Uniformly distributed bytes (compressed or encrypted
+# data) land around 13%; structured binaries higher. Legacy text is at or
+# near zero — the sets below deliberately exclude the C1 range cp1252 uses
+# for curly quotes, dashes and €, and ESC, so quote-heavy prose and
+# ANSI-colored logs/terminal captures can't trip it.
+_BINARY_JUNK_THRESHOLD = 0.05
+
+# Code points no text encoding prints: C0 controls minus real whitespace and
+# ESC (see above), DEL, and the five code points cp1252 leaves undefined.
+_JUNK_ORDINALS = (
+    (set(range(32)) - {ord(c) for c in "\t\n\r\f\x0b"} - {0x1B})
+    | {0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D}
+)
+# For bytes.translate / str.translate — deleting junk and measuring the
+# shrinkage counts occurrences in C instead of a per-character Python loop.
+_JUNK_BYTES = bytes(sorted(_JUNK_ORDINALS - {0}))  # NUL handled separately
+_JUNK_STR_TABLE = dict.fromkeys(_JUNK_ORDINALS, None)
+
+
+def _byte_junk_fraction(sample: bytes) -> float:
+    """Never-printable density of a byte sample, NUL excluded.
+
+    NUL is excluded *here* because UTF-16 text is half NULs at the byte
+    level; the per-decode check below rejects NULs that survive decoding.
+    """
+    if len(sample) < _BINARY_SNIFF_MIN_LENGTH:
+        return 0.0
+    kept = sample.translate(None, _JUNK_BYTES)
+    return (len(sample) - len(kept)) / len(sample)
+
+
+def _looks_like_binary(text: str) -> bool:
+    """Whether a decoded string is a binary file wearing a text coat.
+
+    A permissive codec's decode "succeeding" proves nothing (latin-1 maps
+    every byte to a character). Two signals separate binaries from text: NUL
+    characters (no text encoding decodes to them — a NUL-interleaved result
+    means the wrong codec was used), and the density of characters no text
+    encoding uses for content.
+    """
+    sample = text[:_BINARY_SNIFF_BYTES]
+    if not sample:
+        return False
+    if "\x00" in sample:
+        return True
+    if len(sample) < _BINARY_SNIFF_MIN_LENGTH:
+        return False
+    junk = len(sample) - len(sample.translate(_JUNK_STR_TABLE))
+    return junk / len(sample) > _BINARY_JUNK_THRESHOLD
+
+
+def _refuse_binary(file_path: str, file_extension: str) -> "NoReturn":
+    desc = f".{file_extension} file" if file_extension else "file"
+    # The refusal is deliberate and user-actionable — log it here (the
+    # DocumentReadError passthrough below skips the generic handler's log),
+    # at warning rather than error so ordinary binary uploads don't page.
+    logger.warning("Refusing to ingest %s as text — content looks binary", file_path)
+    raise DocumentReadError(
+        f"This {desc} does not appear to contain readable text — it may be "
+        "a binary format this system cannot read. If it is a document, "
+        "re-save it as PDF, DOCX, or plain text (UTF-8) and upload that."
+    ) from None
+
+
+def read_text_file(file_path: str, file_extension: str) -> str:
+    """Read a plain-text file, refusing content that is not actually text.
+
+    The one text reader for both the known-text extensions (txt/csv/code…)
+    and the unknown-extension fallback, so a binary gets the same actionable
+    refusal whatever it is named, instead of a raw codec error on one path
+    and a latin-1 mojibake ingest on the other.
+
+    Encodings are tried best-first, and a decode only counts when the result
+    looks like text: BOM-less UTF-16LE ASCII is *valid UTF-8* (as
+    NUL-interleaved junk), so "utf-8 decoded it" alone proves nothing — the
+    NUL check sends it on to the utf-16 codec instead. utf-16 itself is only
+    attempted when the byte-level NUL fraction carries the interleaved-text
+    signature (~50% for ASCII), because the codec happily "decodes" arbitrary
+    even-length binaries into CJK soup that would pass the density gate.
+    cp1252 is tried before latin-1 so legacy memos keep their curly quotes
+    and € instead of surviving as C1 mojibake.
+    """
+    with open(file_path, "rb") as f:
+        head = f.read(_BINARY_SNIFF_BYTES)
+        if _byte_junk_fraction(head) > _BINARY_JUNK_THRESHOLD:
+            _refuse_binary(file_path, file_extension)
+        raw = head + f.read()
+
+    if len(raw) > 2 * _BINARY_SNIFF_BYTES and (
+        _byte_junk_fraction(raw[-_BINARY_SNIFF_BYTES:]) > _BINARY_JUNK_THRESHOLD
+    ):
+        _refuse_binary(file_path, file_extension)
+
+    nul_fraction = (raw.count(0) / len(raw)) if raw else 0.0
+    for encoding in ("utf-8-sig", "utf-8", "utf-16", "cp1252", "latin-1"):
+        if encoding == "utf-16" and not (0.25 <= nul_fraction <= 0.60):
+            continue
+        try:
+            text = raw.decode(encoding)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        if _looks_like_binary(text):
+            continue
+        return text
+    _refuse_binary(file_path, file_extension)
+
+
 def extract_text_from_file(file_path: str, file_extension: str) -> str:
     """Extract text from a file based on its extension.
 
@@ -983,8 +1103,11 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
             return convert_to_markdown(file_path, keep_data_uris=False)
 
         elif file_extension in ("txt", "md", "csv", "json", "xml", "log"):
-            with open(file_path, encoding="utf-8") as f:
-                return f.read()
+            # Through the gated reader rather than a strict utf-8 open: a
+            # binary named report.txt used to fail with a raw codec error
+            # while report.dat got the actionable refusal, and a legacy
+            # cp1252 .txt failed outright instead of decoding.
+            return read_text_file(file_path, file_extension)
 
         elif file_extension == "xlsx":
             return extract_text_from_xlsx(file_path)
@@ -998,19 +1121,20 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
             return convert_to_markdown(file_path, keep_data_uris=False)
 
         elif file_extension in ("py", "js", "java", "cpp", "c", "h", "css", "sql"):
-            with open(file_path, encoding="utf-8") as f:
-                return f.read()
+            return read_text_file(file_path, file_extension)
 
         else:
             try:
                 return convert_to_markdown(file_path, keep_data_uris=False)
             except Exception:
-                try:
-                    with open(file_path, encoding="utf-8") as f:
-                        return f.read()
-                except Exception:
-                    with open(file_path, encoding="latin-1") as f:
-                        return f.read()
+                # Unknown extension MarkItDown refused. The gated reader is
+                # the last resort: it decodes real text (any of the cascade's
+                # encodings) and refuses binaries with an actionable message.
+                # latin-1 used to be the terminal step here bare — it cannot
+                # raise on any byte sequence, so any unrecognized *binary*
+                # decoded "successfully", was stored as raw_text, chunked,
+                # embedded, and answered from.
+                return read_text_file(file_path, file_extension)
 
     except FileNotFoundError:
         # A missing source file (deleted mid-processing, retention sweep, or a
@@ -1023,6 +1147,12 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
     except ConnectionError:
         # ``OcrUnavailableError`` (a ConnectionError subclass) re-raised above
         # must reach the task layer as itself, not as a DocumentReadError.
+        raise
+
+    except DocumentReadError:
+        # Already carries a user-facing message (e.g. the binary-content
+        # refusal above) — re-wrapping would just prefix it with a second
+        # "Could not read this file:".
         raise
 
     except Exception as e:

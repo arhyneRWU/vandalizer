@@ -642,3 +642,138 @@ class TestPartialOcrSuppressesPageMarkers:
         assert text
         assert len(markers) == 400
         assert all(m["approximate"] is True for m in markers)
+
+class TestGatedTextReader:
+    """The last-resort decode used to be latin-1, which cannot fail: any
+    binary "decoded", was stored as raw_text, chunked, embedded, and chat
+    answered from it as a successfully processed document. read_text_file is
+    now the one gated reader for every plain-text path.
+    """
+
+    def _extract_unknown(self, tmp_path, payload: bytes, ext="dat"):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        path = tmp_path / f"upload.{ext}"
+        path.write_bytes(payload)
+        # Force the fallback chain: markitdown refuses the format.
+        with patch.object(dr, "convert_to_markdown", side_effect=RuntimeError("no reader")):
+            return dr.extract_text_from_file(str(path), ext)
+
+    def test_a_binary_blob_fails_the_document_instead_of_becoming_text(self, tmp_path):
+        from app.services.document_readers import DocumentReadError
+
+        payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 64
+        with pytest.raises(DocumentReadError) as exc:
+            self._extract_unknown(tmp_path, payload)
+        assert "readable text" in str(exc.value)
+        assert "re-save it" in str(exc.value)
+        # Not double-wrapped by the generic handler.
+        assert "Could not read this" not in str(exc.value)
+
+    def test_nul_free_binary_is_still_refused_by_density(self, tmp_path):
+        """Every other refusal fixture contains NULs, which short-circuit the
+        gate; this one has none, so it pins the density check itself."""
+        from app.services.document_readers import DocumentReadError
+
+        # Control-dense but NUL-free: the shape of a structured binary.
+        payload = bytes(b for b in range(1, 256)) * 40
+        with pytest.raises(DocumentReadError):
+            self._extract_unknown(tmp_path, payload)
+
+    def test_binary_with_a_clean_text_preamble_is_caught_by_its_tail(self, tmp_path):
+        """A self-extracting archive opens with a readable script; sniffing
+        only the head would ingest the binary tail as document text."""
+        from app.services.document_readers import _BINARY_SNIFF_BYTES, DocumentReadError
+
+        preamble = b"#!/bin/sh\n# self-extracting installer\n" * 40000
+        assert len(preamble) > _BINARY_SNIFF_BYTES
+        tail = bytes(b for b in range(1, 256)) * 8000
+        with pytest.raises(DocumentReadError):
+            self._extract_unknown(tmp_path, preamble + preamble + tail)
+
+    def test_legacy_cp1252_text_decodes_with_its_punctuation_intact(self, tmp_path):
+        """The branch's legitimate customer. Previously this decoded via
+        latin-1, which preserved the bytes but rendered every curly quote and
+        the euro sign as C1 mojibake."""
+        payload = "It\u2019s a \u201cbudget\u201d \u2014 total \u20ac5,000.\n".encode("cp1252") * 40
+        result = self._extract_unknown(tmp_path, payload)
+        assert "\u2019" in result       # curly apostrophe survived
+        assert "\u20ac5,000" in result  # euro sign survived
+        assert "budget" in result
+
+    def test_bomless_utf16le_decodes_instead_of_passing_as_nul_junk(self, tmp_path):
+        """BOM-less UTF-16LE ASCII is *valid UTF-8* (NUL-interleaved), so the
+        old utf-8-first chain stored it as junk without the gate ever
+        running. It now decodes properly via the utf-16 codec — PowerShell
+        `>` redirection and SQL Server bcp emit exactly this."""
+        text = "quarterly personnel costs: 485,000\n" * 30
+        result = self._extract_unknown(tmp_path, text.encode("utf-16-le"))
+        assert "\x00" not in result
+        assert "485,000" in result
+
+    def test_utf16_with_bom_decodes_too(self, tmp_path):
+        text = "plain looking text, saved by notepad\n" * 20
+        result = self._extract_unknown(tmp_path, text.encode("utf-16"))
+        assert "\x00" not in result
+        assert "notepad" in result
+
+    def test_ansi_colored_log_is_text_not_binary(self, tmp_path):
+        """ESC is deliberately not in the junk set: a color-dense terminal
+        capture is pure ASCII text."""
+        line = "\x1b[0;32mPASS\x1b[0m test_module.py::test_case\n"
+        result = self._extract_unknown(tmp_path, (line * 200).encode("utf-8"), ext="ansi")
+        assert "PASS" in result
+
+    def test_short_file_with_a_stray_control_byte_is_not_refused(self, tmp_path):
+        """One \x1a (the historical DOS EOF marker) in a 20-byte file is 5%
+        "junk"; the density test needs a real sample to mean anything."""
+        result = self._extract_unknown(tmp_path, b"legacy dos text\x1a")
+        assert "legacy dos text" in result
+
+    def test_a_binary_named_txt_gets_the_actionable_refusal(self, tmp_path):
+        """The known-text extensions used to fail with a raw codec error
+        ("'utf-8' codec can't decode byte 0x89...") while unknown extensions
+        got the re-save message — one condition, two user-facing outcomes."""
+        import app.services.document_readers as dr
+        from app.services.document_readers import DocumentReadError
+
+        path = tmp_path / "report.txt"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 64)
+        with pytest.raises(DocumentReadError) as exc:
+            dr.extract_text_from_file(str(path), "txt")
+        assert "re-save it" in str(exc.value)
+
+    def test_extensionless_file_message_does_not_read_this_dot_file(self, tmp_path):
+        from app.services.document_readers import DocumentReadError
+
+        with pytest.raises(DocumentReadError) as exc:
+            self._extract_unknown(tmp_path, b"\x00" * 4096, ext="")
+        assert "This . file" not in str(exc.value)
+        assert "This file" in str(exc.value)
+
+    def test_refusal_is_logged_at_warning(self, tmp_path):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+        from app.services.document_readers import DocumentReadError
+
+        path = tmp_path / "blob.bin"
+        path.write_bytes(b"\x00" * 4096)
+        with patch.object(dr, "logger") as mock_logger, pytest.raises(DocumentReadError):
+            dr.read_text_file(str(path), "bin")
+        assert mock_logger.warning.called
+
+    def test_looks_like_binary_density_boundary(self):
+        from app.services.document_readers import (
+            _BINARY_SNIFF_MIN_LENGTH,
+            _looks_like_binary,
+        )
+
+        assert _looks_like_binary("abc\x00def" * 100)
+        # 6% junk over a real sample: refused.
+        junky = ("\x01" * 6 + "a" * 94) * 10
+        assert len(junky) >= _BINARY_SNIFF_MIN_LENGTH
+        assert _looks_like_binary(junky)
+        # 4% junk: allowed.
+        assert not _looks_like_binary(("\x01" * 4 + "a" * 96) * 10)
+        assert not _looks_like_binary("")
