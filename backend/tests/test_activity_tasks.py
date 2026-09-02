@@ -62,16 +62,20 @@ class TestReapStaleRunning:
     mark every review left overnight as a timeout and fail the run's activity.
     """
 
-    def _reap(self, pending_uuids=()):
+    def _reap(self, pending_uuids=(), stale_extractions=()):
         """Run the task and return (elapsed_time_query, decided_review_query)."""
         import app.tasks.activity_tasks as at
 
         db = MagicMock()
+        db.activity_event.find.return_value = list(stale_extractions)
         db.activity_event.update_many.return_value = MagicMock(modified_count=0)
         db.approval_request.find.return_value = [{"uuid": u} for u in pending_uuids]
         with patch.object(at, "_get_db", return_value=db), \
-             patch.object(at, "_resolve_stale_threshold_minutes", return_value=30):
+             patch.object(at, "_resolve_stale_threshold_minutes", return_value=30), \
+             patch("app.services.failure_notifications.notify_extraction_failed") as notify:
             at.reap_stale_running_task()
+        self.last_db = db
+        self.last_notify = notify
         calls = db.activity_event.update_many.call_args_list
         assert len(calls) == 2, f"expected two sweeps, got {len(calls)}"
         return calls[0][0][0], calls[1][0][0]
@@ -113,6 +117,7 @@ class TestReapStaleRunning:
         import app.tasks.activity_tasks as at
 
         db = MagicMock()
+        db.activity_event.find.return_value = []
         db.activity_event.update_many.return_value = MagicMock(modified_count=0)
         db.approval_request.find.return_value = []
         with patch.object(at, "_get_db", return_value=db), \
@@ -122,3 +127,151 @@ class TestReapStaleRunning:
         update = db.activity_event.update_many.call_args_list[1][0][1]
         assert update["$unset"] == {"meta_summary.pending_review_uuid": ""}
         assert update["$set"]["status"] == "failed"
+
+    def test_a_reaped_extraction_rings_the_owners_bell(self):
+        """A reaped run previously failed in total silence: the rail said
+        "Timed out" and nobody was told. Extraction runs are notified from
+        this sweep because it is their only backstop."""
+        self._reap(stale_extractions=[{
+            "_id": "a1", "user_id": "u1",
+            "search_set_uuid": "ss-1", "title": "Award terms",
+        }])
+        self.last_notify.assert_called_once()
+        kwargs = self.last_notify.call_args.kwargs
+        assert kwargs["user_id"] == "u1"
+        assert kwargs["search_set_uuid"] == "ss-1"
+        assert kwargs["search_set_name"] == "Award terms"
+
+    def test_workflow_and_conversation_rows_do_not_ring_from_this_sweep(self):
+        """Workflow runs are notified by reap_stale_workflow_runs_task with
+        run-level truth; ringing here too would double the bell. The find that
+        feeds notifications must therefore select extraction rows only."""
+        self._reap()
+        self.last_notify.assert_not_called()
+        find_filter = self.last_db.activity_event.find.call_args[0][0]
+        assert find_filter["type"] == "search_set_run"
+
+
+class TestReapStaleWorkflowRuns:
+    """A worker that dies mid-run (OOM, hard time limit, deploy) leaves the
+    WorkflowResult at "running" with no failure handler ever firing. The SSE
+    poller returns only on terminal status, so it streamed forever and Run
+    History spun indefinitely. This reaper is the backstop.
+    """
+
+    def _reap(self, stuck=(), parked=(), approvals=None, flip_modified=1):
+        import app.tasks.activity_tasks as at
+
+        db = MagicMock()
+        # First find: the heartbeat/never-started sweep. Second: pending_approval.
+        db.workflow_result.find.side_effect = [list(stuck), list(parked)]
+        db.workflow_result.update_one.return_value = MagicMock(
+            modified_count=flip_modified,
+        )
+        db.activity_event.find_one_and_update.return_value = {"user_id": "runner"}
+        db.approval_request.find_one.side_effect = lambda *a, **k: approvals
+        db.workflow.find_one.return_value = {"name": "WF", "user_id": "owner"}
+        with patch.object(at, "_get_db", return_value=db), \
+             patch("app.services.failure_notifications.notify_workflow_failed") as notify:
+            at.reap_stale_workflow_runs_task()
+        return db, notify
+
+    def _run(self, **over):
+        base = {
+            "_id": ObjectId(), "workflow": ObjectId(),
+            "session_id": "s1", "status": "running",
+            "last_progress_at": "old",
+        }
+        base.update(over)
+        return base
+
+    def test_sweep_query_matches_dead_heartbeats_and_never_started_rows(self):
+        db, _ = self._reap()
+        query = db.workflow_result.find.call_args_list[0][0][0]
+        stale, never_started = query["$or"]
+        assert stale["status"] == "running"
+        assert "$lt" in stale["last_progress_at"]
+        # `None` matches null or missing, so rows predating the heartbeat
+        # field fall into the gentler day-old sweep, not the strict one.
+        assert never_started["last_progress_at"] is None
+        assert "$lt" in never_started["start_time"]
+
+    def test_dead_run_is_failed_synced_to_rail_and_notifies_owner(self):
+        run = self._run()
+        db, notify = self._reap(stuck=[run])
+
+        flip_filter, flip_update = db.workflow_result.update_one.call_args[0]
+        assert flip_filter == {"_id": run["_id"], "status": "running"}
+        assert flip_update["$set"]["status"] == "error"
+
+        rail_filter = db.activity_event.find_one_and_update.call_args[0][0]
+        assert {"workflow_result": run["_id"]} in rail_filter["$or"]
+        assert {"workflow_session_id": "s1"} in rail_filter["$or"]
+
+        notify.assert_called_once()
+        assert notify.call_args.kwargs["user_id"] == "runner"
+
+    def test_a_run_that_finished_between_find_and_flip_is_left_alone(self):
+        """The flip filters on the status the sweep matched; zero modified
+        means the run reached a real terminal state first — no bell."""
+        db, notify = self._reap(stuck=[self._run()], flip_modified=0)
+        db.activity_event.find_one_and_update.assert_not_called()
+        notify.assert_not_called()
+
+    def test_approved_but_never_resumed_run_is_reaped(self):
+        """approve_review dispatches a resume message and returns. If that
+        message is lost the run sits at pending_approval forever while the
+        reviewer believes they released it."""
+        import datetime as dt
+
+        run = self._run(status="pending_approval", approval_request_id="ap-1")
+        run.pop("last_progress_at")
+        old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=5)
+        # Naive on purpose: pymongo returns naive UTC datetimes by default.
+        db, notify = self._reap(
+            parked=[run],
+            approvals={"status": "approved", "decision_at": old.replace(tzinfo=None)},
+        )
+        flip_filter, flip_update = db.workflow_result.update_one.call_args[0]
+        assert flip_filter["status"] == "pending_approval"
+        assert "approved but never resumed" in flip_update["$set"]["error"]
+        notify.assert_called_once()
+
+    def test_a_run_whose_review_is_still_pending_is_left_alone(self):
+        run = self._run(status="pending_approval", approval_request_id="ap-1")
+        run.pop("last_progress_at")
+        db, notify = self._reap(parked=[run], approvals={"status": "pending"})
+        db.workflow_result.update_one.assert_not_called()
+        notify.assert_not_called()
+
+    def test_a_recently_approved_run_is_given_time_to_resume(self):
+        """A resume can be in flight or in Celery retry backoff; only a
+        decision older than the stale cutoff is evidence of a lost message."""
+        import datetime as dt
+
+        run = self._run(status="pending_approval", approval_request_id="ap-1")
+        run.pop("last_progress_at")
+        recent = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
+        db, notify = self._reap(
+            parked=[run],
+            approvals={"status": "approved", "decision_at": recent},
+        )
+        db.workflow_result.update_one.assert_not_called()
+        notify.assert_not_called()
+
+
+class TestWorkflowTasksAckLate:
+    """Workers ack on delivery by default, so a worker death loses the message
+    for good and no failure path ever runs. These two tasks are safe to
+    redeliver — resume-at-step skips completed steps and the atomic
+    finalized_at claim keeps side effects single-shot — so they opt in. Other
+    task families have NOT been audited for idempotency; do not widen this to
+    a global setting.
+    """
+
+    def test_execution_and_resume_ack_late_and_requeue_on_worker_loss(self):
+        import app.tasks.workflow_tasks as wt
+
+        for task in (wt.execute_workflow_task, wt.resume_workflow_after_approval):
+            assert task.acks_late is True
+            assert task.reject_on_worker_lost is True

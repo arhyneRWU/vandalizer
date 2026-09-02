@@ -96,6 +96,13 @@ celery.conf.beat_schedule = {
         "task": "tasks.activity.reap_stale_running",
         "schedule": 120.0,  # every 2 minutes
     },
+    # Reap WorkflowResult rows a dead worker left at "running"/"pending_approval".
+    # Named tasks.activity.* so it routes to the default queue — on the
+    # workflows queue, the worker outage it detects would also silence it.
+    "activity-reap-stale-workflow-runs": {
+        "task": "tasks.activity.reap_stale_workflow_runs",
+        "schedule": 600.0,  # every 10 minutes; its strictest threshold is ~2h
+    },
     # Self-heal documents whose task_status got stranded in an in-progress stage
     "document-reap-stuck": {
         "task": "tasks.document.reap_stuck",
