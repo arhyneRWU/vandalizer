@@ -42,6 +42,7 @@ async def persist_validation_run(
     user_id: str,
     model: Optional[str] = None,
     extraction_config: Optional[dict] = None,
+    model_settings: Optional[dict] = None,
 ) -> ValidationRun:
     """Create a ValidationRun from a validation result dict and update quality metadata."""
     # Compute unified score
@@ -135,6 +136,7 @@ async def persist_validation_run(
         score=score,
         score_breakdown=score_breakdown,
         model=model,
+        model_settings=model_settings,
         num_runs=result.get("num_runs", 1),
         num_test_cases=num_test_cases,
         num_checks=num_checks,
