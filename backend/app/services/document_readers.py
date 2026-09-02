@@ -942,6 +942,44 @@ def extract_text_with_markers(
     return extract_text_from_file(file_path, ext), []
 
 
+# Sample size for the binary sniff below; scanning a whole multi-hundred-MB
+# upload would be pure waste when the first megabyte already tells the story.
+_BINARY_SNIFF_BYTES = 1_000_000
+
+# Fraction of never-printable characters above which a latin-1 decode is
+# judged to be a binary, not text. Uniformly distributed bytes (compressed or
+# encrypted data) land around 13%; structured binaries higher. Legacy text is
+# at or near zero — the junk set below deliberately excludes the C1 range
+# cp1252 uses for curly quotes, dashes and €, so quote-heavy prose can't trip
+# it.
+_BINARY_JUNK_THRESHOLD = 0.05
+
+# Characters no text encoding prints: C0 controls minus real whitespace, DEL,
+# and the five code points cp1252 leaves undefined.
+_BINARY_JUNK_CHARS = frozenset(
+    {chr(c) for c in range(32)} - set("\t\n\r\f\x0b")
+    | {"\x7f", "\x81", "\x8d", "\x8f", "\x90", "\x9d"}
+)
+
+
+def _looks_like_binary(text: str) -> bool:
+    """Whether a latin-1-decoded string is a binary file wearing a text coat.
+
+    latin-1 maps every byte to a character, so decoding "succeeding" proves
+    nothing. Two signals separate binaries from legacy text: NUL bytes (never
+    present in any single-byte text encoding — also catches UTF-16 misreads,
+    which are better refused than stored as N-U-L-interleaved junk), and the
+    density of characters no text encoding uses for content.
+    """
+    sample = text[:_BINARY_SNIFF_BYTES]
+    if not sample:
+        return False
+    if "\x00" in sample:
+        return True
+    junk = sum(1 for ch in sample if ch in _BINARY_JUNK_CHARS)
+    return junk / len(sample) > _BINARY_JUNK_THRESHOLD
+
+
 def extract_text_from_file(file_path: str, file_extension: str) -> str:
     """Extract text from a file based on its extension.
 
@@ -989,8 +1027,23 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
                     with open(file_path, encoding="utf-8") as f:
                         return f.read()
                 except Exception:
+                    # Last resort, for legacy single-byte text (cp1252 & co)
+                    # that isn't valid UTF-8. latin-1 cannot raise on any byte
+                    # sequence, which used to make this branch a catch-all:
+                    # any unrecognized *binary* decoded "successfully", was
+                    # stored as raw_text, chunked, embedded, and answered
+                    # from. So the decode only counts if it looks like text.
                     with open(file_path, encoding="latin-1") as f:
-                        return f.read()
+                        text = f.read()
+                    if _looks_like_binary(text):
+                        raise DocumentReadError(
+                            f"This .{file_extension} file does not appear to "
+                            "contain readable text — it may be a binary format "
+                            "this system cannot read. If it is a document, "
+                            "re-save it as PDF, DOCX, or plain text (UTF-8) "
+                            "and upload that."
+                        )
+                    return text
 
     except FileNotFoundError:
         # A missing source file (deleted mid-processing, retention sweep, or a
@@ -1003,6 +1056,12 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
     except ConnectionError:
         # ``OcrUnavailableError`` (a ConnectionError subclass) re-raised above
         # must reach the task layer as itself, not as a DocumentReadError.
+        raise
+
+    except DocumentReadError:
+        # Already carries a user-facing message (e.g. the binary-content
+        # refusal above) — re-wrapping would just prefix it with a second
+        # "Could not read this file:".
         raise
 
     except Exception as e:

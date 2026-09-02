@@ -595,3 +595,60 @@ class TestExtractTextFromFileMissingFile:
         assert "[Error extracting content" not in result
         mock_logger.error.assert_not_called()
         mock_logger.warning.assert_called()
+
+
+class TestLatin1FallbackBinaryGate:
+    """latin-1 maps every byte to a character, so the last-resort decode used
+    to "succeed" on any binary: the bytes were stored as raw_text, chunked,
+    embedded, and chat answered from them as a successfully processed
+    document. The decode now only counts if the result looks like text.
+    """
+
+    def _extract_unknown(self, tmp_path, payload: bytes):
+        from unittest.mock import patch
+        import app.services.document_readers as dr
+
+        path = tmp_path / "upload.dat"
+        path.write_bytes(payload)
+        # Force the fallback chain: markitdown refuses the format.
+        with patch.object(dr, "convert_to_markdown", side_effect=RuntimeError("no reader")):
+            return dr.extract_text_from_file(str(path), "dat")
+
+    def test_a_binary_blob_fails_the_document_instead_of_becoming_text(self, tmp_path):
+        from app.services.document_readers import DocumentReadError
+
+        # PNG-ish header followed by dense non-text bytes.
+        payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 64
+        with pytest.raises(DocumentReadError) as exc:
+            self._extract_unknown(tmp_path, payload)
+        assert "readable text" in str(exc.value)
+        # Actionable, and not double-wrapped by the generic handler.
+        assert "re-save it" in str(exc.value)
+        assert "Could not read this" not in str(exc.value)
+
+    def test_legacy_cp1252_text_still_decodes(self, tmp_path):
+        """The branch's legitimate customer: single-byte legacy text that is
+        not valid UTF-8. Its curly quotes land in the C1 range but stay far
+        under the junk threshold."""
+        payload = "It’s a “budget” — total €5,000.\n".encode("cp1252") * 40
+        result = self._extract_unknown(tmp_path, payload)
+        assert "budget" in result
+        assert len(result) > 100
+
+    def test_utf16_misread_is_refused_not_nul_interleaved(self, tmp_path):
+        """A UTF-16 file fails the utf-8 attempt and used to come out of
+        latin-1 as N-U-L-interleaved junk; NUL bytes never appear in any
+        single-byte text encoding, so refuse."""
+        from app.services.document_readers import DocumentReadError
+
+        payload = "plain looking text, saved by notepad".encode("utf-16")
+        with pytest.raises(DocumentReadError):
+            self._extract_unknown(tmp_path, payload)
+
+    def test_looks_like_binary_thresholds(self):
+        from app.services.document_readers import _looks_like_binary
+
+        assert _looks_like_binary("abc\x00def")
+        assert _looks_like_binary(bytes(range(256)).decode("latin-1") * 10)
+        assert not _looks_like_binary("ordinary prose with a stray \x92 quote " * 50)
+        assert not _looks_like_binary("")
