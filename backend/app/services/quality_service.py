@@ -623,6 +623,70 @@ async def get_quality_timeline(
     ]
 
 
+async def reexecute_official_baseline(meta) -> Optional[dict]:
+    """Run the pinned official_baseline's test cases against the current config.
+
+    Extraction (search_set) only — the one kind whose frozen baseline can be
+    mechanically re-executed: a workflow baseline grades historical executions
+    and a KB baseline needs the KB's live index, so neither can be replayed
+    from the frozen dict alone. Returns the v2 validation result dict, or
+    None when there is nothing executable (wrong kind, no baseline, or no
+    baseline case with both a source text and expected values).
+    """
+    if getattr(meta, "item_kind", None) != "search_set" or not meta.official_baseline:
+        return None
+
+    from app.models.extraction_test_case import ExtractionTestCase
+    from app.models.search_set import SearchSet
+    from app.services.extraction_validation_service import run_validation_v2
+
+    try:
+        ss = await SearchSet.get(meta.item_id)
+    except Exception:
+        ss = None
+    if not ss:
+        return None
+
+    baseline = meta.official_baseline
+    sources: list[dict] = []
+    for entry in baseline.get("test_cases") or []:
+        if not isinstance(entry, dict):
+            continue
+        # Examiner-added cases carry expected_values inline; cases frozen from
+        # a validation snapshot carry per-field result rows instead.
+        expected = entry.get("expected_values")
+        if not expected:
+            expected = {
+                f["field_name"]: f["expected"]
+                for f in entry.get("fields") or []
+                if isinstance(f, dict) and f.get("field_name")
+                and f.get("expected") not in (None, "")
+            }
+        source_text = entry.get("source_text")
+        if not source_text and entry.get("test_case_uuid"):
+            tc = await ExtractionTestCase.find_one(
+                ExtractionTestCase.uuid == entry["test_case_uuid"]
+            )
+            if tc and tc.source_text:
+                source_text = tc.source_text
+        if not source_text or not expected:
+            continue
+        sources.append({
+            "label": entry.get("label") or "Baseline case",
+            "source_type": "text",
+            "source_text": source_text,
+            "expected_values": {k: str(v) for k, v in expected.items()},
+        })
+
+    if not sources:
+        return None
+
+    # Replicate the baseline's own run count so the sample-size discount
+    # matches — re-running with fewer replicates would read as false drift.
+    num_runs = int(baseline.get("num_runs") or 3)
+    return await run_validation_v2(ss.uuid, "system", sources, num_runs=num_runs)
+
+
 async def get_quality_by_model(days: int = 90) -> list[dict]:
     """Fleet-wide validation quality grouped by the model that ran.
 

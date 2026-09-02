@@ -121,6 +121,9 @@ export interface CatalogCoverageItem {
   official_baseline_test_case_count: number
   last_drift_check_at: string | null
   last_drift_score: number | null
+  /** "baseline_reexecution" = the frozen baseline was actually re-run;
+   *  "latest_validation_proxy" = the item's latest validation score stood in. */
+  last_drift_basis: 'baseline_reexecution' | 'latest_validation_proxy' | null
 }
 
 export interface VerifiedItemMetadata {
