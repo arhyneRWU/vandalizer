@@ -10,12 +10,14 @@ import {
 import {
   acknowledgeAlert, getJudgeCalibration, getQualityAlerts, getQualityByModel,
   getQualityItemDetail, getQualityItems, getQualitySummary, getQualityTimeline,
-  getRegressionSuiteRun, getRegressionSuiteRuns, getSystemConfig, runRegressionSuite,
+  getRegressionSuiteRun, getRegressionSuiteRuns, runRegressionSuite,
   type JudgeSurfaceCalibration, type ModelQualityRow,
   type QualityAlert, type QualityItem, type QualityItemDetail, type QualitySummary,
   type QualityTimelinePoint, type RegressionItemResult, type RegressionSuiteRunDetail,
-  type RegressionSuiteRunSummary, type SystemConfigData,
+  type RegressionSuiteRunSummary,
 } from '../../api/admin'
+import { getModels } from '../../api/config'
+import type { ModelInfo } from '../../types/workflow'
 
 type SuiteRow = RegressionItemResult & { otherScore?: number | null; compareDelta?: number | null }
 import { useToast } from '../../contexts/ToastContext'
@@ -35,7 +37,7 @@ export function QualityTab() {
   const [modelRows, setModelRows] = useState<ModelQualityRow[]>([])
   const [activeSuite, setActiveSuite] = useState<RegressionSuiteRunDetail | null>(null)
   const [compareSuite, setCompareSuite] = useState<RegressionSuiteRunDetail | null>(null)
-  const [cfg, setCfg] = useState<SystemConfigData | null>(null)
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [error, setError] = useState<string | null>(null)
 
   // Alert feed state
@@ -80,14 +82,13 @@ export function QualityTab() {
     return () => { cancelled = true }
   }, [])
 
-  // Config is fetched separately and tolerantly: it's superadmin-only
-  // (`GET /api/admin/config` calls `_require_superadmin`), so staff users
-  // reject it. It only feeds the optional model <select> in the regression
-  // panel below, which degrades to an empty/default-only list when cfg is
-  // null — it must not block the tab's real payload (the four calls above).
+  // Model list for the regression panel's <select>. Uses the same
+  // non-privileged endpoint as the chat model picker — the superadmin-only
+  // system config was used before, which left staff admins with a dropdown
+  // containing only "Default Model" and no way to target a model at all.
   useEffect(() => {
     let cancelled = false
-    getSystemConfig().then(cfg => { if (!cancelled) setCfg(cfg) }).catch(() => {})
+    getModels().then(m => { if (!cancelled) setAvailableModels(m) }).catch(() => {})
     return () => { cancelled = true }
   }, [])
 
@@ -366,7 +367,7 @@ export function QualityTab() {
             style={{ padding: '6px 12px', fontSize: 13, borderRadius: 6, border: '1px solid #e5e7eb', minWidth: 200 }}
           >
             <option value="">Default Model</option>
-            {cfg?.available_models?.map((m, i) => (
+            {availableModels.map((m, i) => (
               <option key={i} value={m.name}>{m.name} ({m.tag})</option>
             ))}
           </select>
