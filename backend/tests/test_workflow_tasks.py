@@ -1682,3 +1682,52 @@ class TestBuildStepsDataFormFiller:
         _build_steps_data(db, wf, str(wf["_id"]), {"doc_uuids": []})
         mock_preload.assert_called_once()
         assert mock_preload.call_args.args[1]["template_document_uuid"] == "T"
+
+
+class TestBuildRefusalFailsTheRun:
+    """The builder now raises WorkflowStepError for definitions it cannot
+    honor (unknown task type, Code Execution for a non-admin) instead of
+    silently skipping the step. The build sits outside the main try, so the
+    task must catch the refusal and mark the run failed — otherwise the row
+    strands at "running" for the reaper (#805).
+    """
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_execute_marks_run_failed_with_the_builders_message(
+        self, mock_build, mock_get_db,
+    ):
+        from app.services.workflow_engine import WorkflowStepError
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "MysteryTask", "data": {}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_get_db.return_value = db
+        mock_build.side_effect = WorkflowStepError(
+            "Step1", "Step 'Step1' contains an unknown task type 'MysteryTask'.",
+        )
+
+        result = execute_workflow_task(
+            workflow_result_id=str(result_id),
+            workflow_id=str(wf_id),
+            trigger_step_data={"doc_uuids": ["uuid1"]},
+            model="gpt-4o",
+        )
+
+        assert result["status"] == "error"
+        error_writes = [
+            c[0][1]["$set"] for c in db.workflow_result.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("status") == "error"
+        ]
+        assert error_writes, "run was not marked failed"
+        assert "MysteryTask" in error_writes[0]["error"]

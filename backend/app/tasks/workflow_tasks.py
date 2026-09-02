@@ -1029,14 +1029,22 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         }},
     )
 
-    engine = build_workflow_engine(
-        steps_data=steps_data,
-        model=model,
-        user_id=user_id,
-        system_config_doc=sys_config,
-        allow_code_execution=is_admin,
-        config_override=workflow_doc.get("config_override"),
-    )
+    # The builder refuses definitions it cannot honor (unknown task type, a
+    # Code Execution task for a non-admin) instead of skipping the step; the
+    # build sits outside the main try, so the refusal must mark the run
+    # failed here or it would strand the row at "running" for the reaper.
+    try:
+        engine = build_workflow_engine(
+            steps_data=steps_data,
+            model=model,
+            user_id=user_id,
+            system_config_doc=sys_config,
+            allow_code_execution=is_admin,
+            config_override=workflow_doc.get("config_override"),
+        )
+    except WorkflowStepError as e:
+        _mark_workflow_failed(db, workflow_result_id, activity_id, str(e))
+        return {"status": "error", "result_id": workflow_result_id}
 
     # Any pickup resumes where a previous attempt stopped, decided from the
     # run document itself: a fresh run has no stored step output, so
@@ -1592,19 +1600,28 @@ def resume_workflow_after_approval(self, approval_uuid):
     # no API key.
     model = result_doc.get("model") or _default_model_from_config(sys_config)
 
-    engine = build_workflow_engine(
-        steps_data=steps_data,
-        model=model,
-        user_id=user_id,
-        system_config_doc=sys_config,
-        allow_code_execution=is_admin,
-        config_override=workflow_doc.get("config_override"),
-    )
-
-    # Resolved before the try so the failure handler below can always reach it.
+    # Resolved before the build so its refusal handler can reach it too.
     _act = db.activity_event.find_one(
         {"workflow_result": ObjectId(workflow_result_id)}, {"_id": 1}
     )
+
+    # Same build-refusal handling as execute_workflow_task: an unknown task
+    # type or a rejected Code Execution task fails the run with the builder's
+    # message instead of stranding it at "running".
+    try:
+        engine = build_workflow_engine(
+            steps_data=steps_data,
+            model=model,
+            user_id=user_id,
+            system_config_doc=sys_config,
+            allow_code_execution=is_admin,
+            config_override=workflow_doc.get("config_override"),
+        )
+    except WorkflowStepError as e:
+        _mark_workflow_failed(
+            db, workflow_result_id, _act["_id"] if _act else None, str(e),
+        )
+        return {"status": "error", "result_id": workflow_result_id}
 
     # The run is moving again: drop the pause marker so the rail stops showing
     # "awaiting approval" and the stale reaper starts covering this row again.

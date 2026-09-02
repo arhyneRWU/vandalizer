@@ -570,8 +570,10 @@ async def run_extraction_sync(
 
     ``document_warnings``, when given, collects one entry per input document
     whose stored text is known to be degraded — garbled, or only part of the
-    document. Chat already warned about these; extraction did not, which is the
-    surface where being quietly wrong costs the most. Passed as an out-list
+    document — or that contributed nothing to the run at all (code
+    ``no_extractable_text``: no stored text and no loadable file). Chat
+    already warned about these; extraction did not, which is the surface
+    where being quietly wrong costs the most. Passed as an out-list
     rather than returned so the historical ``list[entity]`` return stands.
     """
     keys = await get_extraction_keys(search_set_uuid)
@@ -657,6 +659,25 @@ async def run_extraction_sync(
         )
 
     if not any(doc_texts) and not any(doc_file_paths):
+        # Nothing readable at all. The empty result used to be
+        # indistinguishable from "ran fine, zero matches" — record every
+        # input document as contributing nothing so the run says so.
+        if document_warnings is not None:
+            for meta in doc_metadata:
+                entry = next(
+                    (w for w in document_warnings
+                     if w.get("document_uuid") == meta.get("uuid")),
+                    None,
+                )
+                if entry is not None:
+                    if "no_extractable_text" not in entry["codes"]:
+                        entry["codes"].append("no_extractable_text")
+                else:
+                    document_warnings.append({
+                        "document_uuid": meta.get("uuid"),
+                        "title": meta.get("title") or meta.get("uuid"),
+                        "codes": ["no_extractable_text"],
+                    })
         return []
 
     # Combined context: merge all documents into a single text for extraction.
@@ -698,4 +719,31 @@ async def run_extraction_sync(
         capture_sources=capture_sources,
         doc_metadata=doc_metadata,
     )
+
+    # A document the engine skipped entirely (unloadable file and/or no
+    # extracted text) contributed zero entities; without an entry here the
+    # run reads as "completed, this document just had no matches" — the
+    # silent-green path #805 names. Indices are only meaningful for the
+    # per-document run (combined context collapses to one merged text whose
+    # emptiness the pre-flight above already handles).
+    if document_warnings is not None and not (combined_context and len(document_uuids) > 1):
+        for idx in engine.skipped_doc_indices:
+            if idx >= len(document_uuids):
+                continue
+            doc_uuid = document_uuids[idx]
+            entry = next(
+                (w for w in document_warnings if w.get("document_uuid") == doc_uuid),
+                None,
+            )
+            if entry is not None:
+                if "no_extractable_text" not in entry["codes"]:
+                    entry["codes"].append("no_extractable_text")
+                continue
+            meta = doc_metadata[idx] if idx < len(doc_metadata) else {}
+            document_warnings.append({
+                "document_uuid": doc_uuid,
+                "title": (meta.get("title") or doc_uuid),
+                "codes": ["no_extractable_text"],
+            })
+
     return result

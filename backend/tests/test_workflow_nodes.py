@@ -1985,17 +1985,33 @@ class TestKnowledgeBaseQueryNode:
         assert "Chunk 2 text" in result["output"]
         assert result["step_name"] == "KnowledgeBaseQuery"
 
-    def test_empty_kb_uuid(self):
+    def test_empty_kb_uuid_is_a_step_error(self):
+        """Configuration errors halt the run (like Add Website): a warning
+        let the run finish Completed with a step that queried nothing."""
         node = KnowledgeBaseQueryNode({"kb_uuid": "", "query": "test"})
         result = node.process({"output": "prev"})
         assert result["output"] == ""
-        assert "no knowledge base selected" in result["warning"]
+        assert "no knowledge base selected" in result["error"]
 
-    def test_empty_query(self):
+    def test_empty_query_is_a_step_error(self):
         node = KnowledgeBaseQueryNode({"kb_uuid": "kb-123", "query": ""})
         result = node.process({"output": "prev"})
         assert result["output"] == ""
-        assert "query is empty" in result["warning"]
+        assert "query is empty" in result["error"]
+
+    @patch("app.services.document_manager.DocumentManager")
+    def test_lookup_failure_is_a_step_error_not_downstream_input(self, mock_dm_cls):
+        """The failure text used to be returned as the step's OUTPUT under a
+        warning, so the halt check never fired and the error message flowed
+        into the next step as its input."""
+        mock_dm = MagicMock()
+        mock_dm.query_kb.side_effect = RuntimeError("chroma collection missing")
+        mock_dm_cls.return_value = mock_dm
+
+        node = KnowledgeBaseQueryNode({"kb_uuid": "kb-1", "query": "q"})
+        result = node.process({"output": "prev"})
+        assert "chroma collection missing" in result["error"]
+        assert result["output"] == ""
 
     @patch("app.services.document_manager.DocumentManager")
     def test_no_results(self, mock_dm_cls):
@@ -2039,14 +2055,16 @@ class TestKnowledgeBaseQueryNode:
 
         mock_dm.query_kb.assert_called_once_with("kb-1", "policies for NSF", k=8)
 
-    def test_template_error_surfaces_warning(self):
+    def test_template_error_is_a_step_error(self):
+        """A broken template is a configuration error; its message must fail
+        the run, not become the step's output."""
         node = KnowledgeBaseQueryNode({
             "kb_uuid": "kb-1",
             "query": "{{ inputs.output.missing_key }}",
         })
         result = node.process({"output": {"other": 1}, "step_name": "Prompt"})
-        assert result["warning"]
-        assert result["output"] == result["warning"]
+        assert result["error"]
+        assert result["output"] == ""
 
     @patch("app.services.document_manager.DocumentManager")
     def test_min_similarity_filters_low_relevance_chunks(self, mock_dm_cls):
@@ -2080,16 +2098,19 @@ class TestKnowledgeBaseQueryNode:
         assert "no matching passages" in result["warning"]
 
     @patch("app.services.document_manager.DocumentManager")
-    def test_query_error_soft_fails_with_warning(self, mock_dm_cls):
-        """A retrieval failure becomes a visible warning, not a dead workflow."""
+    def test_query_error_hard_fails_the_step(self, mock_dm_cls):
+        """Reversal of the earlier soft-fail (#805): the warning let the run
+        finish Completed while the failure text flowed downstream as the next
+        step's INPUT — a workflow summarizing "Knowledge base lookup failed:
+        chroma down" as if it were retrieved content."""
         mock_dm = MagicMock()
         mock_dm.query_kb.side_effect = RuntimeError("chroma down")
         mock_dm_cls.return_value = mock_dm
 
         node = KnowledgeBaseQueryNode({"kb_uuid": "kb-1", "query": "q"})
         result = node.process({"output": "prev"})
-        assert "chroma down" in result["warning"]
-        assert "chroma down" in result["output"]
+        assert "chroma down" in result["error"]
+        assert result["output"] == ""
 
     @patch("app.services.workflow_engine.llm_chat_model")
     @patch("app.services.document_manager.DocumentManager")

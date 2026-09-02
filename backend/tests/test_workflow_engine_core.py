@@ -706,30 +706,37 @@ class TestBuildWorkflowEngine:
             assert len(order) == 2, f"Failed for task type: {task_name}"
             assert len(order[1].tasks) == 1, f"No task created for: {task_name}"
 
-    def test_code_node_rejected_when_not_admin(self):
-        """CodeNode tasks are skipped when allow_code_execution is False."""
+    def test_code_node_rejected_when_not_admin_fails_the_build(self):
+        """A skipped CodeNode left an empty pass-through node and a run that
+        finished Completed minus a step the author asked for. The builder now
+        refuses so the run fails naming the step."""
+        from app.services.workflow_engine import WorkflowStepError
+
         steps = [
             {"name": "Document", "data": {"doc_uuids": ["u1"]}, "tasks": []},
             {"name": "Step", "data": {}, "tasks": [
                 {"name": "CodeNode", "data": {}}
             ]},
         ]
-        engine = build_workflow_engine(steps, model="gpt-4o", allow_code_execution=False)
-        order = engine.get_topological_order()
-        assert len(order) == 2
-        assert len(order[1].tasks) == 0  # CodeNode was rejected
+        with pytest.raises(WorkflowStepError) as exc:
+            build_workflow_engine(steps, model="gpt-4o", allow_code_execution=False)
+        assert "administrators" in str(exc.value)
+        assert "Step" in str(exc.value)
 
-    def test_unknown_task_type_skipped(self):
+    def test_unknown_task_type_fails_the_build(self):
+        """Same silent-green shape as the CodeNode skip: an unknown name means
+        a newer-version or corrupted definition, and must fail loudly."""
+        from app.services.workflow_engine import WorkflowStepError
+
         steps = [
             {"name": "Document", "data": {"doc_uuids": ["u1"]}, "tasks": []},
             {"name": "Step", "data": {}, "tasks": [
                 {"name": "NonexistentTaskType", "data": {}}
             ]},
         ]
-        engine = build_workflow_engine(steps, model="gpt-4o")
-        order = engine.get_topological_order()
-        assert len(order) == 2
-        assert len(order[1].tasks) == 0  # unknown task was skipped
+        with pytest.raises(WorkflowStepError) as exc:
+            build_workflow_engine(steps, model="gpt-4o")
+        assert "NonexistentTaskType" in str(exc.value)
 
     def test_model_propagated_to_tasks(self):
         steps = [
