@@ -1458,7 +1458,8 @@ def execute_task_step_test(self, task_name, task_data, doc_uuids):
         process_node = DataExportNode(data=task_data)
     elif task_name == "PackageBuilder":
         process_node = PackageBuilderNode(data=task_data)
-    elif task_name == "BrowserAutomation":
+    elif task_name in ("BrowserAutomation", "Browser"):
+        # Same alias the builder accepts — the editor persists "Browser".
         process_node = BrowserAutomationNode(data=task_data)
     elif task_name == "KnowledgeBaseQuery":
         process_node = KnowledgeBaseQueryNode(data=task_data)
@@ -1621,6 +1622,11 @@ def resume_workflow_after_approval(self, approval_uuid):
         _mark_workflow_failed(
             db, workflow_result_id, _act["_id"] if _act else None, str(e),
         )
+        # Every path out of the approval wait must drop the pause marker
+        # (see _clear_pause_marker) — leaving it would show a failed run as
+        # "awaiting approval" forever and exempt it from the stale reaper.
+        if _act:
+            _clear_pause_marker(db, _act["_id"])
         return {"status": "error", "result_id": workflow_result_id}
 
     # The run is moving again: drop the pause marker so the rail stops showing

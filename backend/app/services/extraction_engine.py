@@ -240,7 +240,7 @@ class ExtractionEngine:
                     # Fallback to OCR text if file can't be loaded for images
                     doc_results = []
                     texts = doc_texts or []
-                    if idx < len(texts) and texts[idx]:
+                    if idx < len(texts) and (texts[idx] or "").strip():
                         logger.warning(
                             "Image loading failed for %s, falling back to text", file_path
                         )

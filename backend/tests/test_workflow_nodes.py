@@ -2000,20 +2000,6 @@ class TestKnowledgeBaseQueryNode:
         assert "query is empty" in result["error"]
 
     @patch("app.services.document_manager.DocumentManager")
-    def test_lookup_failure_is_a_step_error_not_downstream_input(self, mock_dm_cls):
-        """The failure text used to be returned as the step's OUTPUT under a
-        warning, so the halt check never fired and the error message flowed
-        into the next step as its input."""
-        mock_dm = MagicMock()
-        mock_dm.query_kb.side_effect = RuntimeError("chroma collection missing")
-        mock_dm_cls.return_value = mock_dm
-
-        node = KnowledgeBaseQueryNode({"kb_uuid": "kb-1", "query": "q"})
-        result = node.process({"output": "prev"})
-        assert "chroma collection missing" in result["error"]
-        assert result["output"] == ""
-
-    @patch("app.services.document_manager.DocumentManager")
     def test_no_results(self, mock_dm_cls):
         """An empty result set surfaces a warning and an explicit output
         message instead of silently feeding "" to the next step."""

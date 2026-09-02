@@ -1118,3 +1118,47 @@ def test_truncation_in_one_task_does_not_taint_its_siblings():
 
     assert "warning" in truncated
     assert "warning" not in clean
+
+
+class TestBrowserTaskNameAlias:
+    def test_the_editors_browser_name_builds_the_automation_node(self):
+        """The editor's palette persists this task as 'Browser'; the builder
+        only knew 'BrowserAutomation', so every saved Browser Automation task
+        was silently skipped — and the new unknown-name refusal would have
+        turned those workflows into hard failures the editor cannot fix by
+        re-saving. Both names must build the node."""
+        from app.services.workflow_engine import BrowserAutomationNode
+
+        for name in ("Browser", "BrowserAutomation"):
+            steps = [
+                {"name": "Document", "data": {"doc_uuids": ["u1"]}, "tasks": []},
+                {"name": "Step", "data": {}, "tasks": [{"name": name, "data": {}}]},
+            ]
+            engine = build_workflow_engine(steps, model="gpt-4o")
+            order = engine.get_topological_order()
+            assert len(order[1].tasks) == 1, f"failed for {name}"
+            assert isinstance(order[1].tasks[0], BrowserAutomationNode)
+
+
+class TestFallbackRetrySkipsErroredSteps:
+    def test_error_shaped_output_is_not_retried(self):
+        """A step that REPORTED an error is deterministic — the engine is
+        about to halt the run on it; retrying with a fallback model re-ran
+        the node (paid calls included) to fail with the same message."""
+        from app.services.workflow_engine import _should_retry_with_fallback
+
+        node = MagicMock()
+        task = MagicMock()
+        task.data = {"_retry_on_empty": True, "_fallback_model": "other", "model": "m1"}
+        node.tasks = [task]
+        errored = {"output": "", "error": "Knowledge base lookup failed: down"}
+        assert _should_retry_with_fallback(node, errored) is False
+
+    def test_empty_output_still_retries(self):
+        from app.services.workflow_engine import _should_retry_with_fallback
+
+        node = MagicMock()
+        task = MagicMock()
+        task.data = {"_retry_on_empty": True, "_fallback_model": "other", "model": "m1"}
+        node.tasks = [task]
+        assert _should_retry_with_fallback(node, {"output": ""}) is True

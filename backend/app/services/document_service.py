@@ -16,6 +16,11 @@ INGESTION_WARNING_LABELS = {
     # entry here `ingestion_warnings()` filtered it straight back out, so the
     # extraction run reported a warning code that rendered as nothing.
     "low_quality_text": "most of the stored text is unreadable",
+    # Emitted by the extraction path when a document contributed nothing to a
+    # run (no stored text and no loadable file) — never stored on the
+    # document itself, but registered here so the renderer that maps codes to
+    # words (#803) can't repeat the low_quality_text story above.
+    "no_extractable_text": "this document could not be read and contributed nothing to the run",
 }
 
 

@@ -835,10 +835,13 @@ class AddDocumentNode(Node):
             # Completed — and this is the document-attachment node, so the
             # missing text was usually the entire point of the workflow.
             error = (
-                "Add Document has no document text to add. Either no document "
-                "is selected on the step, or the selected document(s) have no "
-                "extracted text yet — check their status in Files (still "
-                "processing, or failed extraction), then run again."
+                "Add Document has no document text to add: no readable "
+                "document reached this step. Possible causes: the workflow "
+                "ran without input documents (a No Input trigger, or the "
+                "run's documents were filtered out), no document is selected "
+                "on the step, or the selected document(s) have no extracted "
+                "text yet — check their status in Files. Fix the input or "
+                "remove this step, then run again."
             )
             return {"output": "", "input": inputs.get("output"), "step_name": self.name,
                     "error": error}
@@ -2551,6 +2554,14 @@ def _should_retry_with_fallback(node, output: dict | None) -> bool:
     - AND the fallback model differs from the current model (otherwise the
       retry would just repeat the same call).
     """
+    # A step that REPORTED an error is a deterministic failure (blocked URL,
+    # missing config, dead KB) — a different model cannot fix it, and the
+    # engine is about to halt the run on it anyway. Retry-on-empty exists for
+    # empty/garbage model output, not for errored steps; retrying one re-ran
+    # the whole node (paid calls included) just to fail with the same message.
+    if output and output.get("error"):
+        return False
+
     tasks = getattr(node, "tasks", None)
     if not tasks:
         return False
@@ -2772,7 +2783,13 @@ def build_workflow_engine(
                 elif task_name == "PackageBuilder":
                     n = PackageBuilderNode(data=task_data)
                     tasks.append(n)
-                elif task_name == "BrowserAutomation":
+                elif task_name in ("BrowserAutomation", "Browser"):
+                    # The editor's palette persists this task as "Browser"
+                    # (WorkflowEditorPanel taskTypes); only the backend ever
+                    # said "BrowserAutomation". The mismatch meant every saved
+                    # Browser Automation task was silently skipped — found
+                    # when the unknown-name refusal below started rejecting
+                    # workflows the editor itself had written.
                     n = BrowserAutomationNode(data=task_data)
                     tasks.append(n)
                 elif task_name == "KnowledgeBaseQuery":

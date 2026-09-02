@@ -552,6 +552,32 @@ def merge_combined_context(
     }
 
 
+def _flag_no_extractable_text(
+    document_warnings: list[dict] | None, doc_uuid: str | None, title: str | None,
+) -> None:
+    """Upsert a per-document ``no_extractable_text`` warning entry.
+
+    One writer for the three disclosure points (nothing-readable pre-flight,
+    combined-context merge, engine-skipped documents) so the entry shape and
+    dedupe rule cannot drift between them.
+    """
+    if document_warnings is None:
+        return
+    entry = next(
+        (w for w in document_warnings if w.get("document_uuid") == doc_uuid),
+        None,
+    )
+    if entry is not None:
+        if "no_extractable_text" not in entry["codes"]:
+            entry["codes"].append("no_extractable_text")
+        return
+    document_warnings.append({
+        "document_uuid": doc_uuid,
+        "title": title or doc_uuid,
+        "codes": ["no_extractable_text"],
+    })
+
+
 async def run_extraction_sync(
     search_set_uuid: str,
     document_uuids: list[str],
@@ -662,26 +688,23 @@ async def run_extraction_sync(
         # Nothing readable at all. The empty result used to be
         # indistinguishable from "ran fine, zero matches" — record every
         # input document as contributing nothing so the run says so.
-        if document_warnings is not None:
-            for meta in doc_metadata:
-                entry = next(
-                    (w for w in document_warnings
-                     if w.get("document_uuid") == meta.get("uuid")),
-                    None,
-                )
-                if entry is not None:
-                    if "no_extractable_text" not in entry["codes"]:
-                        entry["codes"].append("no_extractable_text")
-                else:
-                    document_warnings.append({
-                        "document_uuid": meta.get("uuid"),
-                        "title": meta.get("title") or meta.get("uuid"),
-                        "codes": ["no_extractable_text"],
-                    })
+        for meta in doc_metadata:
+            _flag_no_extractable_text(
+                document_warnings, meta.get("uuid"), meta.get("title"),
+            )
         return []
 
     # Combined context: merge all documents into a single text for extraction.
     if combined_context and len(doc_texts) > 1:
+        # Combined mode reads text only (image mode unsupported below), so a
+        # document with no stored text contributes nothing to the merge —
+        # flag it here, because the post-run engine check cannot: the merge
+        # collapses everything to one text and drops per-document indices.
+        for text, meta in zip(doc_texts, doc_metadata):
+            if not (text or "").strip():
+                _flag_no_extractable_text(
+                    document_warnings, meta.get("uuid"), meta.get("title"),
+                )
         merged_text, merged_meta = merge_combined_context(doc_texts, doc_metadata)
         doc_texts = [merged_text]
         doc_metadata = [merged_meta]
@@ -726,24 +749,13 @@ async def run_extraction_sync(
     # silent-green path #805 names. Indices are only meaningful for the
     # per-document run (combined context collapses to one merged text whose
     # emptiness the pre-flight above already handles).
-    if document_warnings is not None and not (combined_context and len(document_uuids) > 1):
+    if not (combined_context and len(document_uuids) > 1):
         for idx in engine.skipped_doc_indices:
             if idx >= len(document_uuids):
                 continue
-            doc_uuid = document_uuids[idx]
-            entry = next(
-                (w for w in document_warnings if w.get("document_uuid") == doc_uuid),
-                None,
-            )
-            if entry is not None:
-                if "no_extractable_text" not in entry["codes"]:
-                    entry["codes"].append("no_extractable_text")
-                continue
             meta = doc_metadata[idx] if idx < len(doc_metadata) else {}
-            document_warnings.append({
-                "document_uuid": doc_uuid,
-                "title": (meta.get("title") or doc_uuid),
-                "codes": ["no_extractable_text"],
-            })
+            _flag_no_extractable_text(
+                document_warnings, document_uuids[idx], meta.get("title"),
+            )
 
     return result
