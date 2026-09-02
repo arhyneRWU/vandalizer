@@ -1808,6 +1808,13 @@ async def start_workflow_optimization(
         )
 
     from app.models.workflow_optimization_run import WorkflowOptimizationRun
+    from app.services.workflow_optimizer import reap_stale_runs
+
+    # Recover any orphaned run first so a dead worker's "running" doc can't
+    # permanently block new runs via the active check below — the sweep the
+    # extraction start path already does.
+    await reap_stale_runs(workflow_id)
+
     active = await WorkflowOptimizationRun.find_one(
         WorkflowOptimizationRun.workflow_id == workflow_id,
         {"status": {"$in": ["queued", "running"]}},

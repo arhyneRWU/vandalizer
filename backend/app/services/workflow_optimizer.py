@@ -109,6 +109,66 @@ _PROMPT_VARIANT_TASKS = {"Prompt", "Formatter", "ResearchNode", "FormFiller"}
 _LLM_TASKS = _PROMPT_VARIANT_TASKS | {"Extraction", "DescribeImage"}
 
 
+# A run in {queued, running} whose started_at is older than the task's hard
+# time limit (workflow_optimization_tasks: 5460s) plus slack cannot still be
+# executing — the worker was SIGKILLed or died. Mirrors
+# extraction_optimizer.STALE_RUN_TIMEOUT_SECONDS.
+STALE_RUN_TIMEOUT_SECONDS = 5460 + 240
+
+
+def _as_aware(dt: datetime.datetime | None) -> datetime.datetime | None:
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+async def reap_one(run_doc: WorkflowOptimizationRun | None) -> WorkflowOptimizationRun | None:
+    """Recover a single orphaned run; no-op unless it's genuinely stuck.
+
+    A run left queued/running past the worker's hard time limit was
+    hard-limit killed or lost its worker; nothing will ever finalize it.
+    Unlike the extraction equivalent there is no Celery task id on the run
+    to revoke — finalizing the document is the whole job. Returns the
+    (possibly updated) run.
+    """
+    if run_doc is None or run_doc.status not in ("queued", "running"):
+        return run_doc
+
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    started = _as_aware(run_doc.started_at)
+    if started is None or (now - started).total_seconds() <= STALE_RUN_TIMEOUT_SECONDS:
+        return run_doc
+
+    run_doc.status = "failed"
+    run_doc.phase = "failed"
+    run_doc.stopped_reason = "failed"
+    run_doc.error_message = (
+        "Optimization run abandoned — the worker crashed or was killed at the "
+        "hard time limit before it could record a result."
+    )
+    run_doc.completed_at = now
+    await run_doc.save()
+    logger.info("Reaped orphaned workflow optimization run %s", run_doc.uuid)
+    return run_doc
+
+
+async def reap_stale_runs(workflow_id: str) -> None:
+    """Reap every orphaned run for a workflow.
+
+    Called before starting a new run: the start path 409s on any non-terminal
+    run with no sweep of its own, so a hard-limit-killed run did not just
+    spin — it permanently blocked re-optimizing that workflow until someone
+    edited the database (the exact consequence the KB janitor's docstring
+    names as its reason for existing).
+    """
+    runs = await WorkflowOptimizationRun.find(
+        WorkflowOptimizationRun.workflow_id == workflow_id,
+        {"status": {"$in": ["queued", "running"]}},
+    ).to_list()
+    for run in runs:
+        await reap_one(run)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
