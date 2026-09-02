@@ -126,9 +126,11 @@ celery.conf.beat_schedule = {
         "task": "tasks.engagement.process_inactivity_nudges",
         "schedule": crontab(hour=10, minute=30),  # daily at 10:30am
     },
-    # KB Autovalidate orphan-run reaper
-    "kb-optimization-janitor": {
-        "task": "tasks.passive.kb_optimization_janitor",
+    # Orphan-run reaper for all three optimizer run types (KB, workflow,
+    # extraction) — a hard-limit-killed run otherwise blocks re-optimizing
+    # its subject forever via the start paths' active-run 409.
+    "optimization-janitor": {
+        "task": "tasks.passive.optimization_janitor",
         "schedule": crontab(minute=0),  # hourly
     },
     # Monthly re-judge of KBs with an applied optimization config — catches
