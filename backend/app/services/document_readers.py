@@ -598,12 +598,67 @@ def _docx_text_of(element) -> str:
     return "".join(parts).strip()
 
 
+def read_docx_markdown(docx_path: str) -> str:
+    """Body text of a .docx as markdown — the one reader for every path.
+
+    Upload ingestion used pypandoc (with a silent, unlogged fallback to
+    MarkItDown) while chat attachments used MarkItDown only, so the same file
+    yielded different text depending on how it entered the system. Both now
+    come through here. Note the fallback is not an edge case: the Docker
+    image installs no pandoc binary, so on the supported deploy pypandoc
+    raises OSError on every call and MarkItDown does all the work — which is
+    why a *missing binary* logs at info. Any other pypandoc failure means a
+    host that normally converts with pandoc just switched readers for this
+    one document (different table/list rendering than its neighbors), which
+    is worth a warning.
+
+    ``--track-changes=accept`` is passed explicitly (insertions kept,
+    deletions dropped from the body). That is pandoc's documented default,
+    but the default was an assumption about whichever pandoc binary a host
+    happens to have; struck-through text in a budget must not depend on it.
+    Deleted text is not lost — ``extract_docx_extras`` reports it, labeled
+    as deleted. MarkItDown's mammoth backend likewise accepts revisions
+    (``w:ins`` content is read, ``w:del`` is in its ignored-elements list —
+    pinned by test against the installed package).
+    """
+    try:
+        import pypandoc
+
+        body = pypandoc.convert_file(
+            docx_path, "markdown", extra_args=["--track-changes=accept"],
+        )
+    except OSError as e:
+        # "No pandoc was found" — the expected state on the Docker deploy.
+        logger.info("pandoc not available for %s (%s); reading with MarkItDown", docx_path, e)
+        body = None
+    except Exception as e:
+        logger.warning(
+            "pypandoc failed to convert %s (%s); reading with MarkItDown",
+            docx_path, e,
+        )
+        body = None
+    if body is None:
+        body = convert_to_markdown(docx_path, keep_data_uris=False)
+    # Applied on BOTH branches: leaving image refs in only the MarkItDown
+    # output would make the same docx read differently on Docker (no pandoc)
+    # vs a pandoc host — the per-environment divergence this function exists
+    # to kill.
+    return remove_images_from_markdown(body)
+
+
 def extract_docx_extras(docx_path: str) -> str:
-    """Pull comments and tracked changes from a .docx file.
+    """Pull comments and tracked-change deletions from a .docx file.
 
     Returns a markdown block to append after the body, or "" if there's
     nothing notable. Research admins live in Word comments during
     proposal review, and pypandoc/MarkItDown both drop them silently.
+
+    Deletions are reported because the body (read with tracked changes
+    accepted) no longer contains them — a struck-through dollar figure is
+    review history worth seeing, clearly labeled as deleted. Insertions are
+    deliberately NOT listed: accepted insertions are already part of the
+    body, and listing them again put every inserted figure into the context
+    window twice — a "sum the personnel costs" prompt double-counted them.
     """
     import defusedxml.ElementTree as ET
     import zipfile
@@ -622,6 +677,10 @@ def extract_docx_extras(docx_path: str) -> str:
             try:
                 tree = ET.fromstring(zf.read("word/comments.xml"))
             except ET.ParseError:
+                logger.warning(
+                    "Could not parse word/comments.xml in %s — comments will "
+                    "be missing from the extracted text", docx_path,
+                )
                 tree = None
             if tree is not None:
                 lines = []
@@ -642,20 +701,29 @@ def extract_docx_extras(docx_path: str) -> str:
             try:
                 doc_tree = ET.fromstring(zf.read("word/document.xml"))
             except ET.ParseError:
+                logger.warning(
+                    "Could not parse word/document.xml in %s — tracked-change "
+                    "deletions will be missing from the extracted text",
+                    docx_path,
+                )
                 doc_tree = None
             if doc_tree is not None:
                 changes: list[str] = []
-                for kind, label in (("ins", "Inserted"), ("del", "Deleted")):
-                    for el in doc_tree.iter(f"{{{_DOCX_W_NS}}}{kind}"):
-                        text = _docx_text_of(el)
-                        if not text:
-                            continue
-                        author = el.attrib.get(f"{{{_DOCX_W_NS}}}author", "Unknown")
-                        date = el.attrib.get(f"{{{_DOCX_W_NS}}}date", "")
-                        suffix = f" ({date})" if date else ""
-                        changes.append(f"- **{label}** by {author}{suffix}: {text}")
+                for el in doc_tree.iter(f"{{{_DOCX_W_NS}}}del"):
+                    text = _docx_text_of(el)
+                    if not text:
+                        continue
+                    author = el.attrib.get(f"{{{_DOCX_W_NS}}}author", "Unknown")
+                    date = el.attrib.get(f"{{{_DOCX_W_NS}}}date", "")
+                    suffix = f" ({date})" if date else ""
+                    changes.append(f"- **Deleted** by {author}{suffix}: {text}")
                 if changes:
-                    sections.append("## Tracked changes\n" + "\n".join(changes))
+                    sections.append(
+                        "## Tracked changes\n"
+                        "_The following text was deleted in tracked changes "
+                        "and is NOT part of the document body above._\n"
+                        + "\n".join(changes)
+                    )
 
     return "\n\n".join(sections)
 
@@ -1113,7 +1181,9 @@ def extract_text_from_file(file_path: str, file_extension: str) -> str:
             return extract_text_from_xlsx(file_path)
 
         elif file_extension == "docx":
-            body = convert_to_markdown(file_path, keep_data_uris=False)
+            # Same reader as upload ingestion (document_tasks) — a chat
+            # attachment must not read differently from the uploaded copy.
+            body = read_docx_markdown(file_path)
             extras = extract_docx_extras(file_path)
             return (body.rstrip() + "\n\n" + extras) if extras else body
 

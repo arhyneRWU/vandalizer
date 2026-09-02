@@ -7,7 +7,6 @@ Uses pymongo (sync) for DB access — same pattern as workflow_tasks.py.
 import datetime
 import logging
 import os
-import re
 import uuid
 from pathlib import Path
 
@@ -252,18 +251,6 @@ def sync_project_kb_on_folder_move(self, folder_uuid: str, old_parent_id: str | 
     return synced
 
 
-def _remove_images_from_markdown(markdown_text: str) -> str:
-    """Remove all image references from markdown text."""
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", "", markdown_text)
-    text = re.sub(r"!\[([^\]]*)\]\[[^\]]*\]", "", text)
-    text = re.sub(r'\{[^}]*(?:width|height)\s*=\s*"[^"]*"[^}]*\}', "", text)
-    text = re.sub(r'\{[^{}]*="[^"]*"[^{}]*\}', "", text)
-    text = re.sub(r"^\s*\[[^\]]+\]:\s*[^\s]+.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n\s*\n\s*\n", "\n\n", text)
-    text = re.sub(r"^\s+$", "", text, flags=re.MULTILINE)
-    return text.strip()
-
-
 def _notify_document_processing_failed(db, document_uuid: str, message: str) -> None:
     """Tell the uploader their document never became readable.
 
@@ -303,9 +290,7 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
     """
     from app.services.document_readers import (
         convert_to_markdown,
-        extract_docx_extras,
         extract_text_from_file,
-        remove_images_from_markdown,
     )
 
     db = get_sync_db()
@@ -346,19 +331,10 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         elif extension == "xls":
             raw_text = convert_to_markdown(str(absolute_path))
 
-        elif extension in ("docx", "doc"):
-            try:
-                import pypandoc
-
-                raw_text = pypandoc.convert_file(str(absolute_path), "markdown")
-                raw_text = remove_images_from_markdown(raw_text)
-            except Exception:
-                raw_text = convert_to_markdown(str(absolute_path), keep_data_uris=False)
-
-            if extension == "docx":
-                extras = extract_docx_extras(str(absolute_path))
-                if extras:
-                    raw_text = (raw_text or "").rstrip() + "\n\n" + extras
+        # docx/doc deliberately have no branch here: they fall through to
+        # extract_text_from_file below, whose docx branch is the ONE assembly
+        # site (read_docx_markdown + extras). A local copy of that assembly
+        # is exactly how upload and chat-attachment text drifted apart before.
 
         elif extension == "pdf":
             from app.services.document_readers import (
