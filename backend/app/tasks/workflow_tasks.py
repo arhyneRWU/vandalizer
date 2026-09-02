@@ -12,6 +12,14 @@ from app.tasks import TRANSIENT_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
+# Ceiling on how many times one run may be delivered to a worker. Legitimate
+# paths spend a handful (first delivery + up to max_retries retries + a rare
+# broker redelivery); a run that keeps OOM-killing its worker is requeued by
+# reject_on_worker_lost with a fresh retry counter each time and would loop
+# forever without this — invisible to the heartbeat reaper, since every pass
+# rewrites last_progress_at.
+MAX_DELIVERY_ATTEMPTS = 8
+
 
 def _preload_form_filler_template(db, task_data: dict) -> None:
     """Attach a Form Filler task's fillable-PDF template bytes (see form_fill)."""
@@ -869,6 +877,42 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     if not workflow_doc or not result_doc:
         raise ValueError(f"Workflow {workflow_id} or result {workflow_result_id} not found")
 
+    # With acks_late, this task can be delivered more than once: a broker
+    # visibility-timeout redelivery, or a requeue after worker loss. A run
+    # that reached a terminal state in the meantime — the user canceled it,
+    # the reaper failed it, an earlier delivery completed it — must stay
+    # there; without this guard a late redelivery flipped "canceled" back to
+    # "running" and finished a run the user explicitly stopped.
+    if result_doc.get("status") in ("completed", "error", "canceled"):
+        logger.info(
+            "Skipping delivery of workflow run %s — already terminal (%s)",
+            workflow_result_id, result_doc.get("status"),
+        )
+        return {"status": "skipped_terminal", "result_id": workflow_result_id}
+
+    # Bound the poison-message loop: reject_on_worker_lost requeues with a
+    # fresh retry counter, so a run that deterministically OOM-kills its
+    # worker would otherwise loop forever — invisible to the heartbeat reaper,
+    # because every pass rewrites last_progress_at. Delivery attempts are
+    # counted on the run document itself, which survives requeues.
+    from pymongo import ReturnDocument
+
+    counted = db.workflow_result.find_one_and_update(
+        {"_id": ObjectId(workflow_result_id)},
+        {"$inc": {"delivery_attempts": 1}},
+        projection={"delivery_attempts": 1},
+        return_document=ReturnDocument.AFTER,
+    ) or {}
+    if counted.get("delivery_attempts", 1) > MAX_DELIVERY_ATTEMPTS:
+        _mark_workflow_failed(
+            db, workflow_result_id, activity_id,
+            "This run repeatedly crashed the worker executing it (usually a "
+            "step that runs the worker out of memory) and has been stopped. "
+            "Reduce the input size — or convert large documents to a "
+            "Knowledge Base — and run the workflow again.",
+        )
+        return {"status": "error", "result_id": workflow_result_id}
+
     # Load system config for sync engine
     sys_config = db.system_config.find_one() or {}
 
@@ -994,22 +1038,19 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         config_override=workflow_doc.get("config_override"),
     )
 
-    # A retry resumes where the failed attempt stopped. On the first attempt
-    # there is nothing to resume from and this is (0, None). A redelivered
-    # message (acks_late: the previous worker died mid-run and the broker
-    # requeued it) is a resume too, even though its retry counter reads 0 —
-    # restarting it from step 0 would discard completed steps and re-spend
+    # Any pickup resumes where a previous attempt stopped, decided from the
+    # run document itself: a fresh run has no stored step output, so
+    # _resume_point returns (0, None) for it. Deciding from the message
+    # instead — retry counter, or the broker's `redelivered` flag — misses
+    # the acks_late redelivery cases (a requeue after worker loss arrives
+    # with retries == 0, and `redelivered` semantics vary by transport), and
+    # restarting from step 0 would discard completed steps and re-spend
     # their tokens.
-    redelivered = bool((self.request.delivery_info or {}).get("redelivered"))
-    start_index, initial_output = (
-        _resume_point(engine, result_doc)
-        if (self.request.retries or redelivered)
-        else (0, None)
-    )
+    start_index, initial_output = _resume_point(engine, result_doc)
     prior_steps_output = (result_doc.get("steps_output") or {}) if start_index else {}
     if start_index:
         logger.info(
-            "Workflow %s retry %d/%d resuming at step %d of %d",
+            "Workflow %s (retry %d/%d) resuming at step %d of %d",
             workflow_id, self.request.retries, self.max_retries,
             start_index, len(steps_data) - 1,
         )
@@ -1517,8 +1558,17 @@ def resume_workflow_after_approval(self, approval_uuid):
     # restart a run the user explicitly stopped — spending tokens hours later.
     import datetime as _dt
 
+    # Positive status filter, not just "$ne canceled": a run the reaper
+    # already failed (approved-but-never-resumed, or a dead worker) must not
+    # be silently resurrected by a late resume delivery after its owner was
+    # told to re-run it — that executes the post-gate steps twice. "running"
+    # stays eligible so a Celery retry of this task can proceed past its own
+    # first attempt's write.
     resumed = db.workflow_result.update_one(
-        {"_id": ObjectId(workflow_result_id), "status": {"$ne": "canceled"}},
+        {
+            "_id": ObjectId(workflow_result_id),
+            "status": {"$in": ["pending_approval", "running"]},
+        },
         {"$set": {
             "status": "running",
             "current_step_detail": "Resuming after approval",
@@ -1527,7 +1577,8 @@ def resume_workflow_after_approval(self, approval_uuid):
     )
     if resumed.matched_count == 0:
         logger.info(
-            "Not resuming workflow_result %s after approval — it was canceled",
+            "Not resuming workflow_result %s after approval — it was "
+            "canceled or already finalized",
             workflow_result_id,
         )
         return {"status": "canceled", "result_id": workflow_result_id}

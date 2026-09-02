@@ -64,6 +64,13 @@ TITLE_SYSTEM_PROMPT = (
 # and extraction steps refresh last_updated_at as they make progress.
 STALE_ACTIVITY_THRESHOLD_MINUTES_DEFAULT = 30
 
+# How long a reaper-flipped extraction row must STAY failed before its owner
+# is belled. Extractions report no mid-run progress, so the elapsed-time flip
+# above catches slow runs too (their completion write then corrects the rail);
+# a row still failed this long after the flip is past any legitimate runtime
+# (the Celery hard time limit is 3660s) and genuinely dead.
+_EXTRACTION_BELL_DELAY_SECONDS = 5400
+
 
 def _resolve_stale_threshold_minutes(db) -> int:
     """Read the stale-activity threshold from SystemConfig, falling back to default.
@@ -330,21 +337,12 @@ def reap_stale_running_task(self) -> None:
         "meta_summary.pending_review_uuid": None,
     }
 
-    # Captured before the flip so the owners can be told afterwards. This
-    # sweep only fires when a task died without running its own failure
-    # handler (which would have marked the row and rung the bell already), so
-    # until now a reaped run failed in total silence — the rail said "Timed
-    # out" and nobody was notified. Extraction runs get the bell here because
-    # this reaper is their only backstop. Workflow runs are deliberately NOT
-    # notified from this sweep: reap_stale_workflow_runs_task below owns the
-    # WorkflowResult and notifies once, with run-level truth, and ringing from
-    # both places would double the bell. Conversations stay silent — the user
-    # was watching the stream drop.
-    stale_extractions = list(db.activity_event.find(
-        {**stale_filter, "type": "search_set_run"},
-        {"user_id": 1, "search_set_uuid": 1, "title": 1},
-    ))
-
+    # The flip stamps reaper_flipped_at so the bell sweep at the bottom can
+    # notify — later, and only if the verdict stands. Ringing here off a
+    # pre-flip snapshot had two failure modes: an extraction that completed
+    # between the find and the update_many got a timeout bell for results
+    # already on screen, and (because extractions report no mid-run progress)
+    # a merely *slow* run past the threshold got belled and then finished.
     result = db.activity_event.update_many(
         stale_filter,
         {
@@ -352,6 +350,7 @@ def reap_stale_running_task(self) -> None:
                 "status": "failed",
                 "finished_at": now,
                 "last_updated_at": now,
+                "meta_summary.reaper_flipped_at": now,
                 "error": (
                     f"Timed out — no progress reported for over "
                     f"{threshold_minutes} minutes."
@@ -401,8 +400,38 @@ def reap_stale_running_task(self) -> None:
             result.modified_count, orphaned.modified_count, threshold_minutes,
         )
 
-    for row in stale_extractions:
+    # Bell sweep: tell extraction owners about reaped runs, once, and only
+    # when the reaper's verdict is conclusive. This reaper is extraction's
+    # only backstop (its task's own final-attempt bell never fires when the
+    # worker dies without running a handler) — but extractions report no
+    # mid-run progress, so the flip above happens for slow runs too, and the
+    # completion write then corrects the rail. The bell therefore waits
+    # _EXTRACTION_BELL_DELAY_SECONDS after the flip: no task outlives the
+    # Celery hard time limit, so a row still failed then is genuinely dead.
+    # The atomic reap_notified claim makes the bell fire exactly once even
+    # across overlapping ticks. Workflow runs are deliberately NOT belled
+    # from this sweep — reap_stale_workflow_runs_task owns the WorkflowResult
+    # and notifies once, with run-level truth. Conversations stay silent: the
+    # user was watching the stream drop.
+    bell_cutoff = now - datetime.timedelta(seconds=_EXTRACTION_BELL_DELAY_SECONDS)
+    bell_rows = list(db.activity_event.find(
+        {
+            "type": "search_set_run",
+            "status": "failed",
+            "meta_summary.reaper_flipped_at": {"$lte": bell_cutoff},
+            "meta_summary.reap_notified": {"$ne": True},
+        },
+        {"user_id": 1, "search_set_uuid": 1, "title": 1},
+    ))
+    for row in bell_rows:
         try:
+            claimed = db.activity_event.update_one(
+                {"_id": row["_id"], "meta_summary.reap_notified": {"$ne": True}},
+                {"$set": {"meta_summary.reap_notified": True}},
+            )
+            if not claimed.modified_count:
+                continue
+
             from app.services.failure_notifications import notify_extraction_failed
 
             notify_extraction_failed(
@@ -411,9 +440,9 @@ def reap_stale_running_task(self) -> None:
                 search_set_uuid=row.get("search_set_uuid"),
                 search_set_name=row.get("title"),
                 error=(
-                    f"Timed out — no progress reported for over "
-                    f"{threshold_minutes} minutes. The worker likely crashed "
-                    "or was restarted mid-run."
+                    "Timed out — the run stopped reporting progress and never "
+                    "finished. The worker likely crashed or was restarted "
+                    "mid-run."
                 ),
             )
         except Exception:
@@ -477,31 +506,70 @@ def reap_stale_workflow_runs_task(self) -> None:
                 "start_time": {"$lt": queued_cutoff},
             },
         ]},
-        {"workflow": 1, "session_id": 1, "status": 1, "last_progress_at": 1},
+        {"workflow": 1, "session_id": 1, "status": 1, "last_progress_at": 1,
+         "start_time": 1},
     ))
 
     # Sweep 3: approved at the gate, never resumed. The reject and expire
     # paths update the run through approval_service, so "approved" is the only
     # decision that strands a run at pending_approval when the resume message
     # is lost. The decision must be old enough that an in-flight resume (or a
-    # backed-off Celery retry of one) cannot still be coming.
-    for run in db.workflow_result.find(
+    # backed-off Celery retry of one) cannot still be coming. One batched
+    # lookup, not a find_one per run: expired-undecided reviews deliberately
+    # leave their run parked forever (TIMEOUT_NONE), so the pending_approval
+    # set grows monotonically with tenant age and would otherwise cost N
+    # round trips per tick.
+    parked = list(db.workflow_result.find(
         {"status": "pending_approval"},
-        {"workflow": 1, "session_id": 1, "approval_request_id": 1, "status": 1},
-    ):
-        approval = db.approval_request.find_one(
-            {"uuid": run.get("approval_request_id")},
-            {"status": 1, "decision_at": 1},
+        {"workflow": 1, "session_id": 1, "approval_request_id": 1, "status": 1,
+         "start_time": 1},
+    ))
+    if parked:
+        approved_old = {
+            a["uuid"]
+            for a in db.approval_request.find(
+                {
+                    "uuid": {"$in": [
+                        r.get("approval_request_id") for r in parked
+                        if r.get("approval_request_id")
+                    ]},
+                    "status": "approved",
+                    "decision_at": {"$lt": progress_cutoff},
+                },
+                {"uuid": 1},
+            )
+        }
+        stuck.extend(
+            r for r in parked if r.get("approval_request_id") in approved_old
         )
-        if not approval or approval.get("status") != "approved":
-            continue
-        decided_at = approval.get("decision_at")
-        if decided_at is None:
-            continue
-        if decided_at.tzinfo is None:  # pymongo returns naive UTC by default
-            decided_at = decided_at.replace(tzinfo=datetime.timezone.utc)
-        if decided_at < progress_cutoff:
-            stuck.append(run)
+
+    # A worker-crash batch reaps many runs of the same workflow; fetch each
+    # workflow once, and only the two fields the notifier reads (a workflow
+    # document drags validation plans and configs that can run to hundreds
+    # of KB).
+    workflow_cache: dict = {}
+
+    def _workflow_doc(raw_id) -> dict:
+        if isinstance(raw_id, str):
+            # Rows migrated from the Flask era stored the id as a string; an
+            # unconverted lookup finds nothing and the failure notified nobody.
+            from bson import ObjectId
+
+            try:
+                raw_id = ObjectId(raw_id)
+            except Exception:
+                return {}
+        if raw_id not in workflow_cache:
+            workflow_cache[raw_id] = db.workflow.find_one(
+                {"_id": raw_id}, {"name": 1, "user_id": 1},
+            ) or {}
+        return workflow_cache[raw_id]
+
+    # A mature install's first sweep finds every run stranded before this
+    # reaper existed — months of history. Flip them (housekeeping), but only
+    # ring the bell for recent ones: thirty unread "Workflow failed" bells
+    # about runs from last spring is noise, not disclosure.
+    notify_floor = now - datetime.timedelta(days=7)
 
     reaped = 0
     for run in stuck:
@@ -559,12 +627,17 @@ def reap_stale_workflow_runs_task(self) -> None:
                     {"$or": rail_or}, {"user_id": 1},
                 )
 
+            started = run.get("start_time")
+            if started is not None and started.tzinfo is None:
+                started = started.replace(tzinfo=datetime.timezone.utc)
+            if started is not None and started < notify_floor:
+                continue
+
             from app.services.failure_notifications import notify_workflow_failed
 
-            workflow_doc = db.workflow.find_one({"_id": run.get("workflow")}) or {}
             notify_workflow_failed(
                 db,
-                workflow_doc=workflow_doc,
+                workflow_doc=_workflow_doc(run.get("workflow")),
                 error=error_msg,
                 user_id=(rail or {}).get("user_id"),
             )

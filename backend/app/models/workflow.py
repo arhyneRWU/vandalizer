@@ -115,6 +115,11 @@ class WorkflowResult(Document):
     # None means no worker has started the run yet — or the row predates the
     # field, which the reaper's never-started sweep treats gently.
     last_progress_at: Optional[datetime.datetime] = None
+    # Incremented at every task pickup. Bounds the poison-message loop that
+    # acks_late + reject_on_worker_lost makes possible (a run that OOM-kills
+    # its worker is requeued with a fresh retry counter each time); see
+    # MAX_DELIVERY_ATTEMPTS in workflow_tasks.
+    delivery_attempts: int = 0
     error: Optional[str] = None
     # Machine-readable error payload set by the runner when the failure has a
     # suggested user action (e.g. oversize-context with a convert-to-KB hint).
