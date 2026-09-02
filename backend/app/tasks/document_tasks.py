@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from app.celery_app import celery_app
+from app.services.document_readers import DocumentReadError
 from app.services.ocr_client import OcrUnavailableError
 from app.tasks import TRANSIENT_EXCEPTIONS, get_sync_db
 
@@ -487,6 +488,30 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
             "retry once the service is back, or contact your administrator if "
             "it keeps happening."
         )
+        db.smart_document.update_one(
+            {"uuid": document_uuid},
+            {
+                "$set": {
+                    "raw_text": "",
+                    "processing": False,
+                    "extraction_nonletter_ratio": None,
+                    "ingestion_warnings": [],
+                    "task_status": "error",
+                    "error_message": message,
+                }
+            },
+        )
+        _notify_document_processing_failed(db, document_uuid, message)
+        return ""
+
+    except DocumentReadError as e:
+        # Expected, user-actionable refusal (a binary upload, an unreadable
+        # file) — the same error-state writes as the generic handler below,
+        # but logged at warning without a traceback: a user dragging a folder
+        # of .zip/.exe files into the uploader must not page Sentry once per
+        # file, the way FileNotFoundError and OCR outages already don't.
+        logger.warning("Document %s is not readable text: %s", document_uuid, e)
+        message = str(e)
         db.smart_document.update_one(
             {"uuid": document_uuid},
             {
