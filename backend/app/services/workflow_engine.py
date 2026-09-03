@@ -2372,7 +2372,7 @@ class WorkflowEngine:
         return build_step_output_keys(self.get_topological_order())
 
     def execute(self, workflow_result_updater=None, start_index=0, initial_output=None,
-                should_cancel=None):
+                should_cancel=None, check_budget=None):
         """Execute workflow. Returns (final_output, step_data_list).
 
         Args:
@@ -2383,6 +2383,13 @@ class WorkflowEngine:
                 When it returns True the run is aborted with WorkflowCancelled.
                 This is the cooperative backstop for the between-steps case; an
                 in-flight step is interrupted out-of-band via Celery revocation.
+            check_budget: Optional callable() -> None, polled before each step.
+                Raises (e.g. TrialBudgetExceededError) to stop the run at a
+                step boundary. Without it the budget gate ran only before the
+                run started, so a run beginning with one token of headroom
+                executed every step and overran arbitrarily (#808). Raising
+                between steps keeps the stop honest — no truncated step output
+                is ever presented as complete.
         """
         data = []
         nodes = self.get_topological_order()
@@ -2398,6 +2405,11 @@ class WorkflowEngine:
             # user requested a stop while we were between steps.
             if should_cancel is not None and should_cancel():
                 raise WorkflowCancelled()
+
+            # Budget gate, re-applied at every step boundary (skipped for the
+            # first step this pass runs — entry-time checks already covered it).
+            if check_budget is not None and idx > start_index:
+                check_budget()
 
             if workflow_result_updater:
                 workflow_result_updater({
