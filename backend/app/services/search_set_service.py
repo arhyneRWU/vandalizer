@@ -563,6 +563,8 @@ def _flag_no_extractable_text(
     """
     if document_warnings is None:
         return
+    from app.services import document_service
+
     entry = next(
         (w for w in document_warnings if w.get("document_uuid") == doc_uuid),
         None,
@@ -575,6 +577,7 @@ def _flag_no_extractable_text(
         "document_uuid": doc_uuid,
         "title": title or doc_uuid,
         "codes": ["no_extractable_text"],
+        "text": document_service.warning_text_for_codes(["no_extractable_text"]),
     })
 
 
@@ -657,6 +660,7 @@ async def run_extraction_sync(
                     "document_uuid": doc_uuid,
                     "title": doc.title or doc_uuid,
                     "codes": codes,
+                    "text": document_service.warning_text_for_codes(codes),
                 })
         doc_metadata.append({
             "uuid": doc_uuid,

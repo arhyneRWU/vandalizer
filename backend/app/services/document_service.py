@@ -35,6 +35,17 @@ def ingestion_warnings(doc: SmartDocument) -> list[str]:
     ]
 
 
+def warning_text_for_codes(codes: list[str]) -> str:
+    """The warnings as one readable clause, from codes alone.
+
+    Same registry as ``ingestion_warning_text``, for callers holding codes
+    rather than a document (extraction runs record per-document warnings
+    that never live on the document itself).
+    """
+    labels = [INGESTION_WARNING_LABELS[c] for c in codes if c in INGESTION_WARNING_LABELS]
+    return "; ".join(labels)
+
+
 def ingestion_warning_text(doc: SmartDocument) -> str:
     """The warnings as one readable clause, or "" when there are none."""
     labels = [INGESTION_WARNING_LABELS[c] for c in ingestion_warnings(doc)]

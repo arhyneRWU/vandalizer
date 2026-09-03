@@ -1,7 +1,7 @@
 import React, { Fragment, useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ExtractionTutorial } from './ExtractionTutorial'
-import { X, Pencil, Loader2, Copy, Trash2, GripVertical, Plus, ChevronDown, ChevronRight, ChevronUp, Play, TrendingUp, Sparkles, FileText, AlertTriangle, Eye, Shield, ShieldCheck, Download, Check, PenTool, Wrench, ClipboardCheck, SlidersHorizontal, Clock, Link2, FolderInput } from 'lucide-react'
+import { X, Pencil, Loader2, Copy, Trash2, GripVertical, Plus, ChevronDown, ChevronRight, ChevronUp, Play, TrendingUp, Sparkles, FileText, AlertTriangle, AlertCircle, Eye, Shield, ShieldCheck, Download, Check, PenTool, Wrench, ClipboardCheck, SlidersHorizontal, Clock, Link2, FolderInput } from 'lucide-react'
 import { useWorkspace } from '../../contexts/WorkspaceContext'
 import { useToast } from '../../contexts/ToastContext'
 import { useAuth } from '../../hooks/useAuth'
@@ -34,7 +34,7 @@ import {
 } from '../../api/extractions'
 import { RunHistoryTab } from './RunHistoryTab'
 import { ApiError } from '../../api/client'
-import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap, CrossFieldRunReport, FieldSupportState } from '../../api/extractions'
+import type { ValidationV2Result, QualityHistoryRun, ValidationSource, ExtractionRunHistoryEntry, ExtractionFieldSource, ExtractionSourceMap, CrossFieldRunReport, FieldSupportState, DocumentWarning } from '../../api/extractions'
 import { fieldSupportState } from '../../api/extractions'
 import { DocumentPickerDialog } from '../shared/DocumentPickerDialog'
 import { VerificationSubmitModal } from '../library/VerificationSubmitModal'
@@ -130,6 +130,12 @@ export function ExtractionEditorPanel() {
   // user is actually looking at — a single merged report over a multi-document
   // run describes the last document and nothing else.
   const [crossFieldSets, setCrossFieldSets] = useState<(CrossFieldRunReport | null)[]>([])
+  // Per-document caveats about the INPUT this run read (partial OCR, sparse
+  // or garbled text, a document that contributed nothing). Computed, stored
+  // and API-served since partial-OCR disclosure shipped, but never rendered —
+  // an extraction over a half-converted package looked identical to one over
+  // a clean document (#803).
+  const [documentWarnings, setDocumentWarnings] = useState<DocumentWarning[]>([])
 
   const results = resultSets[activeResultIdx] ?? {}
   const resultSources = resultSourceSets[activeResultIdx] ?? {}
@@ -272,6 +278,7 @@ export function ExtractionEditorPanel() {
     bumpActivitySignal()
     // A previous run's rule outcomes must not sit under a new run's values.
     setCrossFieldSets([])
+    setDocumentWarnings([])
     // Snapshot doc names at run time so exports stay correct if the user
     // changes selection afterward.
     const runDocNames: string[] = combinedContext && docUuids.length > 1
@@ -310,6 +317,7 @@ export function ExtractionEditorPanel() {
       setResultSourceSets(sets.length > 0 ? srcSets : [{}])
       setResultDocNames(finalSets.map((_, i) => runDocNames[i] ?? `Result ${i + 1}`))
       setCrossFieldSets(resp.cross_field_sets ?? (resp.cross_field ? [resp.cross_field] : []))
+      setDocumentWarnings(resp.document_warnings ?? [])
       setActiveResultIdx(0)
     } catch (err) {
       if (err instanceof ApiError && err.status === 0) {
@@ -892,6 +900,7 @@ export function ExtractionEditorPanel() {
           onValueClick={handleValueClick}
           sources={resultSources}
           crossField={crossFieldSets[activeResultIdx] ?? null}
+          documentWarnings={documentWarnings}
           resultSets={resultSets}
           activeResultIdx={activeResultIdx}
           onSetActiveResultIdx={setActiveResultIdx}
@@ -1320,6 +1329,43 @@ const SUPPORT_BADGES: Record<
   },
 }
 
+/** Caveats about the documents a run READ — distinct from the cross-field
+ * strip, which judges the values it produced. A run over a package whose OCR
+ * gave up at page 30 used to look exactly like a run over a clean document.
+ * The words come from the backend so the code→text map has one owner. */
+export function DocumentWarningsStrip({ warnings }: { warnings: DocumentWarning[] }) {
+  if (!warnings.length) return null
+  return (
+    <div
+      role="status"
+      style={{
+        display: 'flex', gap: 8, alignItems: 'flex-start',
+        padding: '8px 10px', margin: '8px 0',
+        background: '#fffbeb', border: '1px solid #fcd34d',
+        borderRadius: 6, fontSize: 13, color: '#78350f',
+      }}
+    >
+      <AlertCircle className="h-4 w-4" style={{ flexShrink: 0, marginTop: 1 }} />
+      <div style={{ minWidth: 0 }}>
+        <strong>
+          {warnings.length === 1
+            ? 'One document was not read in full.'
+            : `${warnings.length} documents were not read in full.`}
+        </strong>{' '}
+        Values below may be missing or wrong because of what the extraction could not see.
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+          {warnings.map(w => (
+            <li key={w.document_uuid}>
+              <span style={{ fontWeight: 500 }}>{w.title}</span>
+              {w.text ? ` — ${w.text}` : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 function DesignTab({
   items,
   itemsLoading,
@@ -1339,6 +1385,7 @@ function DesignTab({
   onValueClick,
   sources,
   crossField,
+  documentWarnings,
   resultSets,
   activeResultIdx,
   onSetActiveResultIdx,
@@ -1361,6 +1408,7 @@ function DesignTab({
   onValueClick: (field: string, value: string) => void
   sources: ExtractionSourceMap
   crossField: CrossFieldRunReport | null
+  documentWarnings: DocumentWarning[]
   resultSets: Record<string, string>[]
   activeResultIdx: number
   onSetActiveResultIdx: (idx: number) => void
@@ -1574,6 +1622,8 @@ function DesignTab({
           <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }`}</style>
         </div>
       )}
+
+      <DocumentWarningsStrip warnings={documentWarnings} />
 
       <CrossFieldRunStrip report={crossField} />
 

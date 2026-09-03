@@ -270,10 +270,14 @@ class TestNoExtractableTextFlagging:
         warnings: list[dict] = []
         _flag_no_extractable_text(warnings, "d1", "Award letter")
         _flag_no_extractable_text(warnings, "d1", "Award letter")
-        assert warnings == [{
-            "document_uuid": "d1", "title": "Award letter",
-            "codes": ["no_extractable_text"],
-        }]
+        assert len(warnings) == 1
+        entry = warnings[0]
+        assert entry["document_uuid"] == "d1"
+        assert entry["title"] == "Award letter"
+        assert entry["codes"] == ["no_extractable_text"]
+        # The human sentence rides along so the frontend never needs its own
+        # copy of the code→text map (#803).
+        assert "could not be read" in entry["text"]
 
     def test_merges_into_an_existing_documents_entry(self):
         from app.services.search_set_service import _flag_no_extractable_text
