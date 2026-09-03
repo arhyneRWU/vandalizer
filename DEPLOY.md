@@ -118,18 +118,32 @@ built only from uploaded documents, or an air-gapped install — is carrying tha
 surface for nothing.
 
 ```bash
-INSTALL_BROWSER=false ./setup.sh --redeploy   # or: docker compose build
+INSTALL_BROWSER=false ./setup.sh --redeploy
+INSTALL_BROWSER=false docker compose build     # or, building directly
 ```
 
 Set it in the environment rather than passing `--build-arg`: two services (`api`
 and `celery`) build from the same Dockerfile, and they must not disagree about
-whether a browser is there to launch. Putting `INSTALL_BROWSER=false` in the
-repository-root `.env` makes it stick across redeploys.
+whether a browser is there to launch. To make it stick across redeploys, put
+`INSTALL_BROWSER=false` in **`./.env` at the repository root** — the file
+`setup.sh` writes `WEB_PORT` into, not `backend/.env`. Only the root file feeds
+Compose's `${...}` substitution; `backend/.env` is the container's runtime
+environment and setting it there has no effect on the build. The value must be
+exactly `true` or `false`; any other spelling fails the build with a message
+rather than producing an image whose contents and configuration disagree.
 
-The setting also becomes the image's `WEB_FETCHER_BROWSER_ENABLED` default, so a
-browserless build does not try to launch a browser it does not have. Web fetches
-still work; a page that needs rendering returns its static text instead. The
-default is `true`, so an existing build is unchanged unless you opt out.
+**This applies to the build path only.** The production Compose overlay pulls
+published images from GHCR, and the release workflow builds those with the
+browser included, so an image-based install or upgrade always carries it
+regardless of this setting.
+
+What changes without the browser: a page that returns thin content keeps
+whatever static text it has, but a page that blocks a plain HTTP request now
+fails the fetch outright instead of getting a second attempt through a real
+browser. If any of your knowledge-base URL sources sit behind a bot challenge
+(Cloudflare, Akamai — common on agency sites), those sources will start failing
+to refresh. The default is `true`, so an existing build is unchanged unless you
+opt out.
 
 ### Local LLM & OCR Hosting (Optional)
 
