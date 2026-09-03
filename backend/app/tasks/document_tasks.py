@@ -38,30 +38,39 @@ def _find_project_for_folder(db, folder_uuid: str | None) -> dict | None:
     return db.project.find_one({"root_folder_uuid": {"$in": ancestors}})
 
 
-def _ingest_into_project_kb(db, dm, doc: dict, text: str) -> None:
+def _ingest_into_project_kb(db, dm, doc: dict, text: str) -> bool:
     """Best-effort: add a freshly-ingested document to its Project's implicit KB.
 
     Walks the document's folder ancestry to find the owning project, then mirrors
     the chunks into the project's KB collection (the same path KBs use) so
     "chat with this project" sees the file. Sync — runs inside the Celery task.
+
+    Returns True when the document is (or already was) in the project's KB,
+    False when the mirror failed — a failure is logged and belled here, never
+    raised, so callers only need the return value for honest counting.
     """
     project = _find_project_for_folder(db, doc.get("folder"))
     if not project or not project.get("kb_uuid"):
-        return
+        return True
 
     try:
         _mirror_into_project_kb(db, dm, doc, project, text)
+        return True
     except Exception as e:
         # Best-effort by design, but never silently: the user just watched
         # this file land in the project, and "chat with this project" cannot
-        # see it. Callers keep their own guards; the bell rides here so every
-        # entry point (fresh ingest, file move, folder move) discloses.
+        # see it. Callers keep their own guards (project RESOLUTION above can
+        # still raise); the bell rides here so every entry point (fresh
+        # ingest, file move, folder move) discloses. Returns False so the
+        # folder-move task's synced count cannot report failed mirrors as
+        # successes.
         logger.exception(
             "Failed to mirror %s into project %s KB", doc.get("uuid"), project.get("uuid"),
         )
         from app.services.failure_notifications import notify_project_kb_sync_failed
 
         notify_project_kb_sync_failed(db, doc=doc, project=project, error=e)
+        return False
 
 
 def _mirror_into_project_kb(db, dm, doc: dict, project: dict, text: str) -> None:
@@ -253,8 +262,10 @@ def sync_project_kb_on_folder_move(self, folder_uuid: str, old_parent_id: str | 
             text = doc.get("raw_text", "") or ""
             if text:
                 try:
-                    _ingest_into_project_kb(db, dm, doc, text)
-                    synced += 1
+                    # Counted only on success: a Chroma outage mirroring zero
+                    # of 40 documents must not log "re-synced 40".
+                    if _ingest_into_project_kb(db, dm, doc, text):
+                        synced += 1
                 except Exception:
                     logger.exception(
                         "Failed to add %s to new project KB on folder move",
@@ -730,24 +741,39 @@ def _check_folder_watch_automations(db, document_uuid: str) -> None:
         if not action_id:
             continue
 
-        # Check file type filters from trigger_config
-        trigger_config = auto.get("trigger_config") or {}
-        allowed_types = trigger_config.get("file_types", [])
-        if allowed_types and doc.get("extension") not in allowed_types:
-            logger.info(
-                "Skipping automation %s: doc type '%s' not in %s",
-                auto.get("name"), doc.get("extension"), allowed_types,
+        # Filters run inside their own per-automation guard: a malformed
+        # trigger_config (e.g. exclude_patterns stored as a list) used to
+        # raise BEFORE the dispatch try below, aborting every remaining
+        # automation for this document via the caller's silent catch-all.
+        try:
+            trigger_config = auto.get("trigger_config") or {}
+            allowed_types = trigger_config.get("file_types", [])
+            if allowed_types and doc.get("extension") not in allowed_types:
+                logger.info(
+                    "Skipping automation %s: doc type '%s' not in %s",
+                    auto.get("name"), doc.get("extension"), allowed_types,
+                )
+                continue
+
+            exclude_patterns = trigger_config.get("exclude_patterns", "")
+            if isinstance(exclude_patterns, list):
+                # Tolerated elsewhere (automation_run_now); normalize here too.
+                exclude_patterns = ",".join(str(p) for p in exclude_patterns)
+            if exclude_patterns:
+                import fnmatch
+                patterns = [p.strip() for p in exclude_patterns.split(",") if p.strip()]
+                if any(fnmatch.fnmatch(doc.get("title", ""), pat) for pat in patterns):
+                    logger.info("Skipping automation %s: doc matches exclude pattern", auto.get("name"))
+                    continue
+        except Exception as e:
+            logger.error("Automation '%s' has a malformed trigger_config: %s", auto.get("name"), e)
+            from app.services.failure_notifications import notify_automation_failed
+
+            notify_automation_failed(
+                db, automation=auto, error=e,
+                detail="This automation's trigger configuration is malformed and it was skipped.",
             )
             continue
-
-        # Check exclude patterns
-        exclude_patterns = trigger_config.get("exclude_patterns", "")
-        if exclude_patterns:
-            import fnmatch
-            patterns = [p.strip() for p in exclude_patterns.split(",") if p.strip()]
-            if any(fnmatch.fnmatch(doc.get("title", ""), pat) for pat in patterns):
-                logger.info("Skipping automation %s: doc matches exclude pattern", auto.get("name"))
-                continue
 
         if action_type == "workflow":
             # Create a pending WorkflowTriggerEvent — the beat task
@@ -759,7 +785,16 @@ def _check_folder_watch_automations(db, document_uuid: str) -> None:
             try:
                 workflow_doc = db.workflow.find_one({"_id": ObjectId(action_id)})
                 if not workflow_doc:
+                    # The workflow this automation runs was deleted; without a
+                    # bell the automation shows enabled forever and never fires.
                     logger.warning("Workflow %s not found for automation '%s'", action_id, auto.get("name"))
+                    from app.services.failure_notifications import notify_automation_failed
+
+                    notify_automation_failed(
+                        db, automation=auto,
+                        error="the workflow this automation runs no longer exists",
+                        detail="Disable the automation, or point it at an existing workflow.",
+                    )
                     continue
 
                 from app.services.passive_triggers import create_folder_watch_trigger
@@ -1036,18 +1071,11 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
         # exhausted — the document is saved, but search/chat cannot see it.
         from app.services.failure_notifications import (
             is_final_attempt,
-            notify_document_failed,
+            notify_document_not_searchable,
         )
 
         if is_final_attempt(self, e):
-            notify_document_failed(
-                db,
-                doc=doc,
-                error=(
-                    "The document was saved, but search indexing failed — "
-                    f"chat and knowledge search will not see it. {str(e)[:200]}"
-                ),
-            )
+            notify_document_not_searchable(db, doc=doc, error=e)
         raise
 
     _record_ingestion_result(

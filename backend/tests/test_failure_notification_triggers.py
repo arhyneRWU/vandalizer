@@ -381,7 +381,7 @@ class TestSemanticIngestionFailure:
         db.smart_document.find_one.return_value = doc
         with patch.object(dt, "get_sync_db", return_value=db), \
              patch("app.services.document_manager.DocumentManager") as dm_cls, \
-             patch("app.services.failure_notifications.notify_document_failed") as notify:
+             patch("app.services.failure_notifications.notify_document_not_searchable") as notify:
             dm_cls.return_value.add_document.side_effect = exc
             try:
                 dt.perform_semantic_ingestion("text", "d1", "u1")
@@ -392,7 +392,7 @@ class TestSemanticIngestionFailure:
     def test_owner_is_belled_on_a_final_failure(self):
         notify = self._run(RuntimeError("chroma down"))
         notify.assert_called_once()
-        assert "search indexing failed" in notify.call_args.kwargs["error"]
+        assert notify.call_args.kwargs["doc"]["uuid"] == "d1"
 
     def test_mid_retry_transient_failure_rings_nothing(self):
         notify = self._run(ConnectionError("chroma blip"))

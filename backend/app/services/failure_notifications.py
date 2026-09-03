@@ -175,6 +175,41 @@ def notify_document_failed(db, *, doc: dict | None, error: Any) -> None:
         logger.exception("Failed to emit document failure notification")
 
 
+def notify_document_not_searchable(db, *, doc: dict | None, error: Any) -> None:
+    """Notify the owner that a document was SAVED but search indexing failed.
+
+    Deliberately not notify_document_failed: that title ("failed to process")
+    and per-user coalesce key would merge this with genuine processing
+    failures and contradict the body — the document exists and is readable,
+    chat/knowledge search just cannot see it.
+    """
+    try:
+        doc = doc or {}
+        recipient = doc.get("user_id")
+        if not recipient:
+            return
+        title_doc = doc.get("title") or doc.get("uuid") or "A document"
+
+        create_notification_sync(
+            db,
+            user_id=recipient,
+            kind="document_unsearchable",
+            title="Document saved, but not searchable",
+            body=(
+                f"\u201c{title_doc}\u201d was saved, but search indexing failed — "
+                f"chat and knowledge search will not see it. {_snippet(error)}"
+            ),
+            link="/?mode=files",
+            item_kind="document",
+            item_id=doc.get("uuid"),
+            item_name=title_doc,
+            coalesce_key=f"document_unsearchable:{recipient}",
+            group_title="{count} documents saved but not searchable",
+        )
+    except Exception:
+        logger.exception("Failed to emit document-unsearchable notification")
+
+
 def notify_kb_source_failed(db, *, kb_uuid: str, source_name: str | None, error: Any) -> None:
     """Notify the KB owner that a source could not be ingested.
 
@@ -196,7 +231,10 @@ def notify_kb_source_failed(db, *, kb_uuid: str, source_name: str | None, error:
             kind="kb_source_failed",
             title=f"Knowledge base source failed: {kb_title}",
             body=f"\u201c{name}\u201d could not be ingested. {_snippet(error)}",
-            link=f"/?mode=knowledge&kb={kb_uuid}",
+            # /?kb= would be force-routed into chat mode by the frontend's
+            # kb-param handler; plain mode=knowledge lands on the knowledge
+            # screen where the errored source row lives.
+            link="/?mode=knowledge",
             item_kind="knowledge_base",
             item_id=kb_uuid,
             item_name=kb_title,

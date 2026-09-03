@@ -267,7 +267,9 @@ class TestNotifyKbSourceFailed:
         assert kwargs["kind"] == "kb_source_failed"
         assert "PAPPG" in kwargs["title"]
         assert "nsf.gov/pappg" in kwargs["body"]
-        assert kwargs["link"] == "/?mode=knowledge&kb=kb-1"
+        # NOT /?kb=… — the frontend's kb-param handler force-routes that
+        # into chat mode; plain mode=knowledge lands on the knowledge screen.
+        assert kwargs["link"] == "/?mode=knowledge"
         assert kwargs["coalesce_key"] == "kb_source_failed:kb-1"
 
     def test_missing_kb_or_owner_means_no_notification(self):
