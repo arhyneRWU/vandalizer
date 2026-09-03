@@ -8,6 +8,7 @@ import logging
 
 from app.celery_app import celery_app
 from app.services.form_fill import DOC_META_TASKS, document_meta
+from app.exceptions import TrialSpendBlockedError
 from app.tasks import TRANSIENT_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
@@ -1164,6 +1165,14 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         except Exception:
             return False
 
+    def check_budget() -> None:
+        # The same gate metered() applies at run entry, re-applied between
+        # steps: a trial account that crosses its budget mid-run stops at the
+        # next step boundary instead of overrunning arbitrarily (#808).
+        from app.services.trial_budget import check_sync
+
+        check_sync(user_id)
+
     try:
         from app.services.metering import metered
         with metered(
@@ -1177,6 +1186,7 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 start_index=start_index,
                 initial_output=initial_output,
                 should_cancel=should_cancel,
+                check_budget=check_budget,
             )
         if start_index:
             # execute() reports only the steps this pass ran. Without the
@@ -1214,6 +1224,20 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         # no re-raise, so it neither retries nor lands in Sentry as a crash.
         logger.warning("Workflow %s failed: %s", workflow_id, e)
         _mark_workflow_failed(db, workflow_result_id, activity_id, str(e))
+        return {"status": "error", "result_id": workflow_result_id}
+    except TrialSpendBlockedError as e:
+        # The between-steps budget gate tripped (#808): the trial budget ran
+        # out mid-run. A clean, honest stop at a step boundary — completed
+        # steps are preserved in steps_output, nothing truncated is presented
+        # as complete, and retrying cannot help until the budget changes.
+        logger.warning(
+            "Workflow %s stopped at a step boundary — trial budget exhausted",
+            workflow_id,
+        )
+        _mark_workflow_failed(
+            db, workflow_result_id, activity_id, str(e),
+            error_payload={"code": "budget_exhausted"},
+        )
         return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:
         logger.error("Workflow execution failed for %s: %s", workflow_id, e)
@@ -1658,6 +1682,12 @@ def resume_workflow_after_approval(self, approval_uuid):
             workflow_id, self.request.retries, self.max_retries, resume_index,
         )
 
+    def check_budget() -> None:
+        # Same mid-run budget gate as execute_workflow_task (#808).
+        from app.services.trial_budget import check_sync
+
+        check_sync(user_id)
+
     try:
         from app.services.metering import metered
         with metered(
@@ -1670,6 +1700,7 @@ def resume_workflow_after_approval(self, approval_uuid):
                 workflow_result_updater=update_progress,
                 start_index=resume_index,
                 initial_output=resume_output,
+                check_budget=check_budget,
             )
         # execute() reports only the steps this pass ran. Prepend the ones
         # earlier passes completed, replayed from the persisted steps_output,
@@ -1684,6 +1715,18 @@ def resume_workflow_after_approval(self, approval_uuid):
         db.workflow_result.update_one(
             {"_id": ObjectId(workflow_result_id)},
             {"$set": {"status": "error", "error": str(e)}},
+        )
+        return {"status": "error", "result_id": workflow_result_id}
+    except TrialSpendBlockedError as e:
+        # Same between-steps budget stop as execute_workflow_task (#808).
+        logger.warning(
+            "Resumed workflow %s stopped at a step boundary — trial budget exhausted",
+            workflow_id,
+        )
+        _mark_workflow_failed(
+            db, workflow_result_id,
+            str(_act["_id"]) if _act else None, str(e),
+            error_payload={"code": "budget_exhausted"},
         )
         return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:

@@ -1731,3 +1731,86 @@ class TestBuildRefusalFailsTheRun:
         ]
         assert error_writes, "run was not marked failed"
         assert "MysteryTask" in error_writes[0]["error"]
+
+
+class TestMidRunBudgetStop:
+    """#808: a TrialSpendBlockedError raised by the between-steps gate must
+    mark the run failed with the budget_exhausted payload — a clean stop, not
+    a retried crash."""
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_budget_stop_marks_run_error_with_payload(self, mock_build, mock_get_db):
+        from app.exceptions import TrialBudgetExceededError
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "test"}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_get_db.return_value = db
+
+        mock_engine = MagicMock()
+        mock_engine.execute.side_effect = TrialBudgetExceededError(
+            "Your trial's token budget is exhausted.",
+        )
+        mock_engine.usage = MagicMock(tokens_in=10, tokens_out=5)
+        mock_build.return_value = mock_engine
+
+        result = execute_workflow_task(
+            workflow_result_id=str(result_id),
+            workflow_id=str(wf_id),
+            trigger_step_data={"doc_uuids": ["uuid1"]},
+            model="gpt-4o",
+        )
+
+        # Clean stop, no re-raise (no Celery retry of a budget error).
+        assert result["status"] == "error"
+        error_writes = [
+            c[0][1]["$set"] for c in db.workflow_result.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("status") == "error"
+        ]
+        assert error_writes
+        assert error_writes[0].get("error_payload", {}).get("code") == "budget_exhausted"
+        assert "budget" in error_writes[0]["error"]
+
+    def test_engine_receives_the_budget_hook(self):
+        """The wiring itself: execute() must be handed check_budget."""
+        from unittest.mock import MagicMock, patch
+
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "test"}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_engine = MagicMock()
+        mock_engine.execute.return_value = ("out", [{"name": "Doc", "output": ["uuid1"]}])
+        mock_engine.usage = MagicMock(tokens_in=1, tokens_out=1)
+
+        with patch("app.tasks.workflow_tasks._get_db", return_value=db), \
+             patch("app.services.workflow_engine.build_workflow_engine", return_value=mock_engine), \
+             patch("app.tasks.quality_tasks.auto_validate_workflow"), \
+             patch("app.tasks.activity_tasks.generate_activity_description_task"):
+            execute_workflow_task(
+                workflow_result_id=str(result_id),
+                workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["uuid1"]},
+                model="gpt-4o",
+            )
+        assert mock_engine.execute.call_args.kwargs.get("check_budget") is not None

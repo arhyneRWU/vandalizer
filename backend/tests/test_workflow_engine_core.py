@@ -1162,3 +1162,55 @@ class TestFallbackRetrySkipsErroredSteps:
         task.data = {"_retry_on_empty": True, "_fallback_model": "other", "model": "m1"}
         node.tasks = [task]
         assert _should_retry_with_fallback(node, {"output": ""}) is True
+
+
+class TestBetweenStepsBudgetGate:
+    """#808: the budget gate ran only before the run started, so a workflow
+    beginning with one token of headroom executed every step and overran
+    arbitrarily. The engine now polls check_budget at step boundaries."""
+
+    def _two_step_engine(self):
+        steps = [
+            {"name": "Document", "data": {"doc_uuids": ["u1"]}, "tasks": []},
+            {"name": "StepA", "data": {}, "tasks": [{"name": "Prompt", "data": {"prompt": "a"}}]},
+            {"name": "StepB", "data": {}, "tasks": [{"name": "Prompt", "data": {"prompt": "b"}}]},
+        ]
+        return build_workflow_engine(steps, model="gpt-4o")
+
+    def test_budget_exception_stops_at_a_step_boundary(self):
+        from unittest.mock import patch
+
+        from app.exceptions import TrialBudgetExceededError
+
+        engine = self._two_step_engine()
+        calls = {"n": 0}
+
+        def check_budget():
+            calls["n"] += 1
+            raise TrialBudgetExceededError("trial budget exhausted")
+
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"), \
+             pytest.raises(TrialBudgetExceededError):
+            engine.execute(check_budget=check_budget)
+        # The gate fired between steps — after the Document step ran, before
+        # a later step spent anything.
+        assert calls["n"] == 1
+
+    def test_gate_is_not_polled_before_the_first_step_of_a_pass(self):
+        """Entry-time checks (metered) already cover the first step; polling
+        again immediately would double-charge the same moment."""
+        from unittest.mock import MagicMock, patch
+
+        engine = self._two_step_engine()
+        check_budget = MagicMock()
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"):
+            engine.execute(check_budget=check_budget)
+        # Three nodes -> polled for the 2nd and 3rd only.
+        assert check_budget.call_count == 2
+
+    def test_no_gate_means_no_calls(self):
+        from unittest.mock import patch
+
+        engine = self._two_step_engine()
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"):
+            engine.execute()  # must not raise without check_budget
