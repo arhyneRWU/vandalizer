@@ -315,3 +315,106 @@ class TestProcessOutputsOnFailedRun:
 
         save.assert_called_once()
         chain.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Delivery failures (#810): a completed run whose outputs never left the
+# building must record and disclose that, not report clean success.
+# ---------------------------------------------------------------------------
+
+
+class TestExtractionOutputDeliveryFailures:
+    def _run(self, *, storage_fails=False, webhook_fails=False):
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        automation = {
+            "_id": ObjectId(), "name": "Nightly extract", "user_id": "owner",
+            "trigger_type": "folder_watch",
+            "output_config": {
+                "storage": {"enabled": True},
+                "webhooks": [{"url": "https://example.org/hook"}],
+            },
+        }
+        with patch(
+            "app.services.output_handlers.save_extraction_results_to_folder",
+            side_effect=RuntimeError("folder gone") if storage_fails else MagicMock(),
+        ), patch(
+            "app.services.output_handlers.call_webhook",
+            side_effect=RuntimeError("410 Gone") if webhook_fails else MagicMock(),
+        ), patch(
+            "app.services.output_handlers.should_send_notification",
+            return_value=False,
+        ), patch(
+            "app.services.failure_notifications.notify_automation_failed"
+        ) as notify:
+            dt._process_extraction_outputs(db, automation, {"F": "v"})
+        return notify
+
+    def test_all_outputs_delivering_rings_nothing(self):
+        notify = self._run()
+        notify.assert_not_called()
+
+    def test_failed_outputs_are_collected_and_belled_once(self):
+        notify = self._run(storage_fails=True, webhook_fails=True)
+        notify.assert_called_once()
+        kwargs = notify.call_args.kwargs
+        assert "2 configured output(s)" in kwargs["detail"]
+        assert "folder gone" in kwargs["error"]
+        assert "410 Gone" in kwargs["error"]
+
+    def test_one_failed_output_does_not_block_the_others(self):
+        """Storage failing must not stop the webhook attempt (and vice versa) —
+        collection, not early exit."""
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        automation = {
+            "_id": ObjectId(), "name": "A", "user_id": "owner",
+            "output_config": {
+                "storage": {"enabled": True},
+                "webhooks": [{"url": "https://example.org/hook"}],
+            },
+        }
+        webhook = MagicMock()
+        with patch(
+            "app.services.output_handlers.save_extraction_results_to_folder",
+            side_effect=RuntimeError("boom"),
+        ), patch("app.services.output_handlers.call_webhook", webhook), \
+             patch("app.services.output_handlers.should_send_notification", return_value=False), \
+             patch("app.services.failure_notifications.notify_automation_failed"):
+            dt._process_extraction_outputs(db, automation, {"F": "v"})
+        webhook.assert_called_once()
+
+
+class TestNotifyDeliveryFailed:
+    def test_emitter_contract(self):
+        from app.services.failure_notifications import notify_delivery_failed
+
+        db = MagicMock()
+        workflow_doc = {"_id": ObjectId(), "name": "WF", "user_id": "owner"}
+        with patch(
+            "app.services.failure_notifications.create_notification_sync"
+        ) as create:
+            notify_delivery_failed(
+                db, workflow_doc=workflow_doc,
+                detail="The output could not be saved", user_id="runner",
+            )
+        kwargs = create.call_args.kwargs
+        assert kwargs["user_id"] == "runner"  # launcher wins over owner
+        assert kwargs["kind"] == "delivery_failed"
+        assert "Output not delivered" in kwargs["title"]
+        assert "could not be saved" in kwargs["body"]
+
+    def test_falls_back_to_the_workflow_owner(self):
+        from app.services.failure_notifications import notify_delivery_failed
+
+        db = MagicMock()
+        with patch(
+            "app.services.failure_notifications.create_notification_sync"
+        ) as create:
+            notify_delivery_failed(
+                db, workflow_doc={"_id": ObjectId(), "name": "W", "user_id": "owner"},
+                detail="d",
+            )
+        assert create.call_args.kwargs["user_id"] == "owner"

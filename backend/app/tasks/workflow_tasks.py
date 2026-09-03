@@ -1156,13 +1156,25 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     # status to "canceled"; this lets a run that is between steps stop cleanly
     # (a mid-step stop is handled out-of-band by Celery task revocation).
     def should_cancel() -> bool:
-        try:
-            doc = db.workflow_result.find_one(
-                {"_id": ObjectId(workflow_result_id)}, {"status": 1},
-            )
-            return bool(doc and doc.get("status") == "canceled")
-        except Exception:
-            return False
+        # One retry, then a LOUD error: returning False on a swallowed DB
+        # blip made a user's Cancel silently not take — the run kept going
+        # and kept spending. False remains the failure answer (spuriously
+        # canceling healthy runs on a blip is worse), but never quietly.
+        for attempt in (1, 2):
+            try:
+                doc = db.workflow_result.find_one(
+                    {"_id": ObjectId(workflow_result_id)}, {"status": 1},
+                )
+                return bool(doc and doc.get("status") == "canceled")
+            except Exception as e:
+                if attempt == 1:
+                    continue
+                logger.error(
+                    "Cancel check failed for run %s (%s) — a pending Cancel "
+                    "will not take effect this step",
+                    workflow_result_id, e,
+                )
+        return False
 
     try:
         from app.services.metering import metered
@@ -1300,7 +1312,26 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 if fresh_result:
                     save_results_to_folder(fresh_result, storage_cfg)
             except Exception as e:
+                # The run completed and its results are viewable, but the
+                # configured deliverable never left the building — recorded on
+                # the run and belled, not just logged (#810).
                 logger.exception("Failed to save workflow output to library: %s", e)
+                detail = f"The output could not be saved to the library: {str(e)[:300]}"
+                db.workflow_result.update_one(
+                    {"_id": ObjectId(workflow_result_id)},
+                    {"$push": {"delivery_failures": detail}},
+                )
+                from app.services.failure_notifications import notify_delivery_failed
+
+                _act_owner = None
+                if activity_id:
+                    _a = db.activity_event.find_one(
+                        {"_id": ObjectId(activity_id)}, {"user_id": 1},
+                    )
+                    _act_owner = (_a or {}).get("user_id")
+                notify_delivery_failed(
+                    db, workflow_doc=workflow_doc, detail=detail, user_id=_act_owner,
+                )
 
         # Increment workflow execution count
         db.workflow.update_one(
