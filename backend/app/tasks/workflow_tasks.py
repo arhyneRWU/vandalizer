@@ -770,6 +770,19 @@ def _classify_input_documents(db, workflow_doc: dict, doc_uuids: list[str]):
     return ready, processing, failed
 
 
+def _spend_block_code(exc: BaseException) -> str:
+    """Machine-readable code for a TrialSpendBlockedError.
+
+    The family has two members and they need different remedies: an
+    exhausted budget wants a top-up, an unverified account wants the
+    confirmation link. Hardcoding "budget_exhausted" for both offered the
+    wrong fix to the one a click solves.
+    """
+    from app.exceptions import TrialUnverifiedError
+
+    return "email_unverified" if isinstance(exc, TrialUnverifiedError) else "budget_exhausted"
+
+
 def _activity_owner(db, activity_id) -> str | None:
     """The user who launched the run, from its activity-rail entry.
 
@@ -1201,9 +1214,15 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         # The same gate metered() applies at run entry, re-applied between
         # steps: a trial account that crosses its budget mid-run stops at the
         # next step boundary instead of overrunning arbitrarily (#808).
+        # The run's own spend is still in the live MeterScope — its ledger row
+        # is not written until the scope exits — so it is passed explicitly;
+        # without it the gate would re-read an unchanged total every time.
+        from app.services.metering import current_scope
         from app.services.trial_budget import check_sync
 
-        check_sync(user_id)
+        scope = current_scope()
+        in_flight = (scope.tokens_in + scope.tokens_out) if scope else 0
+        check_sync(user_id, extra_used=in_flight)
 
     try:
         from app.services.metering import metered
@@ -1268,7 +1287,7 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
         )
         _mark_workflow_failed(
             db, workflow_result_id, activity_id, str(e),
-            error_payload={"code": "budget_exhausted"},
+            error_payload={"code": _spend_block_code(e)},
         )
         return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:
@@ -1739,10 +1758,14 @@ def resume_workflow_after_approval(self, approval_uuid):
         )
 
     def check_budget() -> None:
-        # Same mid-run budget gate as execute_workflow_task (#808).
+        # Same mid-run budget gate as execute_workflow_task (#808), including
+        # the live scope's not-yet-flushed spend.
+        from app.services.metering import current_scope
         from app.services.trial_budget import check_sync
 
-        check_sync(user_id)
+        scope = current_scope()
+        in_flight = (scope.tokens_in + scope.tokens_out) if scope else 0
+        check_sync(user_id, extra_used=in_flight)
 
     try:
         from app.services.metering import metered
@@ -1782,7 +1805,7 @@ def resume_workflow_after_approval(self, approval_uuid):
         _mark_workflow_failed(
             db, workflow_result_id,
             str(_act["_id"]) if _act else None, str(e),
-            error_payload={"code": "budget_exhausted"},
+            error_payload={"code": _spend_block_code(e)},
         )
         return {"status": "error", "result_id": workflow_result_id}
     except Exception as e:

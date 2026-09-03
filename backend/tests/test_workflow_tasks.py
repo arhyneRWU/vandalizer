@@ -1883,3 +1883,72 @@ class TestMidRunBudgetStop:
                 model="gpt-4o",
             )
         assert mock_engine.execute.call_args.kwargs.get("check_budget") is not None
+
+
+class TestBudgetHookPassesInFlightSpend:
+    """The hook the task hands the engine must report the live scope's
+    not-yet-flushed tokens; without that the ledger read is stale and the
+    gate never trips (the #808 bug, one layer down)."""
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_hook_reports_live_scope_tokens(self, mock_build, mock_get_db):
+        from unittest.mock import MagicMock, patch as _patch
+
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+        db = _mock_db(
+            workflow_doc=_make_workflow_doc(wf_id=wf_id, step_ids=[step_id]),
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "t"}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_get_db.return_value = db
+
+        captured = {}
+
+        def fake_execute(**kwargs):
+            # Simulate mid-run spend, then invoke the hook the way the engine
+            # does at a step boundary.
+            from app.services.metering import current_scope
+
+            scope = current_scope()
+            scope.tokens_in += 700
+            scope.tokens_out += 200
+            kwargs["check_budget"]()
+            return ("out", [{"name": "Doc", "output": ["uuid1"]}])
+
+        mock_engine = MagicMock()
+        mock_engine.execute.side_effect = fake_execute
+        mock_engine.usage = MagicMock(tokens_in=700, tokens_out=200)
+        mock_build.return_value = mock_engine
+
+        def fake_check_sync(user_id, *, extra_used=0):
+            captured["user_id"] = user_id
+            captured["extra_used"] = extra_used
+
+        with _patch("app.services.trial_budget.check_sync", side_effect=fake_check_sync), \
+             _patch("app.tasks.quality_tasks.auto_validate_workflow"), \
+             _patch("app.tasks.activity_tasks.generate_activity_description_task"):
+            execute_workflow_task(
+                workflow_result_id=str(result_id),
+                workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["uuid1"]},
+                model="gpt-4o",
+            )
+
+        assert captured["extra_used"] == 900, "hook did not report in-flight spend"
+
+    def test_unverified_account_gets_its_own_code(self):
+        """budget_exhausted was hardcoded for the whole TrialSpendBlockedError
+        family, offering a top-up for a problem a confirmation link solves."""
+        from app.exceptions import TrialBudgetExceededError, TrialUnverifiedError
+        from app.tasks.workflow_tasks import _spend_block_code
+
+        assert _spend_block_code(TrialUnverifiedError("confirm")) == "email_unverified"
+        assert _spend_block_code(TrialBudgetExceededError("spent")) == "budget_exhausted"
