@@ -199,6 +199,10 @@ export function ExtractionEditorPanel() {
     // rather than clearing to nothing: values without the strip re-open a run
     // that failed a rule looking exactly like one that passed.
     setCrossFieldSets(pending?.crossFieldSets ?? [])
+    // Same rule as the strip above: a previous run's caveats must not sit
+    // over a different run's values. Restored from the handoff when the run
+    // is being reopened, so its disclosure comes back with its values.
+    setDocumentWarnings(pending?.documentWarnings ?? [])
     setActiveTab('design')
     getSearchSet(openExtractionId)
       .then(setSearchSet)

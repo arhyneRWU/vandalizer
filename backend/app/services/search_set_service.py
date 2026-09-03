@@ -572,6 +572,11 @@ def _flag_no_extractable_text(
     if entry is not None:
         if "no_extractable_text" not in entry["codes"]:
             entry["codes"].append("no_extractable_text")
+            # Recompose: the strip renders `text`, so leaving it stale told
+            # the user the document was merely thin when it in fact
+            # contributed nothing — the severer caveat rendering as the
+            # milder one.
+            entry["text"] = document_service.warning_text_for_codes(entry["codes"])
         return
     document_warnings.append({
         "document_uuid": doc_uuid,
@@ -652,7 +657,15 @@ async def run_extraction_sync(
     for doc_uuid in document_uuids:
         doc = await SmartDocument.find_one(SmartDocument.uuid == doc_uuid)
         if doc is not None and document_warnings is not None:
-            codes = list(document_service.ingestion_warnings(doc))
+            # Completeness codes only. hidden_text_unchecked is the INVERSE
+            # risk — extra unvetted content, not missing content — and the
+            # strip headlines these as "not read in full"; chat keeps the two
+            # apart for the same reason (see document_service's
+            # COMPLETENESS_WARNING_CODES).
+            codes = [
+                c for c in document_service.ingestion_warnings(doc)
+                if c in document_service.COMPLETENESS_WARNING_CODES
+            ]
             if document_service.is_extraction_low_quality(doc):
                 codes.append("low_quality_text")
             if codes:

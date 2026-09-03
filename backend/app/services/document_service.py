@@ -185,6 +185,10 @@ async def list_contents(
                 "error_message": d.error_message,
                 "extraction_low_quality": is_extraction_low_quality(d),
                 "ingestion_warnings": ingestion_warnings(d),
+                # The list endpoint is what feeds the file browser; serving
+                # only codes here left the caveat icon dark on the exact
+                # screen #803 is about.
+                "ingestion_warning_text": ingestion_warning_text(d),
             }
             for d in documents
         ],
@@ -276,4 +280,5 @@ async def poll_status(doc_uuid: str, user: User) -> dict | None:
         "title": doc.title,
         "extraction_low_quality": is_extraction_low_quality(doc),
         "ingestion_warnings": ingestion_warnings(doc),
+        "ingestion_warning_text": ingestion_warning_text(doc),
     }
