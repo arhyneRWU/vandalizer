@@ -1003,3 +1003,59 @@ class TestGatedTextReader:
         # 4% junk: allowed.
         assert not _looks_like_binary(("\x01" * 4 + "a" * 96) * 10)
         assert not _looks_like_binary("")
+
+
+class TestIngestionFidelityPapercuts:
+    """The #812 grab-bag: small losses of fidelity between what a file shows
+    and what the model reads."""
+
+    def test_nan_is_only_stripped_from_nan_only_cells(self):
+        """A blind str.replace("NaN", "") corrupted real words — a PI surname,
+        "NaNoparticle" — anywhere in the document."""
+        from app.services.document_readers import clean_markdown_nans
+
+        out = clean_markdown_nans("| Dr. NaNjing | NaN | NaNoparticle assay |")
+        assert "NaNjing" in out
+        assert "NaNoparticle assay" in out
+        # The NaN-only cell is blanked.
+        cells = [c.strip() for c in out.split("|")[1:-1]]
+        assert cells[1] == ""
+
+    def test_percent_formatted_numbers_keep_their_scale(self):
+        """Excel stores 47.5% as 0.475 and carries the % in the display
+        format; dropping it handed the model a number 100x off."""
+        from app.services.document_readers import _apply_percent_format
+
+        assert _apply_percent_format(0.475, "0.0%") == "47.5%"
+        assert _apply_percent_format(1.0, "0%") == "100%"
+        # Non-percent formats and non-numbers pass through untouched.
+        assert _apply_percent_format(150000, '"$"#,##0') == 150000
+        assert _apply_percent_format("text", "0.0%") == "text"
+        assert _apply_percent_format(True, "0.0%") is True
+
+    def test_merged_header_spans_its_columns(self, tmp_path):
+        """A "TOTAL DIRECT COSTS" header merged across B2:E2 lived in one
+        cell with blanks beside it, so the columns under it read unlabelled."""
+        import openpyxl
+
+        from app.services.document_readers import extract_text_from_xlsx
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Item"
+        ws["B1"] = "TOTAL DIRECT COSTS"
+        ws.merge_cells("B1:D1")
+        ws["A2"] = "Personnel"
+        ws["B2"] = 100
+        ws["C2"] = 200
+        ws["D2"] = 300
+        path = tmp_path / "merged.xlsx"
+        wb.save(path)
+
+        text = extract_text_from_xlsx(str(path))
+        header_line = next(
+            line for line in text.split("\n")
+            if "TOTAL DIRECT COSTS" in line and "|" in line
+        )
+        # The label now appears in each column the merge covers.
+        assert header_line.count("TOTAL DIRECT COSTS") == 3

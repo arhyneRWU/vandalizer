@@ -40,10 +40,16 @@ _PDF_INSPECTOR_MIN_CONFIDENCE = 0.8
 _BLANK_PAGE_INK_THRESHOLD = 250
 
 
+# A table cell that is exactly the pandas/openpyxl NaN sentinel, and nothing
+# else. Anchored to cell boundaries so real words survive: a blind
+# str.replace("NaN", "") corrupted a PI surname (Nanjing, NaNoparticle) and
+# any prose that happened to contain the letters.
+_NAN_CELL_RE = re.compile(r"(?<=\|)(\s*)(?:NaN|nan|NAN)(\s*)(?=\|)")
+
+
 def clean_markdown_nans(markdown_content: str) -> str:
-    """Remove NaN values from markdown content."""
-    cleaned = markdown_content.replace("| NaN |", "| |")
-    cleaned = cleaned.replace("NaN", "")
+    """Blank out NaN-only table cells in markdown content."""
+    cleaned = _NAN_CELL_RE.sub(r"\1\2", markdown_content)
 
     lines = cleaned.split("\n")
     filtered_lines = []
@@ -238,6 +244,25 @@ def ocr_extract_text_from_pdf(
     return ""
 
 
+def _apply_percent_format(value: object, number_format: object) -> object:
+    """Render a percent-formatted number the way the sheet shows it.
+
+    Excel stores 47.5% as 0.475 and carries the "%" in the cell's display
+    format, which the text extraction dropped — so a fringe rate the sheet
+    shows as "47.5%" reached the model as "0.475", a different number by two
+    orders of magnitude. Currency and thousands separators are deliberately
+    NOT reconstructed: "$150,000" and "150000" are the same quantity, and
+    stripping the symbols keeps the value machine-readable.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return value
+    if not isinstance(number_format, str) or "%" not in number_format:
+        return value
+    scaled = value * 100
+    text = f"{scaled:.4f}".rstrip("0").rstrip(".")
+    return f"{text or '0'}%"
+
+
 def _stringify_cell_value(value: object) -> str:
     """Render an openpyxl cell value as a plain display string."""
     if value is None:
@@ -379,10 +404,27 @@ def extract_text_from_xlsx(xlsx_path: str) -> str:
                 if cached is None and isinstance(formula, str) and formula.startswith("="):
                     coord = cell_v.coordinate.upper()
                     evaluated = computed.get((sheet_key, coord))
-                    row.append(evaluated if evaluated is not None else formula)
+                    value = evaluated if evaluated is not None else formula
                 else:
-                    row.append(cached)
+                    value = cached
+                row.append(_apply_percent_format(value, cell_v.number_format))
             grid.append(row)
+
+        # Spread a merged range's value across every cell it covers. openpyxl
+        # stores it only in the top-left cell, so a "TOTAL DIRECT COSTS"
+        # header merged across B2:E2 arrived as one labelled cell followed by
+        # blanks — the columns under it read as unlabelled. The merge is still
+        # listed in the extras below; this makes the grid itself readable.
+        for rng in ws_v.merged_cells.ranges:
+            anchor = grid[rng.min_row - 1][rng.min_col - 1] if (
+                rng.min_row - 1 < len(grid) and rng.min_col - 1 < max_col
+            ) else None
+            if anchor in (None, ""):
+                continue
+            for r in range(rng.min_row, min(rng.max_row, max_row) + 1):
+                for c in range(rng.min_col, min(rng.max_col, max_col) + 1):
+                    if grid[r - 1][c - 1] in (None, ""):
+                        grid[r - 1][c - 1] = anchor
 
         kept_rows = [row for row in grid if any(v not in (None, "") for v in row)]
         if not kept_rows:
@@ -788,13 +830,21 @@ def _interpolate_page_markers(text: str, num_pages: int) -> list[dict]:
 
 
 def pdf_page_count(pdf_path: str) -> int:
-    """Cheap page-count read via PyMuPDF. Returns 0 if it can't open the file."""
+    """Cheap page-count read via PyMuPDF. Returns 0 if it can't open the file.
+
+    0 means "unknown", not "no pages" — callers that gate on a page count
+    (sparse-text detection) must treat it as absent rather than as a real
+    measurement, which is why the failure is logged at warning here.
+    """
     try:
         import pymupdf
         with pymupdf.open(pdf_path) as doc:
             return doc.page_count
     except Exception as e:
-        logger.warning("Could not read PDF page count for %s: %s", pdf_path, e)
+        logger.warning(
+            "Could not read PDF page count for %s (%s) — sparse-text "
+            "detection is disabled for this document", pdf_path, e,
+        )
         return 0
 
 

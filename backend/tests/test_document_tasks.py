@@ -1114,3 +1114,38 @@ class TestOcrOutageReachesTheRetryMachinery:
         # Not the generic extraction-failed wording.
         assert "Text extraction failed" not in written["error_message"]
         assert notify.called
+
+
+class TestReapStuckDocumentsSeesAbandonedExtractions:
+    """#812: the reaper matched processing=False, which excluded exactly the
+    documents it exists for — a worker killed mid-extraction leaves
+    processing=True forever."""
+
+    def test_query_covers_documents_still_flagged_processing(self):
+        from unittest.mock import patch
+
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        db.smart_document.find.return_value = []
+        with patch.object(dt, "get_sync_db", return_value=db):
+            dt.reap_stuck_documents()
+
+        query = db.smart_document.find.call_args[0][0]
+        # processing is no longer a hard filter...
+        assert "processing" not in query
+        # ...it is one arm of an $or that also catches a stale in-flight doc.
+        arms = query["$or"]
+        assert {"processing": False} in arms
+        stale = next(a for a in arms if "updated_at" in a and "$lt" in a["updated_at"])
+        assert stale["updated_at"]["$lt"] is not None
+        # The other guards are intact.
+        assert query["task_status"]["$in"] == dt._IN_PROGRESS_TASK_STATUSES
+        assert query["raw_text"] == {"$ne": ""}
+
+    def test_stale_cutoff_exceeds_the_hard_time_limit(self):
+        """Nothing honest is still extracting past the Celery hard limit."""
+        from app.celery_app import celery
+        from app.tasks.document_tasks import _STUCK_DOCUMENT_AGE_SECONDS
+
+        assert _STUCK_DOCUMENT_AGE_SECONDS >= celery.conf.task_time_limit
