@@ -218,6 +218,23 @@ def notify_delivery_failed(
             item_kind = "workflow"
         body = f"{detail} {_snippet(error)}" if error else detail
 
+        create_notification_sync(
+            db,
+            user_id=recipient,
+            kind="delivery_failed",
+            title=f"Output not delivered: {name}",
+            body=body,
+            link=link,
+            item_kind=item_kind,
+            item_id=subject_id or None,
+            item_name=name,
+            coalesce_key=f"delivery_failed:{subject_id or name}",
+            group_title=f"Outputs not delivered {{count}}×: {name}",
+        )
+    except Exception:
+        logger.exception("Failed to emit delivery-failure notification")
+
+
 def notify_document_not_searchable(db, *, doc: dict | None, error: Any) -> None:
     """Notify the owner that a document was SAVED but search indexing failed.
 
@@ -236,19 +253,6 @@ def notify_document_not_searchable(db, *, doc: dict | None, error: Any) -> None:
         create_notification_sync(
             db,
             user_id=recipient,
-            kind="delivery_failed",
-            title=f"Output not delivered: {name}",
-            body=body,
-            link=link,
-            item_kind=item_kind,
-            item_id=subject_id or None,
-            item_name=name,
-            coalesce_key=f"delivery_failed:{subject_id or name}",
-            group_title=f"Outputs not delivered {{count}}×: {name}",
-        )
-    except Exception:
-        logger.exception("Failed to emit delivery-failure notification")
-
             kind="document_unsearchable",
             title="Document saved, but not searchable",
             body=(
