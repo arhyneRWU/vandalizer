@@ -1162,3 +1162,106 @@ class TestFallbackRetrySkipsErroredSteps:
         task.data = {"_retry_on_empty": True, "_fallback_model": "other", "model": "m1"}
         node.tasks = [task]
         assert _should_retry_with_fallback(node, {"output": ""}) is True
+
+
+class TestBetweenStepsBudgetGate:
+    """#808: the budget gate ran only before the run started, so a workflow
+    beginning with one token of headroom executed every step and overran
+    arbitrarily. The engine now polls check_budget at step boundaries."""
+
+    def _two_step_engine(self):
+        steps = [
+            {"name": "Document", "data": {"doc_uuids": ["u1"]}, "tasks": []},
+            {"name": "StepA", "data": {}, "tasks": [{"name": "Prompt", "data": {"prompt": "a"}}]},
+            {"name": "StepB", "data": {}, "tasks": [{"name": "Prompt", "data": {"prompt": "b"}}]},
+        ]
+        return build_workflow_engine(steps, model="gpt-4o")
+
+    def test_budget_exception_stops_at_a_step_boundary(self):
+        from unittest.mock import patch
+
+        from app.exceptions import TrialBudgetExceededError
+
+        engine = self._two_step_engine()
+        calls = {"n": 0}
+
+        def check_budget():
+            calls["n"] += 1
+            raise TrialBudgetExceededError("trial budget exhausted")
+
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"), \
+             pytest.raises(TrialBudgetExceededError):
+            engine.execute(check_budget=check_budget)
+        # The gate fired between steps — after the Document step ran, before
+        # a later step spent anything.
+        assert calls["n"] == 1
+
+    def test_gate_is_not_polled_before_the_first_step_of_a_pass(self):
+        """Entry-time checks (metered) already cover the first step; polling
+        again immediately would double-charge the same moment."""
+        from unittest.mock import MagicMock, patch
+
+        engine = self._two_step_engine()
+        check_budget = MagicMock()
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"):
+            engine.execute(check_budget=check_budget)
+        # Three nodes -> polled for the 2nd and 3rd only.
+        assert check_budget.call_count == 2
+
+    def test_no_gate_means_no_calls(self):
+        from unittest.mock import patch
+
+        engine = self._two_step_engine()
+        with patch("app.services.workflow_engine.llm_chat_model", return_value="out"):
+            engine.execute()  # must not raise without check_budget
+
+
+class TestBudgetGateSeesInFlightSpend:
+    """The gate must count the RUN'S OWN spend. A scope's ledger row is
+    written by metering.flush_sync when the scope exits, so mid-run the
+    llm_usage aggregation still shows the pre-run total — a gate that
+    re-read only the ledger would see an unchanged number at every step
+    boundary and never trip, leaving #808 unfixed.
+    """
+
+    def _db(self, ledger_total, budget=1000):
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.user.find_one.return_value = {
+            "is_demo_user": True, "email_verified": True,
+            "trial_token_budget": budget,
+        }
+        db.llm_usage.aggregate.return_value = [{"total": ledger_total}]
+        return db
+
+    def test_in_flight_tokens_push_the_run_over(self):
+        from unittest.mock import patch
+
+        from app.exceptions import TrialBudgetExceededError
+        from app.services import trial_budget
+
+        db = self._db(ledger_total=900, budget=1000)
+        # _budget() is the deployment default; it gates effective_budget, and
+        # is 0 (unenforced) in the test environment.
+        with patch.object(trial_budget, "_trial_system_on", return_value=True), \
+             patch.object(trial_budget, "_budget", return_value=1000), \
+             patch("app.tasks.get_sync_db", return_value=db), \
+             patch.object(trial_budget, "_fleet_paused_sync", return_value=False):
+            # Ledger alone is under budget — the old gate passed here forever.
+            trial_budget.check_sync("u1")
+            # With the run's own 150 in-flight tokens it is over.
+            with pytest.raises(TrialBudgetExceededError):
+                trial_budget.check_sync("u1", extra_used=150)
+
+    def test_extra_used_is_ignored_when_no_budget_is_set(self):
+        from unittest.mock import patch
+
+        from app.services import trial_budget
+
+        db = self._db(ledger_total=0, budget=0)
+        with patch.object(trial_budget, "_trial_system_on", return_value=True), \
+             patch.object(trial_budget, "_budget", return_value=0), \
+             patch("app.tasks.get_sync_db", return_value=db), \
+             patch.object(trial_budget, "_fleet_paused_sync", return_value=False):
+            trial_budget.check_sync("u1", extra_used=10**9)  # must not raise
