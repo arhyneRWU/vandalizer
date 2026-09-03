@@ -1275,6 +1275,55 @@ class TestModelsAddressedById:
         assert cfg.available_models[0]["id"] == "id-alpha"
 
     @pytest.mark.asyncio
+    async def test_update_preserves_unmanaged_keys(self, client):
+        """#817: the form replaced the whole entry with a fixed dict literal,
+        so every key it does not manage was destroyed on save — including the
+        three the context budget reads. Editing a model's display tier must
+        not silently reset how its tokens are counted."""
+        admin = _make_user("admin", is_admin=True)
+        cookies, headers = _auth("admin")
+        stored = _model("alpha", "id-alpha", api_key="enc-stored-secret")
+        stored.update({
+            "tokenizer_path": "/opt/tokenizers/llama-3",
+            "tokenizer_cache_root": "/var/cache/hf",
+            "token_safety_margin": 1.0,
+            "some_future_key": "survives too",
+        })
+        cfg = SimpleNamespace(
+            available_models=[stored],
+            oauth_providers=[],
+            default_model="",
+            save=AsyncMock(),
+        )
+
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "admin", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch("app.routers.admin.SystemConfig") as MockCfg,
+            patch("app.routers.admin._audit", new_callable=AsyncMock),
+        ):
+            MockUser.find_one = AsyncMock(return_value=admin)
+            MockCfg.get_config = AsyncMock(return_value=cfg)
+            resp = await client.put(
+                "/api/admin/config/models/id-alpha",
+                json={"name": "alpha", "tag": "alpha", "api_key": "***", "tier": "fast"},
+                cookies=cookies,
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        saved = cfg.available_models[0]
+        # The exact-count and margin controls survive...
+        assert saved["tokenizer_path"] == "/opt/tokenizers/llama-3"
+        assert saved["tokenizer_cache_root"] == "/var/cache/hf"
+        assert saved["token_safety_margin"] == 1.0
+        # ...as does anything else set out-of-band...
+        assert saved["some_future_key"] == "survives too"
+        # ...while the form's own fields still apply.
+        assert saved["tier"] == "fast"
+        assert saved["id"] == "id-alpha"
+
+    @pytest.mark.asyncio
     async def test_delete_default_model_clears_default(self, client):
         admin = _make_user("admin", is_admin=True)
         cookies, headers = _auth("admin")

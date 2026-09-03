@@ -1788,7 +1788,14 @@ async def update_model(
         new_api_key = encrypt_value(new_api_key)
 
     prev_name = cfg.available_models[index].get("name", "")
-    cfg.available_models[index] = {
+    # MERGE onto the stored entry, never replace it. A whole-dict assignment
+    # destroyed every key this form does not manage — including the three the
+    # context budget reads (tokenizer_path, tokenizer_cache_root,
+    # token_safety_margin), so editing a model's display tier silently reset
+    # how its tokens are counted, back to the guessed 1.5× margin, with no
+    # warning (#817). Anything set out-of-band now survives a save.
+    merged = dict(cfg.available_models[index])
+    merged.update({
         "id": model_id,
         "name": body.name,
         "tag": body.tag,
@@ -1809,7 +1816,8 @@ async def update_model(
         "temperature": body.temperature,
         "cost_per_1m_input": body.cost_per_1m_input,
         "cost_per_1m_output": body.cost_per_1m_output,
-    }
+    })
+    cfg.available_models[index] = merged
     # Keep default_model pointer stable when the default is renamed.
     if cfg.default_model and cfg.default_model == prev_name and body.name != prev_name:
         cfg.default_model = body.name
