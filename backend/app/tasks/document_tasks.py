@@ -370,6 +370,12 @@ def perform_extraction_and_update(self, document_uuid: str, extension: str) -> s
         ingestion_warnings: list[str] = []
         if ocr_report.get("partial"):
             ingestion_warnings.append("partial_ocr")
+        if ocr_report.get("hidden_text_unchecked"):
+            # The prompt-injection scrub could not inspect this PDF, so its
+            # text may include content the page never displays. Stored as a
+            # warning rather than failing the document: an inspection hiccup
+            # on an honest PDF must stay usable, but never silently.
+            ingestion_warnings.append("hidden_text_unchecked")
         if extension == "pdf" and raw_text and is_sparse_extraction(raw_text, num_pages):
             ingestion_warnings.append("sparse_text")
         if ingestion_warnings:

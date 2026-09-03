@@ -917,7 +917,7 @@ def _extract_pdf_text_and_markers(
     defended against separately in each prompt downstream.
     """
     text, markers = _read_pdf_text_and_markers(file_path, report=report)
-    return pdf_hidden_text.scrub_pdf(file_path, text, markers)
+    return pdf_hidden_text.scrub_pdf(file_path, text, markers, report=report)
 
 
 def _read_pdf_text_and_markers(

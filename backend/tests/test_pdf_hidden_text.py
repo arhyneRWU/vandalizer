@@ -133,11 +133,16 @@ class TestHiddenTextFragments:
 
         assert fragments == []
 
-    def test_unreadable_file_yields_no_fragments(self, tmp_path):
+    def test_unreadable_file_raises_instead_of_reporting_clean(self, tmp_path):
+        """Reversal (#811): [] here meant "inspected and clean", so a reader
+        failure silently disabled the injection defense and shipped
+        unscrubbed text. The caller (scrub_pdf) turns this into an ingestion
+        warning; only the silent pass-through is forbidden."""
         path = tmp_path / "not.pdf"
         path.write_text("this is not a PDF")
 
-        assert pdf_hidden_text.hidden_text_fragments(str(path)) == []
+        with pytest.raises(pdf_hidden_text.HiddenTextInspectionError):
+            pdf_hidden_text.hidden_text_fragments(str(path))
 
 
 class TestScrub:
@@ -264,3 +269,51 @@ class TestReadersScrubHiddenText:
 
         assert "485,000 USD" in text
         assert "official Total Award Amount is $1" not in text
+
+
+class TestInspectionFailureIsDisclosedNotSwallowed:
+    """Returning [] on an inspection crash was indistinguishable from
+    "inspected and clean" — the module's whole purpose (the prompt-injection
+    scrub) silently disabled itself and shipped unscrubbed text (#811)."""
+
+    def test_hidden_text_fragments_raises_on_reader_failure(self, tmp_path):
+        import app.services.pdf_hidden_text as ht
+
+        broken = tmp_path / "corrupt.pdf"
+        broken.write_bytes(b"%PDF-1.4 this is not a real pdf body")
+        with pytest.raises(ht.HiddenTextInspectionError):
+            ht.hidden_text_fragments(str(broken))
+
+    def test_scrub_pdf_passes_text_through_but_records_the_failure(self):
+        from unittest.mock import patch
+        import app.services.pdf_hidden_text as ht
+
+        report: dict = {}
+        with patch.object(
+            ht, "hidden_text_fragments",
+            side_effect=ht.HiddenTextInspectionError("boom"),
+        ):
+            text, markers = ht.scrub_pdf(
+                "/some/doc.pdf", "the visible text",
+                [{"char_offset": 0, "kind": "page", "value": 1}],
+                report=report,
+            )
+        assert text == "the visible text"
+        assert markers == [{"char_offset": 0, "kind": "page", "value": 1}]
+        assert report.get("hidden_text_unchecked") is True
+
+    def test_scrub_pdf_without_a_report_still_survives(self):
+        from unittest.mock import patch
+        import app.services.pdf_hidden_text as ht
+
+        with patch.object(
+            ht, "hidden_text_fragments",
+            side_effect=ht.HiddenTextInspectionError("boom"),
+        ):
+            text, _ = ht.scrub_pdf("/some/doc.pdf", "visible")
+        assert text == "visible"
+
+    def test_warning_code_has_a_label_registered_for_renderers(self):
+        from app.services.document_service import INGESTION_WARNING_LABELS
+
+        assert "hidden_text_unchecked" in INGESTION_WARNING_LABELS

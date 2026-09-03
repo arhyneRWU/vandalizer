@@ -21,6 +21,9 @@ INGESTION_WARNING_LABELS = {
     # document itself, but registered here so the renderer that maps codes to
     # words (#803) can't repeat the low_quality_text story above.
     "no_extractable_text": "this document could not be read and contributed nothing to the run",
+    # The pdf_hidden_text scrub could not inspect the file, so text the page
+    # never displays may have reached the stored content unfiltered.
+    "hidden_text_unchecked": "the hidden-text safety check could not run on this document",
 }
 
 
