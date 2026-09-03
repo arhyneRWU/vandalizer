@@ -256,11 +256,38 @@ def _apply_percent_format(value: object, number_format: object) -> object:
     """
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return value
-    if not isinstance(number_format, str) or "%" not in number_format:
+    if not isinstance(number_format, str) or not _has_percent_operator(number_format):
         return value
     scaled = value * 100
-    text = f"{scaled:.4f}".rstrip("0").rstrip(".")
+    # 10 places, not 4: a rate displayed to more than four decimals was being
+    # silently rounded, and a genuinely tiny one (1e-7) collapsed to "0%" —
+    # a real value reaching the model as zero.
+    text = f"{scaled:.10f}".rstrip("0").rstrip(".")
     return f"{text or '0'}%"
+
+
+def _has_percent_operator(number_format: str) -> bool:
+    """Whether a `%` in the format is Excel's scale-by-100 operator.
+
+    A `%` inside quotes or after a backslash is a literal suffix: `0"%"` and
+    `0.0" %"` mean "show a percent sign", and such cells already hold 47.5,
+    not 0.475. Treating those as the operator multiplied them by 100 — the
+    same two-orders-of-magnitude error this function exists to prevent, in
+    the other direction.
+    """
+    in_quotes = False
+    i = 0
+    while i < len(number_format):
+        ch = number_format[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == "%" and not in_quotes:
+            return True
+        i += 1
+    return False
 
 
 def _stringify_cell_value(value: object) -> str:
@@ -420,6 +447,12 @@ def extract_text_from_xlsx(xlsx_path: str) -> str:
                 rng.min_row - 1 < len(grid) and rng.min_col - 1 < max_col
             ) else None
             if anchor in (None, ""):
+                continue
+            # Labels only. Spreading a merged NUMBER invents quantities: a
+            # total of 485,000 merged across B10:E10 would render four times
+            # and a model summing the row reads 1,940,000 — worse than the
+            # unlabelled columns this fix exists to correct.
+            if isinstance(anchor, (int, float)) and not isinstance(anchor, bool):
                 continue
             for r in range(rng.min_row, min(rng.max_row, max_row) + 1):
                 for c in range(rng.min_col, min(rng.max_col, max_col) + 1):

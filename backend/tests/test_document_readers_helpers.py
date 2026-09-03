@@ -1033,6 +1033,24 @@ class TestIngestionFidelityPapercuts:
         assert _apply_percent_format("text", "0.0%") == "text"
         assert _apply_percent_format(True, "0.0%") is True
 
+    def test_a_literal_percent_sign_is_not_the_scale_operator(self):
+        """`0"%"` means "show a % sign" — such cells already hold 47.5, not
+        0.475. Scaling them would make the same 100x error backwards."""
+        from app.services.document_readers import _apply_percent_format
+
+        assert _apply_percent_format(47.5, '0"%"') == 47.5
+        assert _apply_percent_format(47.5, '0.0" %"') == 47.5
+        assert _apply_percent_format(47.5, '0.0"% of total"') == 47.5
+        assert _apply_percent_format(0.475, "0.0%") == "47.5%"  # still works
+
+    def test_tiny_and_precise_rates_survive(self):
+        """A 4-decimal render collapsed 1e-7 to "0%" — a real rate reaching
+        the model as zero — and silently rounded longer ones."""
+        from app.services.document_readers import _apply_percent_format
+
+        assert _apply_percent_format(1e-7, "0.00000%") == "0.00001%"
+        assert _apply_percent_format(0.123456, "0.0000%") == "12.3456%"
+
     def test_merged_header_spans_its_columns(self, tmp_path):
         """A "TOTAL DIRECT COSTS" header merged across B2:E2 lived in one
         cell with blanks beside it, so the columns under it read unlabelled."""
@@ -1059,3 +1077,22 @@ class TestIngestionFidelityPapercuts:
         )
         # The label now appears in each column the merge covers.
         assert header_line.count("TOTAL DIRECT COSTS") == 3
+
+    def test_a_merged_number_is_not_duplicated_across_its_span(self, tmp_path):
+        """Spreading a merged VALUE invents quantities: a total merged across
+        four columns would render four times and a model summing the row
+        reads 4x the real figure — worse than the blanks it replaced."""
+        import openpyxl
+
+        from app.services.document_readers import extract_text_from_xlsx
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "TOTAL"
+        ws["B1"] = 485000
+        ws.merge_cells("B1:E1")
+        path = tmp_path / "merged_value.xlsx"
+        wb.save(path)
+
+        text = extract_text_from_xlsx(str(path))
+        assert text.count("485000") == 1

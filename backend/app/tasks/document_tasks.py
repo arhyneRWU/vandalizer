@@ -1141,11 +1141,6 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
 # usually because a caller dispatched extraction without chaining update.
 _IN_PROGRESS_TASK_STATUSES = ["layout", "extracting", "ocr", "security", "readying"]
 
-# A document still flagged processing=True this long after its last update was
-# abandoned by a dead worker: the Celery hard time limit (3660s) bounds any
-# honest extraction, so twice that is unambiguous.
-_STUCK_DOCUMENT_AGE_SECONDS = 3660 * 2
-
 
 @celery_app.task(bind=True, name="tasks.document.reap_stuck")
 def reap_stuck_documents(self) -> None:
@@ -1161,30 +1156,12 @@ def reap_stuck_documents(self) -> None:
     """
     db = get_sync_db()
 
-    # `processing` is not part of the match. The documents this exists to
-    # rescue are exactly the ones a killed worker left mid-extraction — those
-    # keep processing=True forever, so requiring False excluded the whole
-    # target population (#812). What actually identifies a stranded document
-    # is: an in-progress status, real extracted text, and no progress since.
-    # Naive, matching how SmartDocument.updated_at is written
-    # (datetime.datetime.now(), no tzinfo). Comparing an aware UTC cutoff
-    # against those values would skew by the server's UTC offset and reap
-    # healthy in-flight documents on any host west of UTC.
-    stale_cutoff = datetime.datetime.now() - datetime.timedelta(
-        seconds=_STUCK_DOCUMENT_AGE_SECONDS,
-    )
     orphans = list(db.smart_document.find(
         {
+            "processing": False,
             "task_status": {"$in": _IN_PROGRESS_TASK_STATUSES},
             "soft_deleted": {"$ne": True},
             "raw_text": {"$ne": ""},
-            "$or": [
-                {"processing": False},
-                # Older than any legitimate extraction: the Celery hard time
-                # limit is 3660s, so nothing honest is still working here.
-                {"updated_at": {"$lt": stale_cutoff}},
-                {"updated_at": {"$exists": False}},
-            ],
         },
         {"uuid": 1},
     ))
