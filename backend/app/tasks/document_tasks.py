@@ -905,7 +905,7 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
         except Exception as e:
             logger.error("Failed to send extraction notification: %s", e)
             delivery_failures.append(
-                f"notification ({notification.get('type') or 'configured'}) failed: {str(e)[:200]}"
+                f"notification ({notification.get('channel') or 'configured'}) failed: {str(e)[:200]}"
             )
 
     # 3. Webhooks
@@ -919,15 +919,18 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
             )
 
     if delivery_failures:
-        from app.services.failure_notifications import notify_automation_failed
+        # delivery_failed, not automation_failed: the extraction RAN and its
+        # results exist — and coalescing onto the automation_failed key would
+        # overwrite an unread genuine dispatch failure's detail.
+        from app.services.failure_notifications import notify_delivery_failed
 
-        notify_automation_failed(
+        notify_delivery_failed(
             db,
             automation=automation,
-            error="; ".join(delivery_failures),
             detail=(
                 "The extraction ran, but "
-                f"{len(delivery_failures)} configured output(s) failed to deliver."
+                f"{len(delivery_failures)} configured output(s) failed to "
+                "deliver: " + "; ".join(delivery_failures)
             ),
         )
 

@@ -124,7 +124,10 @@ class WorkflowResult(Document):
     # Outputs the run was configured to deliver that failed after completion
     # (library write, notification, webhook). A run with entries here
     # completed — its results exist — but is not fully done; the owner is
-    # belled and the failures are kept for the run record (#810).
+    # belled and the failures are kept for the run record (#810). Passive
+    # runs record the same concept structurally as ``output_delivery`` on
+    # their trigger events (models/passive.py); unifying the two vocabularies
+    # is deliberate follow-up work, not an accident of this field.
     delivery_failures: list[str] = []
     # Machine-readable error payload set by the runner when the failure has a
     # suggested user action (e.g. oversize-context with a convert-to-KB hint).

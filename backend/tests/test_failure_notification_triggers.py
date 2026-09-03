@@ -324,7 +324,7 @@ class TestProcessOutputsOnFailedRun:
 
 
 class TestExtractionOutputDeliveryFailures:
-    def _run(self, *, storage_fails=False, webhook_fails=False):
+    def _run(self, *, storage_fails=False, webhook_fails=False, notification_fails=False):
         import app.tasks.document_tasks as dt
 
         db = MagicMock()
@@ -333,6 +333,7 @@ class TestExtractionOutputDeliveryFailures:
             "trigger_type": "folder_watch",
             "output_config": {
                 "storage": {"enabled": True},
+                "notifications": [{"channel": "teams", "recipients": ["x"]}],
                 "webhooks": [{"url": "https://example.org/hook"}],
             },
         }
@@ -344,9 +345,12 @@ class TestExtractionOutputDeliveryFailures:
             side_effect=RuntimeError("410 Gone") if webhook_fails else MagicMock(),
         ), patch(
             "app.services.output_handlers.should_send_notification",
-            return_value=False,
+            return_value=True,
         ), patch(
-            "app.services.failure_notifications.notify_automation_failed"
+            "app.services.output_handlers.send_workflow_notification",
+            side_effect=RuntimeError("teams 403") if notification_fails else MagicMock(),
+        ), patch(
+            "app.services.failure_notifications.notify_delivery_failed"
         ) as notify:
             dt._process_extraction_outputs(db, automation, {"F": "v"})
         return notify
@@ -355,13 +359,23 @@ class TestExtractionOutputDeliveryFailures:
         notify = self._run()
         notify.assert_not_called()
 
-    def test_failed_outputs_are_collected_and_belled_once(self):
+    def test_failed_outputs_are_collected_and_belled_once_as_delivery(self):
+        """delivery_failed, not automation_failed: the extraction RAN, and
+        coalescing onto the genuine-failure key would overwrite an unread
+        real dispatch failure's detail."""
         notify = self._run(storage_fails=True, webhook_fails=True)
         notify.assert_called_once()
         kwargs = notify.call_args.kwargs
+        assert kwargs["automation"]["name"] == "Nightly extract"
         assert "2 configured output(s)" in kwargs["detail"]
-        assert "folder gone" in kwargs["error"]
-        assert "410 Gone" in kwargs["error"]
+        assert "folder gone" in kwargs["detail"]
+        assert "410 Gone" in kwargs["detail"]
+
+    def test_notification_failures_name_the_channel(self):
+        """The config key is 'channel' (what the editor writes); reading a
+        nonexistent 'type' key rendered every line as '(configured)'."""
+        notify = self._run(notification_fails=True)
+        assert "notification (teams)" in notify.call_args.kwargs["detail"]
 
     def test_one_failed_output_does_not_block_the_others(self):
         """Storage failing must not stop the webhook attempt (and vice versa) —

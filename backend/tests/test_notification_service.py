@@ -117,6 +117,7 @@ class TestCoalesceKinds:
             "extraction_failed",
             "document_failed",
             "automation_failed",
+            "delivery_failed",
         }
 
 

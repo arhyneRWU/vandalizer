@@ -1768,6 +1768,9 @@ class TestLibrarySaveDeliveryFailure:
         mock_engine.usage = MagicMock(tokens_in=10, tokens_out=5)
         mock_build.return_value = mock_engine
 
+        db.activity_event.find_one.return_value = {"user_id": "launcher-1"}
+        activity_id = str(_fake_oid())
+
         with patch(
             "app.services.output_handlers.save_results_to_folder",
             side_effect=RuntimeError("destination folder deleted"),
@@ -1780,6 +1783,7 @@ class TestLibrarySaveDeliveryFailure:
                 workflow_id=str(wf_id),
                 trigger_step_data={"doc_uuids": ["uuid1"]},
                 model="gpt-4o",
+                activity_id=activity_id,
             )
 
         # The run still completes — results exist and are viewable...
@@ -1791,6 +1795,8 @@ class TestLibrarySaveDeliveryFailure:
         ]
         assert pushes, "delivery failure was not recorded on the run"
         assert "destination folder deleted" in pushes[0][0][1]["$push"]["delivery_failures"]
-        # ...and the launcher is belled.
+        # ...and the bell goes to the LAUNCHER resolved from the activity
+        # rail, not just the workflow owner.
         notify.assert_called_once()
         assert "could not be saved" in notify.call_args.kwargs["detail"]
+        assert notify.call_args.kwargs["user_id"] == "launcher-1"
