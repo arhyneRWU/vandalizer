@@ -315,3 +315,149 @@ class TestProcessOutputsOnFailedRun:
 
         save.assert_called_once()
         chain.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# The four notify-nobody paths from #809
+# ---------------------------------------------------------------------------
+
+
+class TestKbSourceIngestFailure:
+    def _run(self, exc):
+        """Finality is controlled by the error type: a non-transient error is
+        final on the first attempt; a transient one with retry budget left is
+        mid-retry (the direct call runs with retries=0)."""
+        from celery.exceptions import Retry
+
+        import app.tasks.knowledge_base_tasks as kbt
+
+        db = MagicMock()
+        db.knowledge_base_sources.find_one.return_value = {
+            "uuid": "src-1", "knowledge_base_uuid": "kb-1",
+            "source_type": "document", "document_uuid": "d1",
+            "custom_name": "Award letter",
+        }
+        db.smart_document.find_one.return_value = {
+            "uuid": "d1", "raw_text": "text", "processing": False,
+            "task_status": "complete", "title": "Award letter",
+        }
+        with patch.object(kbt, "_get_db", return_value=db), \
+             patch("app.services.document_manager.get_document_manager") as dm, \
+             patch("app.services.failure_notifications.notify_kb_source_failed") as notify:
+            dm.return_value.add_to_kb.side_effect = exc
+            try:
+                kbt.kb_ingest_document("src-1")
+            except (type(exc), Retry):
+                pass
+        return db, notify
+
+    def test_owner_is_belled_on_a_final_failure(self):
+        db, notify = self._run(RuntimeError("chroma exploded"))
+        notify.assert_called_once()
+        kwargs = notify.call_args.kwargs
+        assert kwargs["kb_uuid"] == "kb-1"
+        assert kwargs["source_name"] == "Award letter"
+        # The source is still marked errored.
+        err_writes = [
+            c for c in db.knowledge_base_sources.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("status") == "error"
+        ]
+        assert err_writes
+
+    def test_mid_retry_transient_failure_rings_nothing(self):
+        _, notify = self._run(ConnectionError("redis blip"))
+        notify.assert_not_called()
+
+
+class TestSemanticIngestionFailure:
+    def _run(self, exc):
+        from celery.exceptions import Retry
+
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        doc = {"uuid": "d1", "title": "Budget.xlsx", "user_id": "u1",
+               "path": "p", "text_markers": []}
+        db.smart_document.find_one.return_value = doc
+        with patch.object(dt, "get_sync_db", return_value=db), \
+             patch("app.services.document_manager.DocumentManager") as dm_cls, \
+             patch("app.services.failure_notifications.notify_document_not_searchable") as notify:
+            dm_cls.return_value.add_document.side_effect = exc
+            try:
+                dt.perform_semantic_ingestion("text", "d1", "u1")
+            except (type(exc), Retry):
+                pass
+        return notify
+
+    def test_owner_is_belled_on_a_final_failure(self):
+        notify = self._run(RuntimeError("chroma down"))
+        notify.assert_called_once()
+        assert notify.call_args.kwargs["doc"]["uuid"] == "d1"
+
+    def test_mid_retry_transient_failure_rings_nothing(self):
+        notify = self._run(ConnectionError("chroma blip"))
+        notify.assert_not_called()
+
+
+class TestFolderWatchWorkflowDispatchFailure:
+    def test_owner_is_belled_and_siblings_still_run(self):
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        db.smart_document.find_one.return_value = {
+            "uuid": "d1", "folder": "f1", "title": "Doc", "extension": "pdf",
+        }
+        broken = {"_id": ObjectId(), "name": "Broken", "enabled": True,
+                  "action_type": "workflow", "action_id": str(ObjectId()),
+                  "trigger_config": {}, "user_id": "auto-owner"}
+        healthy = {"_id": ObjectId(), "name": "Healthy", "enabled": True,
+                   "action_type": "workflow", "action_id": str(ObjectId()),
+                   "trigger_config": {}, "user_id": "auto-owner"}
+        db.automation.find.return_value = [broken, healthy]
+        db.workflow.find_one.return_value = {"_id": ObjectId(), "user_id": "u"}
+
+        calls = []
+
+        def trigger(workflow_doc, doc, automation_id, automation_name):
+            if automation_name == "Broken":
+                raise RuntimeError("trigger table down")
+            calls.append(automation_name)
+            return {"_id": ObjectId()}
+
+        with patch(
+            "app.services.passive_triggers.create_folder_watch_trigger",
+            side_effect=trigger,
+        ), patch(
+            "app.services.failure_notifications.notify_automation_failed"
+        ) as notify:
+            dt._check_folder_watch_automations(db, "d1")
+
+        # The broken automation belled its owner...
+        notify.assert_called_once()
+        assert notify.call_args.kwargs["automation"]["name"] == "Broken"
+        # ...and did not stop its sibling from dispatching.
+        assert calls == ["Healthy"]
+
+
+class TestProjectKbMirrorFailure:
+    def test_owner_is_belled_and_nothing_raises(self):
+        import app.tasks.document_tasks as dt
+
+        db = MagicMock()
+        dm = MagicMock()
+        dm.add_to_kb.side_effect = RuntimeError("chroma collection gone")
+        db.knowledge_base_sources.find_one.return_value = None  # not deduped
+        with patch.object(dt, "_find_project_for_folder", return_value={
+            "uuid": "p1", "title": "NSF Renewal",
+            "owner_user_id": "p-owner", "kb_uuid": "kb-p1",
+        }), patch(
+            "app.services.failure_notifications.notify_project_kb_sync_failed"
+        ) as notify:
+            # Must not raise — best-effort by design, but never silently.
+            dt._ingest_into_project_kb(
+                db, dm, {"uuid": "d1", "title": "Doc", "user_id": "u1", "folder": "f1"},
+                "text",
+            )
+        notify.assert_called_once()
+        assert notify.call_args.kwargs["project"]["uuid"] == "p1"
+        assert notify.call_args.kwargs["doc"]["uuid"] == "d1"
