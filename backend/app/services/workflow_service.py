@@ -577,8 +577,11 @@ async def run_workflow(
             "This workflow has no steps yet — add at least one step before running it.",
         )
 
+    # No explicit model → fall back to the workflow's own default (set via the
+    # canvas model selector), then to the user's configured default. The engine
+    # applies this as the per-step default; steps with their own model win.
     if not model:
-        model = await get_user_model_name(user_id)
+        model = (wf.input_config or {}).get("default_model") or await get_user_model_name(user_id)
 
     session_id = str(uuid_mod.uuid4())[:8]
     # Generate the Celery task id up front so we can persist it before the task
@@ -802,8 +805,11 @@ async def run_workflow_batch(
             "This workflow has no steps yet — add at least one step before running it.",
         )
 
+    # No explicit model → fall back to the workflow's own default (set via the
+    # canvas model selector), then to the user's configured default. The engine
+    # applies this as the per-step default; steps with their own model win.
     if not model:
-        model = await get_user_model_name(user_id)
+        model = (wf.input_config or {}).get("default_model") or await get_user_model_name(user_id)
 
     batch_id = str(uuid_mod.uuid4())[:8]
 
