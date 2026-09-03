@@ -108,6 +108,29 @@ These requirements cover the Vandalizer application only — they assume LLM inf
 
 Storage needs depend primarily on the volume and size of uploaded documents. Plan for growth if users will upload large PDFs or office files regularly.
 
+#### Building without the headless browser
+
+The backend image ships headless Chromium so the web fetcher can render a page
+that returns thin content or blocks a plain HTTP request. It costs about 1 GB of
+image size and 112 OS packages, two of which currently carry CRITICAL CVEs with
+no Debian fix, so a deployment that does not fetch web pages — knowledge bases
+built only from uploaded documents, or an air-gapped install — is carrying that
+surface for nothing.
+
+```bash
+INSTALL_BROWSER=false ./setup.sh --redeploy   # or: docker compose build
+```
+
+Set it in the environment rather than passing `--build-arg`: two services (`api`
+and `celery`) build from the same Dockerfile, and they must not disagree about
+whether a browser is there to launch. Putting `INSTALL_BROWSER=false` in the
+repository-root `.env` makes it stick across redeploys.
+
+The setting also becomes the image's `WEB_FETCHER_BROWSER_ENABLED` default, so a
+browserless build does not try to launch a browser it does not have. Web fetches
+still work; a page that needs rendering returns its static text instead. The
+default is `true`, so an existing build is unchanged unless you opt out.
+
 ### Local LLM & OCR Hosting (Optional)
 
 If you want a fully self-contained installation with no external API dependencies, you can host your own LLM and OCR services alongside Vandalizer. This is a separate infrastructure concern with significantly different hardware requirements.
