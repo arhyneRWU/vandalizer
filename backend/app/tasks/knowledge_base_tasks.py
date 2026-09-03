@@ -160,6 +160,24 @@ def kb_ingest_document(self, source_uuid: str) -> None:
             {"uuid": source_uuid},
             {"$set": {"status": "error", "error_message": str(e)[:2000]}},
         )
+        # Bell the KB owner — but only once Celery is done retrying, so a
+        # transient blip that succeeds on retry rings nothing.
+        from app.services.failure_notifications import (
+            is_final_attempt,
+            notify_kb_source_failed,
+        )
+
+        if is_final_attempt(self, e):
+            notify_kb_source_failed(
+                db,
+                kb_uuid=kb_uuid,
+                source_name=(
+                    source.get("custom_name") or source.get("url_title")
+                    or source.get("document_title") or source.get("url")
+                    or source_uuid
+                ),
+                error=e,
+            )
         raise
 
     finally:

@@ -49,6 +49,22 @@ def _ingest_into_project_kb(db, dm, doc: dict, text: str) -> None:
     if not project or not project.get("kb_uuid"):
         return
 
+    try:
+        _mirror_into_project_kb(db, dm, doc, project, text)
+    except Exception as e:
+        # Best-effort by design, but never silently: the user just watched
+        # this file land in the project, and "chat with this project" cannot
+        # see it. Callers keep their own guards; the bell rides here so every
+        # entry point (fresh ingest, file move, folder move) discloses.
+        logger.exception(
+            "Failed to mirror %s into project %s KB", doc.get("uuid"), project.get("uuid"),
+        )
+        from app.services.failure_notifications import notify_project_kb_sync_failed
+
+        notify_project_kb_sync_failed(db, doc=doc, project=project, error=e)
+
+
+def _mirror_into_project_kb(db, dm, doc: dict, project: dict, text: str) -> None:
     kb_uuid = project["kb_uuid"]
     doc_uuid = doc["uuid"]
     # Dedupe — never add the same document to a project KB twice.
@@ -736,23 +752,37 @@ def _check_folder_watch_automations(db, document_uuid: str) -> None:
         if action_type == "workflow":
             # Create a pending WorkflowTriggerEvent — the beat task
             # (process_pending_triggers) will apply budget/throttle checks
-            # and dispatch execution.
-            workflow_doc = db.workflow.find_one({"_id": ObjectId(action_id)})
-            if not workflow_doc:
-                logger.warning("Workflow %s not found for automation '%s'", action_id, auto.get("name"))
-                continue
+            # and dispatch execution. Isolated per automation and belled on
+            # failure, like the extraction branch below: one broken
+            # automation used to abort this loop for its siblings and vanish
+            # into the caller's catch-all — silent forever.
+            try:
+                workflow_doc = db.workflow.find_one({"_id": ObjectId(action_id)})
+                if not workflow_doc:
+                    logger.warning("Workflow %s not found for automation '%s'", action_id, auto.get("name"))
+                    continue
 
-            from app.services.passive_triggers import create_folder_watch_trigger
-            event = create_folder_watch_trigger(
-                workflow_doc,
-                doc,
-                automation_id=str(auto["_id"]),
-                automation_name=auto.get("name", ""),
-            )
-            logger.info(
-                "Created folder watch trigger %s for automation '%s' (workflow %s)",
-                event["_id"], auto.get("name"), action_id,
-            )
+                from app.services.passive_triggers import create_folder_watch_trigger
+                event = create_folder_watch_trigger(
+                    workflow_doc,
+                    doc,
+                    automation_id=str(auto["_id"]),
+                    automation_name=auto.get("name", ""),
+                )
+                logger.info(
+                    "Created folder watch trigger %s for automation '%s' (workflow %s)",
+                    event["_id"], auto.get("name"), action_id,
+                )
+            except Exception as e:
+                logger.error("Workflow automation '%s' failed to dispatch: %s", auto.get("name"), e)
+                from app.services.failure_notifications import notify_automation_failed
+
+                notify_automation_failed(
+                    db,
+                    automation=auto,
+                    error=e,
+                    detail=f'Could not start the workflow for "{doc.get("title") or "a document"}".',
+                )
 
         elif action_type == "extraction":
             # Run extraction inline (sync) since we're in a Celery worker
@@ -1001,6 +1031,23 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
                 "ingest_error": str(e)[:500],
             },
         )
+        # The amber icon on the file row was the only signal; the owner of a
+        # 50-file upload never sees row 37's icon. Bell once retries are
+        # exhausted — the document is saved, but search/chat cannot see it.
+        from app.services.failure_notifications import (
+            is_final_attempt,
+            notify_document_failed,
+        )
+
+        if is_final_attempt(self, e):
+            notify_document_failed(
+                db,
+                doc=doc,
+                error=(
+                    "The document was saved, but search indexing failed — "
+                    f"chat and knowledge search will not see it. {str(e)[:200]}"
+                ),
+            )
         raise
 
     _record_ingestion_result(
