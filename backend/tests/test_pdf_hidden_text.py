@@ -317,3 +317,39 @@ class TestInspectionFailureIsDisclosedNotSwallowed:
         from app.services.document_service import INGESTION_WARNING_LABELS
 
         assert "hidden_text_unchecked" in INGESTION_WARNING_LABELS
+
+
+class TestUncheckedIsNotPartial:
+    """hidden_text_unchecked must not ride the partial-ingestion framing:
+    that notice says content may be MISSING and offers "Retry extraction for
+    the full text" — the inverse of this risk (EXTRA unvetted text)."""
+
+    def _doc(self, codes):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            uuid="d1", title="Doc", raw_text="text",
+            ingestion_warnings=codes, extraction_nonletter_ratio=None,
+        )
+
+    def test_is_partially_ingested_excludes_the_advisory_code(self):
+        from app.services import document_service as ds
+
+        assert ds.is_partially_ingested(self._doc(["partial_ocr"])) is True
+        assert ds.is_partially_ingested(self._doc(["hidden_text_unchecked"])) is False
+        assert ds.has_unchecked_hidden_text(self._doc(["hidden_text_unchecked"])) is True
+
+    def test_chat_title_helpers_split_the_two_populations(self):
+        from app.services.chat_service import (
+            partially_ingested_titles,
+            unchecked_hidden_text_titles,
+        )
+
+        partial = self._doc(["partial_ocr"])
+        unchecked = self._doc(["hidden_text_unchecked"])
+        unchecked.title = "Odd.pdf"
+        both = [partial, unchecked]
+        assert unchecked_hidden_text_titles(both) == ["Odd.pdf"]
+        partial_titles = partially_ingested_titles(both)
+        assert len(partial_titles) == 1
+        assert "Odd.pdf" not in partial_titles[0]

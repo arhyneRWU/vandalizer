@@ -104,8 +104,10 @@ def _span_is_unpainted(span: dict) -> bool:
 def hidden_text_fragments(pdf_path: str) -> list[str]:
     """Normalized text fragments *pdf_path* renders invisibly.
 
-    Never raises: a PDF we cannot inspect yields no fragments, which leaves
-    the extracted text exactly as the reader produced it.
+    Raises :class:`HiddenTextInspectionError` for a PDF it cannot inspect —
+    "no hidden text" and "could not look" must be distinct answers, or a
+    reader crash silently disables the scrub (see #811). ``scrub_pdf`` is the
+    catcher: it passes the text through unchanged and reports the failure.
     """
     try:
         import pymupdf

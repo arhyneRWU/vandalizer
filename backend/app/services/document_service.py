@@ -41,9 +41,22 @@ def ingestion_warning_text(doc: SmartDocument) -> str:
     return "; ".join(labels)
 
 
+#: Warning codes that mean "the stored text is real but incomplete/degraded".
+#: hidden_text_unchecked is deliberately NOT here: that document's text may
+#: contain EXTRA unvetted content, the inverse risk — telling the user content
+#: may be missing (and to retry extraction for "the full text") would assert
+#: the opposite of what happened.
+COMPLETENESS_WARNING_CODES = frozenset({"partial_ocr", "sparse_text", "low_quality_text"})
+
+
 def is_partially_ingested(doc: SmartDocument) -> bool:
     """True when the stored text is real but is not the whole document."""
-    return bool(ingestion_warnings(doc))
+    return any(c in COMPLETENESS_WARNING_CODES for c in ingestion_warnings(doc))
+
+
+def has_unchecked_hidden_text(doc: SmartDocument) -> bool:
+    """True when the hidden-text scrub could not inspect this document."""
+    return "hidden_text_unchecked" in ingestion_warnings(doc)
 
 
 def is_extraction_low_quality(doc: SmartDocument) -> bool:

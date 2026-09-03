@@ -67,10 +67,14 @@ def convert_to_markdown(doc_path: str, keep_data_uris: bool = True) -> str:
     return clean_markdown_nans(result.text_content)
 
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract text from a PDF using PyMuPDF. See _pymupdf_extract_with_pages for the page-aware variant."""
+def extract_text_from_pdf(pdf_path: str, report: dict | None = None) -> str:
+    """Extract text from a PDF using PyMuPDF. See _pymupdf_extract_with_pages for the page-aware variant.
+
+    ``report``, when given, receives ``{"hidden_text_unchecked": True}`` if the
+    hidden-text scrub could not inspect the file (see pdf_hidden_text).
+    """
     text, _ = _pymupdf_extract_with_pages(pdf_path)
-    scrubbed, _ = pdf_hidden_text.scrub_pdf(pdf_path, text)
+    scrubbed, _ = pdf_hidden_text.scrub_pdf(pdf_path, text, report=report)
     return scrubbed
 
 
