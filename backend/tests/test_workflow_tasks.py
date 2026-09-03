@@ -1731,3 +1731,72 @@ class TestBuildRefusalFailsTheRun:
         ]
         assert error_writes, "run was not marked failed"
         assert "MysteryTask" in error_writes[0]["error"]
+
+
+class TestLibrarySaveDeliveryFailure:
+    """#810: the finalize block swallowed a failed library write with a log
+    line — the run reported completed with its configured deliverable never
+    written. It must record the failure on the run and bell the launcher."""
+
+    @patch("app.tasks.workflow_tasks._get_db")
+    @patch("app.services.workflow_engine.build_workflow_engine")
+    def test_completed_run_records_and_bells_the_undelivered_output(
+        self, mock_build, mock_get_db,
+    ):
+        from app.tasks.workflow_tasks import execute_workflow_task
+
+        wf_id = _fake_oid()
+        result_id = _fake_oid()
+        step_id = _fake_oid()
+        task_id = _fake_oid()
+
+        workflow_doc = _make_workflow_doc(wf_id=wf_id, step_ids=[step_id])
+        workflow_doc["output_config"] = {
+            "storage": {"enabled": True, "destination_folder": "f-1"},
+        }
+        db = _mock_db(
+            workflow_doc=workflow_doc,
+            result_doc=_make_result_doc(result_id=result_id, workflow_id=wf_id),
+            step_docs=[{"_id": step_id, "name": "Step1", "data": {}, "tasks": [task_id]}],
+            task_docs=[{"_id": task_id, "name": "Prompt", "data": {"prompt": "test"}}],
+            smart_docs=[{"uuid": "uuid1", "raw_text": "document text"}],
+        )
+        mock_get_db.return_value = db
+
+        mock_engine = MagicMock()
+        mock_engine.execute.return_value = ("Final output", [{"name": "Doc", "output": ["uuid1"]}])
+        mock_engine.usage = MagicMock(tokens_in=10, tokens_out=5)
+        mock_build.return_value = mock_engine
+
+        db.activity_event.find_one.return_value = {"user_id": "launcher-1"}
+        activity_id = str(_fake_oid())
+
+        with patch(
+            "app.services.output_handlers.save_results_to_folder",
+            side_effect=RuntimeError("destination folder deleted"),
+        ), patch(
+            "app.services.failure_notifications.notify_delivery_failed"
+        ) as notify, patch("app.tasks.quality_tasks.auto_validate_workflow"), \
+             patch("app.tasks.activity_tasks.generate_activity_description_task"):
+            result = execute_workflow_task(
+                workflow_result_id=str(result_id),
+                workflow_id=str(wf_id),
+                trigger_step_data={"doc_uuids": ["uuid1"]},
+                model="gpt-4o",
+                activity_id=activity_id,
+            )
+
+        # The run still completes — results exist and are viewable...
+        assert result["status"] == "completed"
+        # ...but the failure is recorded on the run...
+        pushes = [
+            c for c in db.workflow_result.update_one.call_args_list
+            if "$push" in c[0][1] and "delivery_failures" in c[0][1]["$push"]
+        ]
+        assert pushes, "delivery failure was not recorded on the run"
+        assert "destination folder deleted" in pushes[0][0][1]["$push"]["delivery_failures"]
+        # ...and the bell goes to the LAUNCHER resolved from the activity
+        # rail, not just the workflow owner.
+        notify.assert_called_once()
+        assert "could not be saved" in notify.call_args.kwargs["detail"]
+        assert notify.call_args.kwargs["user_id"] == "launcher-1"

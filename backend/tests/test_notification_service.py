@@ -118,6 +118,7 @@ class TestCoalesceKinds:
             "document_failed",
             "document_unsearchable",
             "automation_failed",
+            "delivery_failed",
             "kb_source_failed",
             "project_kb_sync_failed",
         }

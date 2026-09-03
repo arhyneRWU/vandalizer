@@ -175,6 +175,66 @@ def notify_document_failed(db, *, doc: dict | None, error: Any) -> None:
         logger.exception("Failed to emit document failure notification")
 
 
+def notify_delivery_failed(
+    db,
+    *,
+    workflow_doc: dict | None = None,
+    automation: dict | None = None,
+    detail: str,
+    error: Any = None,
+    user_id: str | None = None,
+) -> None:
+    """Notify the owner that a run COMPLETED but a configured output did not
+    deliver (library write, notification, webhook).
+
+    Deliberately not notify_workflow_failed / notify_automation_failed: the
+    run's results exist and are viewable — "failed" would be wrong twice over,
+    and coalescing onto the genuine-failure key would overwrite an unread real
+    failure's detail. But a run whose configured deliverable never left the
+    building is not done either, and until now the only trace was a log line.
+
+    Pass ``workflow_doc`` for a manual run, ``automation`` for an automation's
+    outputs; ``error`` (optional) is appended via the module's shared snippet
+    rule so bell bodies stay readable.
+    """
+    try:
+        workflow_doc = workflow_doc or {}
+        automation = automation or {}
+        recipient = user_id or workflow_doc.get("user_id") or automation.get("user_id")
+        if not recipient:
+            return
+        if automation:
+            subject_id = str(automation.get("_id") or "")
+            name = automation.get("name") or "Automation"
+            link = (
+                f"/?mode=automations&automation={subject_id}"
+                if subject_id else "/?mode=automations"
+            )
+            item_kind = "automation"
+        else:
+            subject_id = str(workflow_doc.get("_id") or "")
+            name = workflow_doc.get("name") or "Workflow"
+            link = f"/?workflow={subject_id}" if subject_id else "/"
+            item_kind = "workflow"
+        body = f"{detail} {_snippet(error)}" if error else detail
+
+        create_notification_sync(
+            db,
+            user_id=recipient,
+            kind="delivery_failed",
+            title=f"Output not delivered: {name}",
+            body=body,
+            link=link,
+            item_kind=item_kind,
+            item_id=subject_id or None,
+            item_name=name,
+            coalesce_key=f"delivery_failed:{subject_id or name}",
+            group_title=f"Outputs not delivered {{count}}×: {name}",
+        )
+    except Exception:
+        logger.exception("Failed to emit delivery-failure notification")
+
+
 def notify_document_not_searchable(db, *, doc: dict | None, error: Any) -> None:
     """Notify the owner that a document was SAVED but search indexing failed.
 

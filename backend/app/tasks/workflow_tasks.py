@@ -769,6 +769,24 @@ def _classify_input_documents(db, workflow_doc: dict, doc_uuids: list[str]):
     return ready, processing, failed
 
 
+def _activity_owner(db, activity_id) -> str | None:
+    """The user who launched the run, from its activity-rail entry.
+
+    The rail row carries the launcher, who may differ from the workflow's
+    owner (a teammate running a shared workflow) — bells about a run should
+    reach the person who started it when known.
+    """
+    if not activity_id:
+        return None
+    from bson import ObjectId
+
+    try:
+        row = db.activity_event.find_one({"_id": ObjectId(activity_id)}, {"user_id": 1})
+        return (row or {}).get("user_id")
+    except Exception:
+        return None
+
+
 def _mark_workflow_failed(
     db, workflow_result_id, activity_id, error_msg, error_payload=None, notify=True,
 ):
@@ -1155,13 +1173,27 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
     # Polled by the engine between steps. The cancel endpoint flips the result
     # status to "canceled"; this lets a run that is between steps stop cleanly
     # (a mid-step stop is handled out-of-band by Celery task revocation).
+    _cancel_check_oid = ObjectId(workflow_result_id)
+
     def should_cancel() -> bool:
+        # A swallowed DB blip used to make a user's Cancel silently not take —
+        # the run kept going and kept spending. False remains the failure
+        # answer (spuriously canceling healthy runs on a blip is worse), but
+        # never quietly: the error log names the consequence. No retry here —
+        # a dead connection blocks for the full server-selection timeout, and
+        # pymongo already retries reads internally, so a second attempt only
+        # doubles the stall for the same answer.
         try:
             doc = db.workflow_result.find_one(
-                {"_id": ObjectId(workflow_result_id)}, {"status": 1},
+                {"_id": _cancel_check_oid}, {"status": 1},
             )
             return bool(doc and doc.get("status") == "canceled")
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Cancel check failed for run %s (%s) — a pending Cancel "
+                "will not take effect this step",
+                workflow_result_id, e,
+            )
             return False
 
     try:
@@ -1300,7 +1332,31 @@ def execute_workflow_task(self, workflow_result_id, workflow_id, trigger_step_da
                 if fresh_result:
                     save_results_to_folder(fresh_result, storage_cfg)
             except Exception as e:
+                # The run completed and its results are viewable, but the
+                # configured deliverable never left the building — recorded on
+                # the run and belled, not just logged (#810). Guarded like the
+                # rest of the finalize block: this sits after the finalized_at
+                # claim, so an escape here (e.g. a correlated Mongo failover)
+                # would strand the activity and skip num_executions on the
+                # retry that finds the claim already taken.
                 logger.exception("Failed to save workflow output to library: %s", e)
+                try:
+                    detail = "The output could not be saved to the library."
+                    db.workflow_result.update_one(
+                        {"_id": ObjectId(workflow_result_id)},
+                        {"$push": {"delivery_failures": f"{detail} {str(e)[:200]}"}},
+                    )
+                    from app.services.failure_notifications import notify_delivery_failed
+
+                    notify_delivery_failed(
+                        db, workflow_doc=workflow_doc, detail=detail, error=e,
+                        user_id=_activity_owner(db, activity_id),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not record delivery failure for run %s",
+                        workflow_result_id,
+                    )
 
         # Increment workflow execution count
         db.workflow.update_one(

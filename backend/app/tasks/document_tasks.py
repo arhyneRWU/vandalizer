@@ -952,6 +952,12 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
         "final_output": {"output": results},
     }
 
+    # Each output is attempted independently (one failed webhook must not
+    # block storage), but failures are COLLECTED, not swallowed: the
+    # automation used to report success with its deliverables never leaving
+    # the building (#810).
+    delivery_failures: list[str] = []
+
     # 1. Storage
     storage_cfg = output_config.get("storage", {})
     if storage_cfg.get("enabled"):
@@ -960,6 +966,7 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
             logger.info("Extraction results saved to %s", path)
         except Exception as e:
             logger.error("Failed to save extraction results: %s", e)
+            delivery_failures.append(f"library save failed: {str(e)[:200]}")
 
     # 2. Notifications
     for notification in output_config.get("notifications", []):
@@ -968,6 +975,9 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
                 send_workflow_notification(result_doc, notification)
         except Exception as e:
             logger.error("Failed to send extraction notification: %s", e)
+            delivery_failures.append(
+                f"notification ({notification.get('channel') or 'configured'}) failed: {str(e)[:200]}"
+            )
 
     # 3. Webhooks
     for webhook_cfg in output_config.get("webhooks", []):
@@ -975,6 +985,25 @@ def _process_extraction_outputs(db, automation: dict, results: dict) -> None:
             call_webhook(result_doc, webhook_cfg)
         except Exception as e:
             logger.error("Failed to call extraction webhook: %s", e)
+            delivery_failures.append(
+                f"webhook ({webhook_cfg.get('url') or 'configured'}) failed: {str(e)[:200]}"
+            )
+
+    if delivery_failures:
+        # delivery_failed, not automation_failed: the extraction RAN and its
+        # results exist — and coalescing onto the automation_failed key would
+        # overwrite an unread genuine dispatch failure's detail.
+        from app.services.failure_notifications import notify_delivery_failed
+
+        notify_delivery_failed(
+            db,
+            automation=automation,
+            detail=(
+                "The extraction ran, but "
+                f"{len(delivery_failures)} configured output(s) failed to "
+                "deliver: " + "; ".join(delivery_failures)
+            ),
+        )
 
 
 @celery_app.task(
