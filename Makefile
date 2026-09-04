@@ -66,15 +66,21 @@ review-graph:
 	  printf "  install it with: uv tool install 'code-review-graph[embeddings]'\n" >&2; \
 	  printf '  it is optional -- no other make target needs it.\n' >&2; \
 	  exit 1; }
-	@root=$$(git worktree list --porcelain | awk '/^worktree /{print $$2; exit}'); \
+	@root=$$(git worktree list --porcelain | sed -n '1s/^worktree //p'); \
 	 if [ -z "$$root" ]; then \
 	   printf 'review-graph: cannot resolve the main working tree.\n' >&2; exit 1; \
 	 fi; \
-	 if [ ! -f "$$root/.code-review-graph/graph.db" ]; then \
-	   code-review-graph build --repo "$$root"; \
-	 else \
+	 mkdir -p "$$root/.code-review-graph"; \
+	 if [ -f "$$root/.code-review-graph/graph.db" ]; then \
 	   base=$${CRG_BASE:-$$(git -C "$$root" rev-parse --verify --quiet ORIG_HEAD || echo HEAD~1)}; \
-	   code-review-graph update --repo "$$root" --base "$$base"; \
+	   set -- update --repo "$$root" --base "$$base"; \
+	 else \
+	   set -- build --repo "$$root"; \
+	 fi; \
+	 if command -v flock >/dev/null 2>&1; then \
+	   flock "$$root/.code-review-graph/.lock" code-review-graph "$$@"; \
+	 else \
+	   code-review-graph "$$@"; \
 	 fi
 
 # Writes scripts/ui_endpoint_map.md and .json for reading; regenerate on demand,

@@ -17,8 +17,14 @@ touches it, and the tool is not a project dependency. If it is not installed,
 ```bash
 uv tool install 'code-review-graph[embeddings]'  # once
 make review-graph                                # build (first run) or refresh
-code-review-graph embed                          # enable semantic search
+code-review-graph embed --repo "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
 ```
+
+`embed` needs `--repo` for the same reason `make review-graph` passes it: run
+from a worktree, the tool discovers the worktree and creates a second graph
+there rather than adding vectors to the shared one — so `search` would keep
+answering in `fts` mode with nothing saying why. From the main checkout, a bare
+`code-review-graph embed` is equivalent.
 
 The `[embeddings]` extra is worth taking even though it is a multi-GB install:
 without it `search` still returns results and still reports `"status": "ok"`,
@@ -74,6 +80,15 @@ which is a tracked file in this repo. It also writes MCP config into the repo
 root — `.mcp.json`, and per-editor files such as `.cursor/`, `.kiro/`,
 `.qoder/`. Those are gitignored here, but they are yours, not the project's;
 do not commit them.
+
+Two consequences of pinning the graph to the main checkout are worth knowing.
+The graph reflects the **main checkout's** HEAD, so a symbol you just added on a
+worktree branch is simply absent — and an absent node and a real "no callers"
+answer look identical, so `callers_of` on it returns nothing rather than an
+error. And because every worktree now drives one database, two `make
+review-graph` runs at the same time contend for it: the recipe takes an
+`flock` where one is available, but macOS ships no `flock`, so on a Mac refresh
+from one worktree at a time rather than several at once.
 
 ## What it gets wrong
 
