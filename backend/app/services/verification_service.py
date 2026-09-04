@@ -717,6 +717,9 @@ async def list_verified_items(
             "organization_ids": item_org_ids,
             "quality_score": meta.quality_score if meta else None,
             "quality_tier": item_tier,
+            # A tier with no measured score behind it is a hand-typed catalog
+            # assertion, not a measurement — the badge has to say which.
+            "quality_asserted": bool(meta and item_tier and meta.quality_score is None),
             "quality_grade": meta.quality_grade if meta else None,
             "last_validated_at": meta.last_validated_at.isoformat() if meta and meta.last_validated_at else None,
             "validation_run_count": meta.validation_run_count if meta else 0,
@@ -1132,6 +1135,7 @@ async def list_catalog_coverage(
             "coverage_order": coverage_order.get(coverage, 99),
             "quality_score": meta.quality_score if meta else None,
             "quality_tier": meta.quality_tier if meta else None,
+            "quality_asserted": bool(meta and meta.quality_tier and meta.quality_score is None),
             "last_validated_at": meta.last_validated_at.isoformat() if meta and meta.last_validated_at else None,
             "official_baseline_pinned_at": meta.official_baseline_pinned_at.isoformat() if meta and meta.official_baseline_pinned_at else None,
             "official_baseline_score": meta.official_baseline_score if meta else None,
