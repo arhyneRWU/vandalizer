@@ -1142,6 +1142,7 @@ async def list_catalog_coverage(
             ) if meta and meta.official_baseline else 0,
             "last_drift_check_at": meta.last_drift_check_at.isoformat() if meta and meta.last_drift_check_at else None,
             "last_drift_score": meta.last_drift_score if meta else None,
+            "last_drift_basis": meta.last_drift_basis if meta else None,
         })
 
     rows.sort(key=lambda r: (r["coverage_order"], -(r["quality_score"] or 0)))
@@ -1211,7 +1212,9 @@ async def pin_retroactive_baseline(
 
     # Soft check: does the live config currently pass its own new baseline?
     # Compare against the existing latest validation score as a cheap proxy.
-    # (Full re-run against the new baseline happens in drift monitoring or on user request.)
+    # (Drift monitoring re-runs the pinned baseline only when
+    # quality_config.monitoring.baseline_reexecution is enabled and the item
+    # is an extraction set; otherwise it keeps comparing this same proxy.)
     live_passes: bool | None = None
     if score is not None and meta.quality_score is not None:
         live_passes = meta.quality_score >= score - 5  # 5pt tolerance

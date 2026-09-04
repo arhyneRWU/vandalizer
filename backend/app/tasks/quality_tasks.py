@@ -345,10 +345,16 @@ async def _quality_monitor_async():
                 )
 
     # 4. Phase E: Baseline drift monitoring.
-    # For each verified item with a pinned official_baseline_score, compare the
-    # current quality_score against the pinned score. If drift exceeds threshold,
-    # raise a baseline_drift alert. Stamps last_drift_check_at so the UI can show
-    # "checked X ago" even when there's no drift.
+    # For each verified item with a pinned official_baseline_score, measure the
+    # live config against the pinned score. With baseline_reexecution enabled,
+    # extraction baselines are actually re-run (LLM calls — that's why it's a
+    # config gate, default off); otherwise, and for the kinds that can't be
+    # replayed, the item's latest validation score stands in as a cheap proxy.
+    # Either way last_drift_basis records which one was measured. Stamps
+    # last_drift_check_at so the UI can show "checked X ago" even without drift.
+    from app.services.quality_service import reexecute_official_baseline
+
+    reexec_enabled = monitoring.get("baseline_reexecution", False)
     pinned_metas = await VerifiedItemMetadata.find(
         VerifiedItemMetadata.official_baseline_score != None,  # noqa: E711
     ).to_list()
@@ -356,9 +362,22 @@ async def _quality_monitor_async():
     for meta in pinned_metas:
         try:
             current = meta.quality_score
+            basis = "latest_validation_proxy"
+            if reexec_enabled:
+                reexec = await reexecute_official_baseline(meta)
+                if reexec is not None:
+                    # The re-execution persisted a ValidationRun and refreshed
+                    # the quality metadata — reload before writing drift fields
+                    # so the save below doesn't clobber the newer scores.
+                    fresh = await VerifiedItemMetadata.get(meta.id)
+                    if fresh is not None:
+                        meta = fresh
+                    current = reexec.get("score")
+                    basis = "baseline_reexecution"
             pinned = meta.official_baseline_score
             meta.last_drift_check_at = now
             meta.last_drift_score = current
+            meta.last_drift_basis = basis
             if current is not None and pinned is not None:
                 drift = pinned - current
                 if drift >= degradation_threshold:
@@ -377,7 +396,12 @@ async def _quality_monitor_async():
                             severity="critical" if drift >= 20 else "warning",
                             message=(
                                 f"Quality has drifted {drift:.1f} pts below the official baseline "
-                                f"({pinned:.1f} pinned -> {current:.1f} now)."
+                                f"({pinned:.1f} pinned -> {current:.1f} now, "
+                                + (
+                                    "measured by re-running the pinned baseline)."
+                                    if basis == "baseline_reexecution"
+                                    else "latest-validation proxy — not a baseline re-run)."
+                                )
                             ),
                             previous_score=pinned,
                             current_score=current,
