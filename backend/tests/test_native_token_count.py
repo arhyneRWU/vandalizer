@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,8 +86,10 @@ def _reset_coalescing():
     order.
     """
     ntc._UNAVAILABLE_LOGGED.clear()
+    ntc._CIRCUIT.clear()
     yield
     ntc._UNAVAILABLE_LOGGED.clear()
+    ntc._CIRCUIT.clear()
 
 
 def _install(monkeypatch, *, protocol, model=None):
@@ -503,13 +507,20 @@ class TestFailureLoggingIsCoalesced:
         )
 
         with caplog.at_level(logging.DEBUG, logger=_LOGGER):
-            for _ in range(4):
+            for _ in range(50):
                 await _count()
 
-        assert len(_warnings(caplog)) == 1
-        # Still recorded: occurrences two onward are the only evidence that the
-        # failure is ongoing rather than a one-off at startup.
-        assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 3
+        # Two, and only two, however long the outage lasts: the failure itself,
+        # then the notice that counting is paused. Fifty turns rather than four
+        # so this pins the bound rather than an arithmetic coincidence.
+        assert len(_warnings(caplog)) == 2
+        assert "pausing it" in _warnings(caplog)[1].getMessage()
+        # Occurrences two onward are the only evidence the failure is ongoing
+        # rather than a one-off at startup -- but they stop once the breaker
+        # opens, because after that there is no attempt to report.
+        assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == (
+            ntc.NATIVE_COUNT_FAILURE_THRESHOLD - 1
+        )
 
     @pytest.mark.asyncio
     async def test_a_second_model_is_still_reported_loudly(self, monkeypatch, caplog):
@@ -689,3 +700,133 @@ class TestNativeCountFor:
         assert native is not None
         margin = token_safety_margin(self.MODEL, None, native=native)
         assert margin == pytest.approx(native.tokens / native.baseline_tokens)
+
+
+class TestRepeatedFailureStopsCostingTime:
+    """The module already coalesced the failure *log*. It did not coalesce the
+    failure *work*, so a deployment whose egress to the count endpoint is slow
+    paid the full timeout on every chat turn, ahead of the first token, forever
+    -- and said so at DEBUG after the first occurrence."""
+
+    def setup_method(self):
+        from app.services import native_token_count as ntc
+        ntc._CIRCUIT.clear()
+        ntc._UNAVAILABLE_LOGGED.clear()
+
+    teardown_method = setup_method
+
+    @pytest.mark.asyncio
+    async def test_the_provider_stops_being_called_after_repeated_failures(self, monkeypatch):
+        """The point of the breaker: not a quieter log, an absent request."""
+        from app.services import native_token_count as ntc
+
+        calls = 0
+
+        async def boom(**_kw):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("count endpoint unreachable")
+
+        monkeypatch.setattr(ntc, "_ask_provider", boom)
+        monkeypatch.setattr(ntc, "_protocol_for", lambda *a, **k: "anthropic")
+
+        for _ in range(10):
+            res = await ntc.count_natively(
+                model_name="claude-x", model_config={}, system_config_doc={},
+                system_prompt="s", user_message="u", history=[],
+            )
+            assert not res.usable
+
+        assert calls == ntc.NATIVE_COUNT_FAILURE_THRESHOLD, (
+            f"provider was called {calls} times across 10 turns; the breaker "
+            "should stop the work, not just the logging"
+        )
+        assert res.source == "unavailable:circuit-open"
+
+    @pytest.mark.asyncio
+    async def test_a_working_provider_never_trips_it(self, monkeypatch):
+        from app.services import native_token_count as ntc
+
+        calls = 0
+
+        async def ok(**_kw):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(input_tokens=100)
+
+        monkeypatch.setattr(ntc, "_ask_provider", ok)
+        monkeypatch.setattr(ntc, "_protocol_for", lambda *a, **k: "anthropic")
+        monkeypatch.setattr(ntc, "_token_count", lambda usage: 100)
+
+        for _ in range(10):
+            res = await ntc.count_natively(
+                model_name="claude-x", model_config={}, system_config_doc={},
+                system_prompt="s", user_message="u", history=[],
+            )
+            assert res.usable
+        assert calls == 10
+
+    @pytest.mark.asyncio
+    async def test_recovery_is_retried_once_the_cooldown_elapses(self, monkeypatch):
+        """An outage must not disable counting until the next deploy."""
+        from app.services import native_token_count as ntc
+
+        failing = True
+        calls = 0
+
+        async def flaky(**_kw):
+            nonlocal calls
+            calls += 1
+            if failing:
+                raise RuntimeError("down")
+            return SimpleNamespace(input_tokens=100)
+
+        monkeypatch.setattr(ntc, "_ask_provider", flaky)
+        monkeypatch.setattr(ntc, "_protocol_for", lambda *a, **k: "anthropic")
+        monkeypatch.setattr(ntc, "_token_count", lambda usage: 100)
+
+        for _ in range(5):
+            await ntc.count_natively(
+                model_name="claude-x", model_config={}, system_config_doc={},
+                system_prompt="s", user_message="u", history=[],
+            )
+        tripped_at = calls
+
+        # Provider recovers, cooldown elapses.
+        failing = False
+        now = time.monotonic()
+        monkeypatch.setattr(ntc.time, "monotonic",
+                            lambda: now + ntc.NATIVE_COUNT_COOLDOWN_SECONDS + 1)
+
+        res = await ntc.count_natively(
+            model_name="claude-x", model_config={}, system_config_doc={},
+            system_prompt="s", user_message="u", history=[],
+        )
+        assert res.usable, "the breaker never re-tested the provider"
+        assert calls == tripped_at + 1
+        # And a success clears the record rather than leaving it primed.
+        assert "claude-x" not in ntc._CIRCUIT
+
+    @pytest.mark.asyncio
+    async def test_one_model_failing_does_not_disable_another(self, monkeypatch):
+        from app.services import native_token_count as ntc
+
+        async def only_claude_fails(*, model_name, **_kw):
+            if model_name == "claude-x":
+                raise RuntimeError("down")
+            return SimpleNamespace(input_tokens=100)
+
+        monkeypatch.setattr(ntc, "_ask_provider", only_claude_fails)
+        monkeypatch.setattr(ntc, "_protocol_for", lambda *a, **k: "anthropic")
+        monkeypatch.setattr(ntc, "_token_count", lambda usage: 100)
+
+        for _ in range(5):
+            await ntc.count_natively(
+                model_name="claude-x", model_config={}, system_config_doc={},
+                system_prompt="s", user_message="u", history=[],
+            )
+        res = await ntc.count_natively(
+            model_name="gemini-y", model_config={}, system_config_doc={},
+            system_prompt="s", user_message="u", history=[],
+        )
+        assert res.usable

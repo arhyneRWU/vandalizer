@@ -34,6 +34,7 @@ Two asymmetries between the providers are baked into the result:
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -82,6 +83,59 @@ _COUNTABLE_PROTOCOLS: dict[str, bool] = {
 # as `token_estimate_check._log_failure_once` and
 # `context_budget._warn_estimated_once`.
 _UNAVAILABLE_LOGGED: set[str] = set()
+
+# How many consecutive failures before a model stops being asked, and for how
+# long. `_UNAVAILABLE_LOGGED` above coalesces the *log*; this coalesces the
+# *work*, which is the part that costs a user their time.
+NATIVE_COUNT_FAILURE_THRESHOLD = 3
+NATIVE_COUNT_COOLDOWN_SECONDS = 300.0
+
+# model name -> (consecutive failures, monotonic deadline until which to skip)
+_CIRCUIT: dict[str, tuple[int, float]] = {}
+
+
+def _circuit_open(model_name: str) -> bool:
+    """Whether this model is in cooldown after repeated count failures.
+
+    Without this the module retries forever: a deployment whose egress to the
+    count endpoint is slow, or whose org is rate-limited there, pays the full
+    timeout on *every* chat turn, ahead of the first token, indefinitely — and
+    after the first occurrence it says so only at DEBUG. The estimate path it
+    falls back to is the one that shipped before this feature, so skipping is
+    strictly better than blocking: same budget, no added latency.
+
+    Monotonic, so a clock adjustment cannot strand a model in cooldown.
+    """
+    state = _CIRCUIT.get(model_name)
+    if state is None:
+        return False
+    failures, until = state
+    if failures < NATIVE_COUNT_FAILURE_THRESHOLD:
+        return False
+    if time.monotonic() >= until:
+        # Cooldown elapsed: let exactly one request through to re-test the
+        # provider. It either succeeds and resets, or fails and re-arms.
+        _CIRCUIT[model_name] = (NATIVE_COUNT_FAILURE_THRESHOLD - 1, 0.0)
+        return False
+    return True
+
+
+def _record_failure(model_name: str) -> None:
+    failures = _CIRCUIT.get(model_name, (0, 0.0))[0] + 1
+    _CIRCUIT[model_name] = (failures, time.monotonic() + NATIVE_COUNT_COOLDOWN_SECONDS)
+    if failures == NATIVE_COUNT_FAILURE_THRESHOLD:
+        logger.warning(
+            "native token count for %s failed %d times in a row; pausing it for "
+            "%.0fs and using the estimated budget meanwhile",
+            model_name, failures, NATIVE_COUNT_COOLDOWN_SECONDS,
+        )
+
+
+def _record_success(model_name: str) -> None:
+    """A working provider clears the record, so an outage does not leave a
+    model one failure away from a cooldown for the life of the process."""
+    _CIRCUIT.pop(model_name, None)
+    _UNAVAILABLE_LOGGED.discard(model_name)
 
 
 @dataclass(frozen=True)
@@ -202,6 +256,12 @@ async def count_natively(
     if protocol not in _COUNTABLE_PROTOCOLS:
         return _unavailable(f"protocol-{protocol}")
 
+    # Checked after the protocol gate so an ineligible model never enters the
+    # circuit at all, and before any model construction, key decryption or
+    # request: while open this must cost nothing.
+    if _circuit_open(model_name):
+        return _unavailable("circuit-open")
+
     covers_system_prompt = _COUNTABLE_PROTOCOLS[protocol]
 
     try:
@@ -219,6 +279,7 @@ async def count_natively(
         _log_unavailable_once(
             model_name, f"timed out after {NATIVE_COUNT_TIMEOUT_SECONDS}s"
         )
+        _record_failure(model_name)
         return _unavailable("timeout")
     except Exception as exc:
         # Blanket by necessity, not by laziness. Anthropic surfaces
@@ -234,13 +295,16 @@ async def count_natively(
         _log_unavailable_once(
             model_name, f"{type(exc).__name__}: {exc}", exc_info=True
         )
+        _record_failure(model_name)
         return _unavailable(type(exc).__name__)
 
     tokens = _token_count(usage)
     if tokens is None:
         _log_unavailable_once(model_name, "provider reported no input token count")
+        _record_failure(model_name)
         return _unavailable("no-usage")
 
+    _record_success(model_name)
     return NativeCountResult(
         tokens=tokens, covers_system_prompt=covers_system_prompt, source=protocol
     )
