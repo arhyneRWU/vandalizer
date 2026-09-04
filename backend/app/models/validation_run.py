@@ -55,6 +55,13 @@ class ValidationRun(Document):
 
     class Settings:
         name = "validation_runs"
+        indexes = [
+            # Per-item history (get_quality_history, get_latest_validation).
+            [("item_kind", 1), ("item_id", 1), ("created_at", -1)],
+            # By-model rollups and the mgmt API's model filter — previously a
+            # full collection scan.
+            [("model", 1), ("created_at", -1)],
+        ]
 
     def __init__(self, **data):
         super().__init__(**data)
