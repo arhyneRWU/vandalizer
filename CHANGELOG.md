@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A validation run is now labeled with the model that actually executed it — and asking for a model actually runs it.** Two lies met in the extraction validation path. A model pinned in the system or per-set extraction config silently won over the model the caller passed, while the run was persisted under the requested model — so quality history could attribute a score to a model that never ran, and the admin Regression Suite's "run under model X" measured whatever the config pinned instead. An explicitly requested model is now forced into the engine config — including a two-pass config's per-pass models — so it wins; and the persisted run records the model resolution actually produced, its provenance (requested / config-pinned / caller default), and the temperature configured on that model at run time, so a later edit to a model's live settings can't rewrite what a historical score measured. Workflow and knowledge-base validation runs, which persisted no model at all, are now attributed too: a workflow validation grades historical executions, so it records the models those runs snapshotted at dispatch — one label when they agree, none when they don't, never a guess — and a KB validation records the model that generated the graded answers (distinct from the judge), accepts an explicit answer model that beats a KB-level config override, and pins the no-KB baseline to that same model so lift measures the KB rather than a model swap. A retrieval-only KB run still records no task model, because none ran.
+
 ## [v4.12.0] - 2026-09-03
 
 ### Added

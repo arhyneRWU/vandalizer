@@ -2734,6 +2734,14 @@ async def validate_workflow(workflow_id: str, user: User | None = None) -> dict:
         WorkflowResult.status == "completed",
     ).sort("-_id").limit(max(num_runs, 1)).to_list()
 
+    # Which models produced the executions being graded. Workflow validation
+    # scores historical runs, so the honest attribution is the models those
+    # runs snapshotted at dispatch — a single unambiguous model when all runs
+    # agree, otherwise no single label.
+    models_used = sorted({
+        wr.model for wr in last_results if getattr(wr, "model", None)
+    })
+
     # Static diagnostics — these run independent of the validation plan and
     # the LLM judge. Computed once up-front so the no-results path can still
     # surface dangling refs / prompt-field mismatches.
@@ -2830,6 +2838,7 @@ async def validate_workflow(workflow_id: str, user: User | None = None) -> dict:
         per_step_variance=per_step_variance,
         static_diagnostics=static_diagnostics,
         plan_stale=plan_stale,
+        models_used=models_used,
     )
 
 
@@ -3271,8 +3280,10 @@ async def _build_result(
     per_step_variance: dict[str, float] | None = None,
     static_diagnostics: list[dict] | None = None,
     plan_stale: bool = False,
+    models_used: list[str] | None = None,
 ) -> dict:
     """Compute separate quality / stability scores, combined score, grade, and persist."""
+    models_used = models_used or []
     statuses = [c["status"] for c in checks]
     fail_count = statuses.count("FAIL")
     warn_count = statuses.count("WARN")
@@ -3415,6 +3426,7 @@ async def _build_result(
         "judge_variance": judge_variance,
         "static_diagnostics": static_diagnostics or [],
         "plan_stale": plan_stale,
+        "models_used": models_used,
     }
 
     from app.services.quality_service import persist_validation_run
@@ -3425,6 +3437,8 @@ async def _build_result(
         run_type="workflow",
         result=result_dict,
         user_id=(wf_data or {}).get("user_id", ""),
+        model=models_used[0] if len(models_used) == 1 else None,
+        model_settings={"models_used": models_used} if models_used else None,
     )
 
     return result_dict
