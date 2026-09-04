@@ -113,3 +113,87 @@ async def test_blank_workflow_default_falls_back_to_user_default():
     assert task_model == "user-default"
     assert result_model == "user-default"
     gumn.assert_awaited_once()
+
+
+class TestEveryPathHonoursTheWorkflowDefault:
+    """The canvas states it without qualification -- "Runs every step on this
+    model". It was true of the interactive and batch run paths only, so the
+    same workflow used one model when a person clicked Run and another when a
+    schedule fired, the optimizer measured it, or Test Step tested it."""
+
+    @pytest.mark.asyncio
+    async def test_resolver_prefers_the_workflow_default_over_the_user_default(self):
+        from app.services.workflow_service import resolve_run_model
+
+        with patch("app.services.workflow_service.get_user_model_name",
+                   new=AsyncMock(return_value="user-default")):
+            assert await resolve_run_model({"default_model": "wf-model"}, "u1") == "wf-model"
+
+    @pytest.mark.asyncio
+    async def test_resolver_falls_back_when_no_workflow_default(self):
+        from app.services.workflow_service import resolve_run_model
+
+        with patch("app.services.workflow_service.get_user_model_name",
+                   new=AsyncMock(return_value="user-default")):
+            for cfg in (None, {}, {"default_model": ""}, {"default_model": None}):
+                assert await resolve_run_model(cfg, "u1") == "user-default", cfg
+
+    @pytest.mark.asyncio
+    async def test_test_step_uses_the_workflow_default(self):
+        """A step whose selector reads "Use workflow default" must be TESTED on
+        that model. Tuning against one model and running on another makes the
+        selector's own label untrue."""
+        from app.services import workflow_service
+
+        task_data: dict = {}
+        with patch.object(workflow_service, "get_user_model_name",
+                          new=AsyncMock(return_value="user-default")), \
+             patch.object(workflow_service.celery_app, "send_task") as send:
+            send.return_value = MagicMock(id="t1")
+            await workflow_service.test_step(
+                "Prompt", task_data, [], "u1",
+                workflow_input_config={"default_model": "wf-model"},
+            )
+        # test_step stamps the resolved model onto task_data before dispatch.
+        assert task_data["model"] == "wf-model"
+        assert send.call_args.kwargs["kwargs"]["task_data"]["model"] == "wf-model"
+
+    @pytest.mark.asyncio
+    async def test_test_step_still_falls_back_without_a_workflow_default(self):
+        from app.services import workflow_service
+
+        task_data: dict = {}
+        with patch.object(workflow_service, "get_user_model_name",
+                          new=AsyncMock(return_value="user-default")), \
+             patch.object(workflow_service.celery_app, "send_task") as send:
+            send.return_value = MagicMock(id="t1")
+            await workflow_service.test_step("Prompt", task_data, [], "u1")
+        assert task_data["model"] == "user-default"
+
+    def test_the_automated_path_reads_the_workflow_default(self):
+        """passive_tasks resolved the first configured model and never looked at
+        the workflow -- so a nightly folder-watch run silently used a different
+        model from the manual run of the same workflow."""
+        import inspect
+
+        from app.tasks import passive_tasks
+
+        src = inspect.getsource(passive_tasks.execute_workflow_passive)
+        assert '"default_model"' in src, (
+            "the scheduled/automated run path does not consult the workflow's "
+            "default model"
+        )
+
+    def test_the_optimizer_reads_the_workflow_default(self):
+        """Measuring the workflow on a model it will not run on makes the score,
+        and any tuning derived from it, describe a configuration that never
+        executes."""
+        import inspect
+
+        from app.services import workflow_optimizer
+
+        src = inspect.getsource(workflow_optimizer._execute_workflow_inproc)
+        assert '"default_model"' in src, (
+            "the optimizer's in-process run path does not consult the "
+            "workflow's default model"
+        )

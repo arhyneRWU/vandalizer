@@ -3283,6 +3283,8 @@ function TaskEditModal({ task, selectedDocUuids, workflow, workflowId, onClose, 
         task_name: task.name,
         task_data: taskData,
         document_uuids: testInput.docUuids,
+        // So a step set to "Use workflow default" is tested on that default.
+        workflow_id: workflow?.id,
       })
 
       // Poll for test result
