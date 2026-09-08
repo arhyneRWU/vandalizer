@@ -111,10 +111,18 @@ compose_project() {
 
 # Name of the container backing a compose service; empty if none exists.
 compose_container() {
-  $CONTAINER_CLI ps -a \
-    --filter "label=com.docker.compose.project=$(compose_project)" \
-    --filter "label=com.docker.compose.service=$1" \
-    --format '{{.Names}}' 2>/dev/null | head -1
+  local c
+  # Prefer a running container: `ps -a` lists exited and one-off `compose run`
+  # containers too, newest first, and an exec against one of those fails with
+  # a confusing error instead of "the API container is not running".
+  for flag in "" "-a"; do
+    c=$($CONTAINER_CLI ps $flag \
+      --filter "label=com.docker.compose.project=$(compose_project)" \
+      --filter "label=com.docker.compose.service=$1" \
+      --format '{{.Names}}' 2>/dev/null | head -1)
+    [[ -n "$c" ]] && break
+  done
+  echo "$c"
 }
 
 # State (running/exited/restarting/...) of a service's container; empty if

@@ -163,15 +163,6 @@ services:
       start_period: 90s
       retries: 3
     restart: unless-stopped
-    # Overrides the API probe baked into the shared backend image, which
-    # always fails here (no uvicorn in this container). `celery status`
-    # exits non-zero until at least one worker answers over the broker.
-    healthcheck:
-      test: ["CMD", "celery", "-A", "celery_worker.celery_app", "status"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     deploy:
       resources:
         limits:
