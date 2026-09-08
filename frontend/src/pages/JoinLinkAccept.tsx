@@ -334,7 +334,7 @@ function JoinRegisterForm({
         autoComplete="email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <input
         type="text"
@@ -343,7 +343,7 @@ function JoinRegisterForm({
         autoComplete="name"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <input
         type="password"
@@ -352,7 +352,7 @@ function JoinRegisterForm({
         required
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <p className="text-xs text-gray-500">
         8+ characters with uppercase, lowercase, and a digit.
@@ -408,7 +408,7 @@ function JoinLoginForm({
         autoComplete="email"
         value={userId}
         onChange={(e) => setUserId(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <input
         type="password"
@@ -417,7 +417,7 @@ function JoinLoginForm({
         required
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <button
         type="submit"
@@ -442,7 +442,7 @@ function CenteredCard({ children }: { children: React.ReactNode }) {
 
 function Spinner() {
   return (
-    <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-highlight border-t-transparent" />
+    <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-highlight-on-dark border-t-transparent" />
   )
 }
 

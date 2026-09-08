@@ -8,7 +8,7 @@ export function AuthLayout({ children, title }: { children: ReactNode; title: st
     <div className="min-h-screen bg-[#0a0a0a] text-gray-200 antialiased relative">
       {/* Background glow */}
       <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-yellow-600/10 rounded-full blur-[120px] animate-pulse" />
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-highlight/10 rounded-full blur-[120px] animate-pulse" />
         <div
           className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-gray-800/30 rounded-full blur-[120px] animate-pulse"
           style={{ animationDelay: '2s' }}

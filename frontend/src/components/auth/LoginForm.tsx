@@ -44,7 +44,7 @@ export function LoginForm() {
         aria-describedby={error ? 'login-error' : undefined}
         value={userId}
         onChange={(e) => setUserId(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <label htmlFor="login-password" className="sr-only">Password</label>
       <input
@@ -57,7 +57,7 @@ export function LoginForm() {
         aria-describedby={error ? 'login-error' : undefined}
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <button
         type="submit"

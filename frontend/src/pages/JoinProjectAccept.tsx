@@ -82,7 +82,7 @@ export default function JoinProjectAccept() {
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#171717] p-8 text-center shadow-xl">
         {(status === 'loading' || status === 'accepting') && (
           <>
-            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-highlight border-t-transparent" />
+            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-highlight-on-dark border-t-transparent" />
             <p className="mt-4 text-gray-300">
               {status === 'accepting' ? `Joining ${info?.project_title}…` : 'Loading invite…'}
             </p>

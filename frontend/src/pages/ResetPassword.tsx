@@ -60,7 +60,7 @@ function ForgotPasswordForm() {
         required
         value={email}
         onChange={(e) => setEmail(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <button
         type="submit"
@@ -140,7 +140,7 @@ function ResetPasswordForm({ token }: { token: string }) {
         required
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <input
         type="password"
@@ -150,7 +150,7 @@ function ResetPasswordForm({ token }: { token: string }) {
         required
         value={confirm}
         onChange={(e) => setConfirm(e.target.value)}
-        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight/50 focus:outline-none focus:ring-1 focus:ring-highlight/50"
+        className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white placeholder-gray-500 focus:border-highlight-on-dark/50 focus:outline-none focus:ring-1 focus:ring-highlight-on-dark/50"
       />
       <p className="text-xs text-gray-500">
         Must be at least 8 characters with uppercase, lowercase, and a digit.
