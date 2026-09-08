@@ -522,7 +522,7 @@ export function CertificationPanel() {
             <button
               type="button"
               onClick={() => {
-                window.open('/certification', '_blank', 'noopener,width=1080,height=860')
+                window.open('/certification?panel=fullscreen', '_blank', 'noopener,width=1080,height=860')
                 closePanel()
               }}
               title={'Open in a new window \u2014 put the course on another monitor while you work here'}
