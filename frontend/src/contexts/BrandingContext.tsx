@@ -87,10 +87,15 @@ function applyTheme(theme: ThemeConfig) {
   // unbranded deployment's chrome is pixel-identical. removeProperty (not skip)
   // because applyTheme also runs for a cached theme: an admin resetting a navy
   // brand back to the default must clear the navy this same call previously set.
-  if ((theme.highlight_color || '').trim().toLowerCase() === THEME_DEFAULT_COLOR) {
+  // Anything that is not a #rrggbb colour (empty, short, malformed) gets the
+  // neutral default too: getPanelDark would emit NaN-based garbage, the CSS
+  // fallback does not apply to an invalid value, and the whole chrome would
+  // paint transparent.
+  const brand = (theme.highlight_color || '').trim()
+  if (!/^#[0-9a-f]{6}$/i.test(brand) || brand.toLowerCase() === THEME_DEFAULT_COLOR) {
     root.style.removeProperty('--panel-dark')
   } else {
-    root.style.setProperty('--panel-dark', getPanelDark(theme.highlight_color))
+    root.style.setProperty('--panel-dark', getPanelDark(brand))
   }
 }
 

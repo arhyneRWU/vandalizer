@@ -288,6 +288,21 @@ describe('BrandingProvider — assistant name vs organization name', () => {
     expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe('')
   })
 
+  it('leaves --panel-dark unset when the stored brand colour is not a colour', async () => {
+    // A malformed value must fall back to the neutral chrome, not paint an
+    // invalid var() that makes the whole shell transparent.
+    vi.mocked(getThemeConfig).mockResolvedValue(theme({ highlight_color: '#12', org_name: 'Broken Co' }))
+
+    render(
+      <BrandingProvider>
+        <Probe />
+      </BrandingProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('Broken Co'))
+    expect(document.documentElement.style.getPropertyValue('--panel-dark')).toBe('')
+  })
+
   it('clears a cached brand tint when the admin resets to the default color', async () => {
     // First render paints navy from cache; the server then reports the default.
     // Without removeProperty the stale navy would outlive the reset.
