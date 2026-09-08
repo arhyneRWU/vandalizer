@@ -44,6 +44,10 @@ export interface ContentMatch {
   task_status: string | null
   folder: string | null
   token_count: number
+  /** Carried through from the search endpoint so a cross-folder hit shows
+   * the same caveat the in-folder row does (#803). */
+  ingestion_warnings?: string[]
+  ingestion_warning_text?: string
 }
 
 interface FileBrowserProps {
@@ -53,6 +57,7 @@ interface FileBrowserProps {
   onSelectionChange?: (docUuids: string[]) => void
   onDocNamesChange?: (names: Record<string, string>) => void
   onFolderSelectionChange?: (folderUuids: string[]) => void
+  onFolderNamesChange?: (names: Record<string, string>) => void
   // Emits the subset of selected docs that are still being processed
   // (text extraction, OCR, indexing, etc.). Used by the chat banner to
   // avoid the false "ready for analysis" claim.
@@ -90,7 +95,7 @@ async function collectUsage(docUuids: string[]): Promise<UsageGroups | undefined
 // The delete confirmation names what it deletes; past this many, "and N more".
 const DELETE_NAME_CAP = 8
 
-export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSelectionChange, onDocNamesChange, onFolderSelectionChange, onSelectionProcessingChange, currentFolder: controlledFolder, onFolderNavigate, onAskAboutFolder, onRunWorkflowOnFolder, onAddFolderToKB, rootFolder = null, rootLabel, teamScopeUuid }: FileBrowserProps) {
+export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSelectionChange, onDocNamesChange, onFolderSelectionChange, onFolderNamesChange, onSelectionProcessingChange, currentFolder: controlledFolder, onFolderNavigate, onAskAboutFolder, onRunWorkflowOnFolder, onAddFolderToKB, rootFolder = null, rootLabel, teamScopeUuid }: FileBrowserProps) {
   const { currentTeam } = useTeams()
   const confirm = useConfirm()
   const { toast } = useToast()
@@ -175,9 +180,13 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
   // Sync selected folder UUIDs to parent
   useEffect(() => {
     if (!onFolderSelectionChange) return
-    const folderUuids = [...selectedUuids].filter(u => folders.some(f => f.uuid === u))
-    onFolderSelectionChange(folderUuids)
-  }, [selectedUuids, folders, onFolderSelectionChange])
+    const selectedFolders = folders.filter(f => selectedUuids.has(f.uuid))
+    onFolderSelectionChange(selectedFolders.map(f => f.uuid))
+    // Names too, so the chat can title the folder chips (mirrors onDocNamesChange)
+    const names: Record<string, string> = {}
+    for (const f of selectedFolders) names[f.uuid] = f.title
+    onFolderNamesChange?.(names)
+  }, [selectedUuids, folders, onFolderSelectionChange, onFolderNamesChange])
 
   // Clear selection when navigating folders
   useEffect(() => {
@@ -232,6 +241,10 @@ export function FileBrowser({ onDocClick, searchQuery = '', contentMatches, onSe
             updated_at: m.updated_at,
             token_count: m.token_count,
             num_pages: m.num_pages,
+            // Without these a cross-folder search hit renders as a clean row
+            // even when the document was only partly read (#803).
+            ingestion_warnings: m.ingestion_warnings,
+            ingestion_warning_text: m.ingestion_warning_text,
           })
         }
       }
