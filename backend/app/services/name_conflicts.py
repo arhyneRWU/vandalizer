@@ -23,7 +23,7 @@ from typing import Awaitable, Callable
 from bson import ObjectId
 
 from app.models.knowledge import KnowledgeBase
-from app.models.library import LibraryItem
+from app.models.library import LibraryItem, LibraryItemKind
 from app.models.search_set import SearchSet
 from app.models.workflow import Workflow
 
@@ -151,7 +151,11 @@ async def describe_workflow_name_conflict(
         # A workflow with no library bookmark shows up in no listing at all,
         # yet still holds its name. Name the situation instead of pointing the
         # user at a row that is not there.
-        bookmarked = await LibraryItem.find_one({"item_id": existing.id}) is not None
+        bookmarked = await LibraryItem.find_one({
+            "item_id": existing.id,
+            "kind": LibraryItemKind.WORKFLOW,
+            "added_by_user_id": user_id,
+        }) is not None
         if not bookmarked:
             location = (
                 "in your account but is not currently listed in your library "
