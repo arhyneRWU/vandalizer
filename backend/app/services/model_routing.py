@@ -61,12 +61,14 @@ def _measured_margin(value: Optional[float], current_name: str) -> Optional[floa
     """
     if value is None:
         return None
+    margin: Optional[float]
     if isinstance(value, bool):
-        value = None  # bool is an int subclass; never a meaningful margin
-    try:
-        margin = float(value)
-    except (TypeError, ValueError):
-        margin = None
+        margin = None  # bool is an int subclass; never a meaningful margin
+    else:
+        try:
+            margin = float(value)
+        except (TypeError, ValueError):
+            margin = None
     if margin is not None and math.isfinite(margin) and margin >= 1.0:
         return margin
     logger.warning(
