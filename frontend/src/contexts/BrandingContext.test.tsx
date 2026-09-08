@@ -140,6 +140,8 @@ describe('BrandingProvider derived CSS variables', () => {
     expect(document.documentElement.style.getPropertyValue('--highlight-on-dark')).toBe(
       getAccessibleOnDark('#163A64'),
     )
+  })
+})
 
 // ---------------------------------------------------------------------------
 // The tool's name and the institution's name are separate fields (issue #819).
