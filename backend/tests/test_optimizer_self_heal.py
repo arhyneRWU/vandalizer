@@ -180,6 +180,20 @@ class TestKbStartSweepsFirst:
         active.uuid = "stuck-run"
         reap = AsyncMock()
 
+        # The endpoint is rate-limited per address; other files in the same
+        # process hit it first, so the limiter is off for this one call.
+        from app.rate_limit import limiter
+
+        limiter.enabled = False
+        try:
+            resp = await self._post(cookies, headers, kb, active, reap)
+        finally:
+            limiter.enabled = True
+
+        assert resp.status_code == 409
+        reap.assert_awaited_once_with("kb-1")
+
+    async def _post(self, cookies, headers, kb, active, reap):
         with patch("app.main.init_db", new_callable=AsyncMock):
             from app.main import app
 
@@ -191,13 +205,10 @@ class TestKbStartSweepsFirst:
                  patch("app.models.kb_optimization_run.KBOptimizationRun", new=_model_cls("kb_uuid", active)):
                 MockUser.find_one = AsyncMock(return_value=_user())
                 async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                    resp = await client.post(
+                    return await client.post(
                         "/api/knowledge/kb-1/optimize", json={"token_budget": 1000},
                         cookies=cookies, headers=headers,
                     )
-
-        assert resp.status_code == 409
-        reap.assert_awaited_once_with("kb-1")
 
 
 class TestWorkflowReadsHeal:
