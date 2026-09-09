@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **SAML IdP metadata from Shibboleth now parses.** An IdP publishing distinct signing and encryption certificates — the standard Shibboleth layout — comes back from OneLogin's parser as `x509certMulti`, which the parse-metadata endpoint never read, so perfectly valid metadata was rejected as "missing … signing certificate". The signing certificates are now taken from there (the first is used; alternates are returned for an admin mid-key-rollover), and the 422 names exactly which fields are actually missing. Verified against a live Shibboleth IdP.
+- **SSO works behind a TLS-terminating proxy.** The frontend nginx terminates plain HTTP, so `proxy_set_header X-Forwarded-Proto $scheme` stamped `http` over the truthful header set by whatever terminates TLS in front (Cloudflare, a load balancer). The backend trusts that header for scheme-sensitive behavior, so SAML broke twice over: AuthnRequests carried `http://` issuer/ACS URLs, and even with correct URLs configured, strict-mode response validation rejected the IdP's POST-back as received-at-http. nginx now passes an upstream `X-Forwarded-Proto` through and falls back to `$scheme` only when none arrives (direct access). The only scheme-sensitive consumer is SAML URL construction (cookie `Secure` flags come from settings, not the header), where a directly-connecting client spoofing the value affects nothing but its own SAML exchange.
+- **Logging in via SAML no longer ends on a 405.** The ACS answers the IdP's HTTP-POST and redirected with `RedirectResponse`'s default 307, which preserves the request method and body — so after a successful login the browser re-POSTed the entire SAML envelope at `/` and the static frontend refused it. Both ACS redirects (success and failure) are now 303 See Other; the auth cookies ride the redirect as before. The failure redirect also now defaults to `/landing` rather than `/login`, because `/login` forwards to `/landing` without its query string, so the `?error=saml_failed` it carried was never shown.
+
 ## [v4.12.0] - 2026-09-08
 
 ### Added
