@@ -1303,6 +1303,14 @@ async def list_test_queries(uuid: str, user: User = Depends(get_current_user)):
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     from app.models.kb_test_query import KBTestQuery
+    from app.services.kb_test_query_ids import backfill_auto_query_ids
+    # Auto-generated queries from before IDs existed get theirs on first
+    # read, so an older set is trackable without a regeneration. Listing
+    # must still work if the backfill cannot write.
+    try:
+        await backfill_auto_query_ids(kb)
+    except Exception:
+        logger.exception("Could not backfill auto-query IDs for KB %s", kb.uuid)
     queries = await KBTestQuery.find(
         KBTestQuery.knowledge_base_uuid == kb.uuid,
     ).sort("-created_at").to_list()

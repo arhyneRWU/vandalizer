@@ -997,6 +997,7 @@ async def judge_test_queries(
                 return {
                     "query_uuid": getattr(tq, "uuid", ""),
                     "external_id": getattr(tq, "external_id", None) or "",
+                    "notes": getattr(tq, "notes", None) or "",
                     "expected_answer": getattr(tq, "expected_answer", None) or "",
                     "query": tq.query,
                     "category": getattr(tq, "category", None),
@@ -1019,6 +1020,7 @@ async def judge_test_queries(
                 return {
                     "query_uuid": getattr(tq, "uuid", ""),
                     "external_id": getattr(tq, "external_id", None) or "",
+                    "notes": getattr(tq, "notes", None) or "",
                     "expected_answer": getattr(tq, "expected_answer", None) or "",
                     "query": tq.query,
                     "category": getattr(tq, "category", None),
@@ -1446,6 +1448,7 @@ def _query_identity(tq) -> dict:
     return {
         "query_uuid": getattr(tq, "uuid", "") or "",
         "external_id": getattr(tq, "external_id", None) or "",
+        "notes": getattr(tq, "notes", None) or "",
         "expected_answer": getattr(tq, "expected_answer", None) or "",
         "category": getattr(tq, "category", None),
     }

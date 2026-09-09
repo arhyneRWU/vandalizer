@@ -43,6 +43,7 @@ def _make_queries():
             expected_answer="30 days after award",
             expected_source_labels=["PAPPG Ch. 2"],
             external_id="ext-1",
+            notes="From the FY26 spreadsheet",
         ),
         SimpleNamespace(
             uuid="q-2",
@@ -163,6 +164,7 @@ def test_rows_map_judge_and_retrieval_fields():
     assert r["discrimination"] == "useful"
     assert r["retrieved_sources"] == ["PAPPG Ch. 2", "PAPPG Ch. 7"]
     assert r["external_id"] == "ext-1"
+    assert r["notes"] == "From the FY26 spreadsheet"
     assert r["answer_match"] is True
 
 

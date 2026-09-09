@@ -78,6 +78,7 @@ RESULT_COLUMNS = [
     "category",
     "expected_answer",
     "expected_sources",
+    "notes",
     "retrieved_sources",
     "retrieval_precision",
     "answer_match",
@@ -144,6 +145,8 @@ def build_kb_validation_results_export(
                 or (getattr(tq, "expected_answer", None) if tq else None) or "",
             "expected_sources": det.get("expected_sources")
                 or (list(getattr(tq, "expected_source_labels", []) or []) if tq else []),
+            "notes": det.get("notes")
+                or (getattr(tq, "notes", None) if tq else None) or "",
             "retrieved_sources": det.get("retrieved_sources") or [],
             "retrieval_precision": det.get("precision"),
             "answer_match": det.get("answer_match"),
