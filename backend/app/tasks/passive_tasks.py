@@ -1236,10 +1236,14 @@ def deliver_callback(
     import httpx
 
     from app.services.output_handlers import compute_webhook_signature
-    from app.utils.url_validation import validate_outbound_url
+    from app.utils.url_validation import allowed_private_hosts, validate_outbound_url
 
+    db = get_sync_db()
     try:
-        validate_outbound_url(callback_url)
+        validate_outbound_url(
+            callback_url,
+            allowed_hosts=allowed_private_hosts(db.system_config.find_one() or {}),
+        )
     except ValueError as e:
         logger.error("Invalid callback_url for event %s: %s", trigger_event_id, e)
         return {"status": "rejected", "error": str(e)}
@@ -1247,7 +1251,6 @@ def deliver_callback(
     # Sign with the stored API-token hash. Receivers derive the signing
     # secret from their plaintext token via sha256(token) — the server never
     # stores plaintext, so the hash is the only shared value available.
-    db = get_sync_db()
     user = db.user.find_one({"user_id": user_id})
     signing_secret = (user.get("api_token_hash") or "") if user else ""
 
