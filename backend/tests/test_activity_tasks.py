@@ -412,7 +412,7 @@ class TestWorkflowTasksAckLate:
         db.user.find_one.return_value = None
         db.workflow_result.update_one.return_value = MagicMock(matched_count=0)
         with patch.object(wt, "_get_db", return_value=db), \
-             patch.object(wt, "_build_steps_data", return_value=([], [])):
+             patch.object(wt, "build_steps_data", return_value=([], [])):
             out = wt.resume_workflow_after_approval("ap-1")
         assert out["status"] == "canceled"
         resumed_filter = db.workflow_result.update_one.call_args[0][0]
