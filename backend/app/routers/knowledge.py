@@ -1950,6 +1950,12 @@ async def start_kb_optimization(uuid: str, request: Request, user: User = Depend
         [str(u) for u in raw_uuids if u] if isinstance(raw_uuids, list) else []
     )
 
+    # Sweep orphaned runs first, the way the extraction and workflow start
+    # paths do: a run whose worker died past the hard time limit would
+    # otherwise hold this 409 until the hourly janitor fired (#835).
+    from app.services import kb_optimizer as _kb_optimizer
+    await _kb_optimizer.reap_stale_runs(kb.uuid)
+
     # Reject if a non-terminal run already exists for this KB.
     from app.models.kb_optimization_run import KBOptimizationRun
     active = await KBOptimizationRun.find_one(
@@ -2006,10 +2012,15 @@ async def get_active_kb_optimization(uuid: str, user: User = Depends(get_current
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     from app.models.kb_optimization_run import KBOptimizationRun
+    from app.services import kb_optimizer as _kb_optimizer
     run = await KBOptimizationRun.find_one(
         KBOptimizationRun.kb_uuid == kb.uuid,
         {"status": {"$in": ["queued", "running"]}},
     )
+    # Self-heal an orphaned run on read; if reaped it's no longer active.
+    run = await _kb_optimizer.reap_one(run)
+    if run is not None and run.status not in ("queued", "running"):
+        run = None
     return {"run": _serialize_optimization_run(run) if run else None}
 
 
@@ -2093,6 +2104,9 @@ async def get_kb_optimization(uuid: str, run_uuid: str, user: User = Depends(get
     )
     if not run:
         raise HTTPException(status_code=404, detail="Optimization run not found")
+    # Self-heal a forever-"Running…" run the next time it's polled.
+    from app.services import kb_optimizer as _kb_optimizer
+    run = await _kb_optimizer.reap_one(run)
     return _serialize_optimization_run(run)
 
 
