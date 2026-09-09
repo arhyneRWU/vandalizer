@@ -4,7 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from app.utils.url_validation import allowed_private_hosts, validate_outbound_url
+from app.utils.url_validation import (
+    InvalidAllowedHost,
+    allowed_private_hosts,
+    env_allowed_hosts,
+    normalize_allowed_host,
+    validate_outbound_url,
+)
 
 
 class TestValidateOutboundUrl:
@@ -94,7 +100,7 @@ class TestAllowedPrivateHosts:
 
     @patch("app.utils.url_validation.socket.getaddrinfo", side_effect=_resolves_private)
     def test_the_block_message_says_how_to_allow_it(self, _dns):
-        with pytest.raises(ValueError, match="OUTBOUND_URL_ALLOWED_HOSTS"):
+        with pytest.raises(ValueError, match="Allowed private hosts.*OUTBOUND_URL_ALLOWED_HOSTS"):
             validate_outbound_url("https://router.example.edu/v1/search", allowed_hosts=frozenset())
 
     @patch("app.utils.url_validation.socket.getaddrinfo", side_effect=_resolves_private)
@@ -123,14 +129,62 @@ class TestAllowedPrivateHosts:
     def test_the_setting_is_parsed_from_a_comma_separated_string(self):
         with patch("app.config.Settings") as MockSettings:
             MockSettings.return_value.outbound_url_allowed_hosts = (
-                " Router.Example.edu, other.example.edu ,, metadata.google.internal "
+                " Router.Example.edu, other.example.edu ,, metadata.google.internal , https://bad.example.edu/x"
             )
+            assert env_allowed_hosts() == frozenset({"router.example.edu", "other.example.edu"})
             assert allowed_private_hosts() == frozenset({"router.example.edu", "other.example.edu"})
 
     def test_an_empty_setting_allows_nothing(self):
         with patch("app.config.Settings") as MockSettings:
             MockSettings.return_value.outbound_url_allowed_hosts = ""
             assert allowed_private_hosts() == frozenset()
+
+    def test_the_admin_list_merges_with_the_env_list(self):
+        """The System Config list is passed by the caller (a Beanie document
+        or the raw pymongo dict); the validator never reads the database."""
+        with patch("app.config.Settings") as MockSettings:
+            MockSettings.return_value.outbound_url_allowed_hosts = "env.example.edu"
+            as_dict = {"outbound_url_allowed_hosts": ["Admin.Example.EDU", "bad host", ""]}
+            assert allowed_private_hosts(as_dict) == frozenset({"env.example.edu", "admin.example.edu"})
+
+            class Cfg:
+                outbound_url_allowed_hosts = ["admin.example.edu"]
+
+            assert allowed_private_hosts(Cfg()) == frozenset({"env.example.edu", "admin.example.edu"})
+            assert allowed_private_hosts({}) == frozenset({"env.example.edu"})
+
+
+class TestNormalizeAllowedHost:
+    """What the admin page may store: a bare hostname and nothing else."""
+
+    @pytest.mark.parametrize("entry, expected", [
+        ("mindrouter.example.edu", "mindrouter.example.edu"),
+        ("  MindRouter.Example.EDU.  ", "mindrouter.example.edu"),
+        ("localhost", "localhost"),
+        ("a-b.c1", "a-b.c1"),
+    ])
+    def test_accepts_bare_hostnames(self, entry, expected):
+        assert normalize_allowed_host(entry) == expected
+
+    @pytest.mark.parametrize("entry", [
+        "",
+        "   ",
+        "https://mindrouter.example.edu",
+        "mindrouter.example.edu/v1/search",
+        "mindrouter.example.edu:8443",
+        "*.example.edu",
+        "two words.example.edu",
+        "-leading.example.edu",
+        "[::1]",
+    ])
+    def test_rejects_anything_that_is_not_a_bare_hostname(self, entry):
+        with pytest.raises(InvalidAllowedHost):
+            normalize_allowed_host(entry)
+
+    @pytest.mark.parametrize("entry", ["metadata.google.internal", "METADATA.internal", "instance-data"])
+    def test_rejects_cloud_metadata_hostnames_outright(self, entry):
+        with pytest.raises(InvalidAllowedHost, match="metadata"):
+            normalize_allowed_host(entry)
 
     @patch("app.utils.url_validation.socket.getaddrinfo", side_effect=_resolves_private)
     def test_the_default_allowlist_comes_from_settings(self, _dns):
