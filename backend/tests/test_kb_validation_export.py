@@ -409,3 +409,36 @@ def test_rows_carry_truncation_flags_and_default_false_for_older_runs():
                 "baseline_answer_truncated", "baseline_generation_truncated"):
         assert key in RESULT_COLUMNS
         assert older[key] is False
+
+
+def test_run_meta_names_the_answer_model_and_any_fallback():
+    """An export has to say which model generated the graded answers — the
+    2 CFR 200 ticket's exports could not, and the blank answers had no cause."""
+    kb, vr, queries = _make_kb(), _make_vr(), _make_queries()
+    vr.result_snapshot["answer_model"] = "qwen/qwen3.8-27b"
+    vr.result_snapshot["answer_model_fallback"] = {
+        "configured": "qwen/qwen3.6-27b", "used": "qwen/qwen3.8-27b", "reason": "not in System Config",
+    }
+    vr.result_snapshot["retrieval_precision"]["details"][0]["error"] = "answer generation failed: 401"
+
+    _payload, run_meta, rows = build_kb_validation_results_export(
+        kb=kb, vr=vr, test_queries=queries, catalog_version=None,
+        exported_by_user_id="u", exported_at="2026-09-09T00:00:00+00:00",
+    )
+
+    assert run_meta["answer_model"] == "qwen/qwen3.8-27b"
+    assert run_meta["answer_model_fallback"]["configured"] == "qwen/qwen3.6-27b"
+    assert rows[0]["error"] == "answer generation failed: 401"
+
+
+def test_run_meta_answer_model_falls_back_to_the_run_label_for_older_runs():
+    kb, vr, queries = _make_kb(), _make_vr(), _make_queries()
+    vr.model = "claude-y"
+
+    _payload, run_meta, _rows = build_kb_validation_results_export(
+        kb=kb, vr=vr, test_queries=queries, catalog_version=None,
+        exported_by_user_id="u", exported_at="2026-09-09T00:00:00+00:00",
+    )
+
+    assert run_meta["answer_model"] == "claude-y"
+    assert run_meta["answer_model_fallback"] is None
