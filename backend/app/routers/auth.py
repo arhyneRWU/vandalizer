@@ -888,7 +888,9 @@ async def saml_acs(request: Request, settings: Settings = Depends(get_settings))
     try:
         attrs = process_saml_response(saml_provider, request, post_data)
     except ValueError as e:
-        landing = saml_provider.get("error_redirect", settings.frontend_url + "/login")
+        # Default to /landing (which renders ?error=), not /login (which
+        # forwards to /landing without the query string and so swallows it).
+        landing = saml_provider.get("error_redirect", settings.frontend_url + "/landing")
         # 303, not the default 307: this handler answers a POST, and a 307
         # makes the browser re-POST the SAML form to the redirect target.
         return RedirectResponse(f"{landing}?error=saml_failed&detail={e}", status_code=303)
