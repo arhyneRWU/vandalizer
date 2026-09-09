@@ -278,7 +278,8 @@ async def _optimize_kb_async(
 # workflow, extraction — and marks stuck docs failed. Extraction also reaps
 # on start and from its read endpoints, and workflow reaps on start; the
 # janitor adds the time dimension so a run nobody polls or restarts still
-# heals instead of spinning until someone edits the database.
+# heals instead of spinning until someone edits the database. All three
+# collections now also reap on start and from their read endpoints (#835).
 #
 # 2× the optimizer tasks' soft_time_limit (5400s) is the cutoff. Anything
 # older than that hasn't legitimately been running this whole time — the
@@ -316,28 +317,24 @@ async def _optimization_janitor_async() -> dict:
     reaped = 0
     scanned = 0
 
-    # KB runs are finalized inline: no Celery task id on the doc to revoke,
-    # so finalizing it is the whole job. The query matches status in
-    # {queued, running} so a never-picked-up run (broker dropped the task)
-    # is also recovered.
+    # KB runs: the cutoff pre-filters the candidates (a never-picked-up run
+    # is matched too, since status covers queued), and kb_optimizer.reap_one
+    # owns the finalization write -- the same function the KB start path and
+    # read endpoints call, so the janitor and the on-demand sweeps cannot
+    # disagree about what "stuck" means or how it is recorded.
+    from app.services import kb_optimizer
+
     stuck = await KBOptimizationRun.find(
         {"status": {"$in": ["queued", "running"]}, "started_at": {"$lt": cutoff}},
     ).to_list()
     scanned += len(stuck)
     for run in stuck:
-        run.status = "failed"
-        run.phase = "failed"
-        run.error_message = (
-            "Optimization run abandoned — worker crashed or exceeded the "
-            f"{ORPHAN_RUN_AGE_SECONDS // 60}-minute soft cap. Run was reaped "
-            "by tasks.passive.optimization_janitor."
-        )
-        run.completed_at = _dt.datetime.now(tz=_dt.timezone.utc)
         try:
-            await run.save()
-            reaped += 1
+            updated = await kb_optimizer.reap_one(run)
+            if updated is not None and updated.status not in ("queued", "running"):
+                reaped += 1
         except Exception as e:  # pragma: no cover — defensive
-            logger.warning("Janitor could not save run %s: %s", run.uuid, e)
+            logger.warning("Janitor could not reap run %s: %s", run.uuid, e)
 
     # Extraction and workflow runs each have their own reap_one — both revoke
     # the run's Celery task (so a still-queued copy can't resurrect the doc)
