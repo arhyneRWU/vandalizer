@@ -111,6 +111,20 @@ export function KBValidationRunTab({ kbReady, canManage, numQueries, latestRun, 
             </div>
           )}
 
+          {latestRun.query_selection && (
+            <div
+              role="note"
+              style={{
+                fontSize: 11, color: '#fbbf24', padding: '6px 10px', marginBottom: 10,
+                backgroundColor: '#f59e0b14', border: '1px solid #f59e0b44', borderRadius: 6,
+              }}
+            >
+              Smoke test over {latestRun.query_selection.selected} of {latestRun.query_selection.total} test
+              queries. This score is for those questions only and does not change the KB's quality score.
+              The History export for this run holds just these questions.
+            </div>
+          )}
+
           {/* Certified quality headline — same score as the KB quality tile */}
           <CertifiedQualityCard run={latestRun} />
 

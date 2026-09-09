@@ -177,6 +177,10 @@ def build_kb_validation_results_export(
         "kb_title": kb.title,
         "mode": snap.get("mode"),
         "judge_model": snap.get("judge_model"),
+        # {"selected": n, "total": N} when the run covered hand-picked
+        # queries only ("Run selected" on the Test Queries tab). Such a run
+        # is a smoke test, not the KB's quality score.
+        "query_selection": snap.get("query_selection"),
         # ``run_score`` is the OVERALL quality score: a weighted composite of
         # answer accuracy, retrieval precision, source health, and chunk
         # coverage (see ``score_formula`` / ``score_components``). It is not

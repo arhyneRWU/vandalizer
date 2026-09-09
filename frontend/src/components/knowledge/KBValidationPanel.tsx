@@ -55,8 +55,13 @@ type KBHistoryItem = {
   num_test_queries?: number | null
   mode?: string | null
   created_at?: string | null
+  source?: string | null
   result_snapshot?: KBValidationResult | null
 }
+
+/** A run over hand-picked queries ("Run selected") is a smoke test — it
+ * must never stand in for the KB's quality score in the header. */
+const isSmokeTest = (h: KBHistoryItem) => h.source === 'smoke_test'
 
 const TAB_LABELS: { id: Tab; label: string; icon?: typeof Sparkles }[] = [
   { id: 'autovalidate', label: 'Validate', icon: Sparkles },
@@ -136,7 +141,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
   }, [kbUuid])
 
   const applyLatestQuality = useCallback((history: KBHistoryItem[]) => {
-    const last = history[0]
+    const last = history.find(h => !isSmokeTest(h))
     const snap = last?.result_snapshot ?? null
     setLatestQuality(last?.score != null ? {
       score: Number(last.score),
@@ -163,7 +168,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
   // even though the server finished and persisted the run (it only surfaced
   // later in History). Instead we enqueue the Celery task and poll the quality
   // history until the new ValidationRun lands, then render its full snapshot.
-  const runValidation = useCallback(async (mode: KBValidationMode) => {
+  const runValidation = useCallback(async (mode: KBValidationMode, queryUuids?: string[]) => {
     setRunning(true)
     setRunError(null)
     try {
@@ -177,7 +182,10 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
         // Non-fatal — worst case we match the first completed run we see.
       }
 
-      await runKBValidationAsync(kbUuid, { mode })
+      await runKBValidationAsync(
+        kbUuid,
+        queryUuids ? { mode, query_uuids: queryUuids } : { mode },
+      )
 
       const deadline = Date.now() + MAX_POLL_MS
       let result: KBValidationResult | null = null
@@ -429,6 +437,13 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
           canManage={canManage}
           queries={queries}
           onChange={refreshQueries}
+          running={running}
+          onRunSelected={uuids => {
+            // A smoke test: judge only, no baseline, so it costs what the
+            // handful of questions costs. Results land on the Run tab.
+            setTab('run')
+            void runValidation('judge', uuids)
+          }}
         />
       ) : tab === 'run' ? (
         <KBValidationRunTab

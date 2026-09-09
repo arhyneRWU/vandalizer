@@ -1625,6 +1625,7 @@ async def run_kb_validation(
     mode: str = "judge",
     skip_judge: bool = False,
     model: Optional[str] = None,
+    query_uuids: Optional[list[str]] = None,
 ) -> dict:
     """Run full validation on a knowledge base.
 
@@ -1646,6 +1647,12 @@ async def run_kb_validation(
     default, so "validate this KB under model X" actually measures model X.
     The judge model is unaffected. When None, legacy resolution applies
     (applied config model, else the user's model).
+
+    ``query_uuids`` restricts the run to those test queries — a smoke test of
+    a few questions. The run is persisted with ``source=SMOKE_TEST_SOURCE``
+    and ``query_selection`` on the result, so it shows in history and
+    exports but never becomes the KB's quality score. Raises ``ValueError``
+    when none of the uuids belong to this KB.
     """
     kb = await KnowledgeBase.find_one(KnowledgeBase.uuid == kb_uuid)
     if not kb:
@@ -1657,6 +1664,15 @@ async def run_kb_validation(
     test_queries = await KBTestQuery.find(
         KBTestQuery.knowledge_base_uuid == kb_uuid,
     ).to_list()
+
+    query_selection: dict | None = None
+    if query_uuids is not None:
+        wanted = set(query_uuids)
+        total = len(test_queries)
+        test_queries = [q for q in test_queries if q.uuid in wanted]
+        if not test_queries:
+            raise ValueError("None of the selected test queries belong to this knowledge base")
+        query_selection = {"selected": len(test_queries), "total": total}
 
     health, coverage = await asyncio.gather(health_task, coverage_task)
 
@@ -1694,9 +1710,11 @@ async def run_kb_validation(
                 )
                 # First-run variance sample: only when no prior ValidationRun exists for this KB.
                 from app.models.validation_run import ValidationRun
+                from app.services.quality_service import NOT_SMOKE_TEST
                 prior = await ValidationRun.find_one(
                     ValidationRun.item_kind == "knowledge_base",
                     ValidationRun.item_id == kb_uuid,
+                    NOT_SMOKE_TEST,
                 )
                 if prior is None:
                     by_uuid = {q.uuid: q for q in test_queries}
@@ -1790,9 +1808,12 @@ async def run_kb_validation(
         "num_runs": 1,
         "mode": mode,
         "judge_model": judge_model_used,
+        # Set on a run over hand-picked queries: {"selected": n, "total": N}.
+        "query_selection": query_selection,
     }
 
     # Persist the validation run
+    from app.models.validation_run import SMOKE_TEST_SOURCE
     from app.services.quality_service import compute_quality_tier, persist_validation_run
 
     vr = await persist_validation_run(
@@ -1814,6 +1835,7 @@ async def run_kb_validation(
             if judge_payload
             else None
         ),
+        source=SMOKE_TEST_SOURCE if query_selection else None,
     )
 
     # Surface the *certified* score (raw score after the low-sample-size

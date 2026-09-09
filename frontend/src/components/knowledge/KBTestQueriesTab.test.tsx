@@ -65,6 +65,36 @@ function renderTab(props: Partial<Parameters<typeof KBTestQueriesTab>[0]> = {}) 
   return { onChange }
 }
 
+// Support ticket: selecting questions only offered deletion; evaluators want
+// to smoke-test a few and export just those from History.
+describe('KBTestQueriesTab run selected', () => {
+  it('runs exactly the selected queries', () => {
+    const onRunSelected = vi.fn()
+    renderTab({ onRunSelected })
+    fireEvent.click(screen.getByLabelText('Select test query: Generated question A?'))
+    fireEvent.click(screen.getByLabelText('Select test query: Generated question B?'))
+    fireEvent.click(screen.getByRole('button', { name: /Run selected \(2\)/ }))
+    expect(onRunSelected).toHaveBeenCalledWith(['q-2', 'q-3'])
+  })
+
+  it('is absent when the panel does not offer it, and disabled while a run is in flight', () => {
+    renderTab()
+    fireEvent.click(screen.getByLabelText('Select test query: Generated question A?'))
+    expect(screen.queryByRole('button', { name: /Run selected/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /Delete selected \(1\)/ })).toBeInTheDocument()
+  })
+
+  it('disables the button while a run is in flight', () => {
+    const onRunSelected = vi.fn()
+    renderTab({ onRunSelected, running: true })
+    fireEvent.click(screen.getByLabelText('Select test query: Generated question A?'))
+    const button = screen.getByRole('button', { name: /Running…/ })
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    expect(onRunSelected).not.toHaveBeenCalled()
+  })
+})
+
 // Support ticket: KBs accumulate hundreds of imported/auto-generated test
 // queries and the tab only offered row-by-row deletion.
 describe('KBTestQueriesTab bulk deletion', () => {

@@ -247,6 +247,8 @@ export type KBValidationResult = {
   num_sources: number
   mode?: KBValidationMode
   judge_model?: string | null
+  /** Set when the run covered hand-picked queries only ("Run selected"). */
+  query_selection?: { selected: number; total: number } | null
   source_health: {
     total: number
     healthy: number
@@ -301,9 +303,17 @@ export type KBValidationResult = {
   } | null
 }
 
+export type KBValidationRunOptions = {
+  mode?: KBValidationMode
+  skip_judge?: boolean
+  /** Run only these test queries — a smoke test. The run lands in history
+   *  and exports like any other but never becomes the KB's quality score. */
+  query_uuids?: string[]
+}
+
 export function runKBValidation(
   uuid: string,
-  options?: { mode?: KBValidationMode; skip_judge?: boolean },
+  options?: KBValidationRunOptions,
 ) {
   return apiFetch<KBValidationResult>(`/api/knowledge/${uuid}/validate`, {
     method: 'POST',
@@ -313,7 +323,7 @@ export function runKBValidation(
 
 export function runKBValidationAsync(
   uuid: string,
-  options?: { mode?: KBValidationMode; skip_judge?: boolean },
+  options?: KBValidationRunOptions,
 ) {
   return apiFetch<{ task_id: string; status: 'queued' }>(`/api/knowledge/${uuid}/validate`, {
     method: 'POST',

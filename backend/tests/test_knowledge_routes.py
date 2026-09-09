@@ -2749,6 +2749,75 @@ class TestTestQueryBulkDelete:
         assert resp.status_code == 403
 
 
+class TestValidateSelectedQueries:
+    """POST /{uuid}/validate with ``query_uuids`` — run a smoke test over
+    chosen test queries."""
+
+    def _ctx(self, owned: int):
+        kb = MagicMock()
+        kb.uuid = "kb-1"
+        find = MagicMock()
+        find.count = AsyncMock(return_value=owned)
+        task = MagicMock()
+        task.delay = MagicMock(return_value=MagicMock(id="task-1"))
+        return kb, find, task
+
+    async def _post(self, client, body, owned=2):
+        user = _make_user("mgr")
+        cookies, headers = _auth("mgr")
+        kb, find, task = self._ctx(owned)
+        with (
+            patch("app.dependencies.decode_token", return_value={"sub": "mgr", "type": "access"}),
+            patch("app.dependencies.User") as MockUser,
+            patch(
+                "app.routers.knowledge.organization_service.get_user_org_ancestry",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch("app.routers.knowledge.svc.get_knowledge_base", new_callable=AsyncMock, return_value=kb),
+            patch("app.models.kb_test_query.KBTestQuery.find", return_value=find) as find_mock,
+            patch("app.tasks.kb_validation_tasks.validate_kb_task", task),
+        ):
+            MockUser.find_one = AsyncMock(return_value=user)
+            resp = await client.post(
+                "/api/knowledge/kb-1/validate", json=body, cookies=cookies, headers=headers,
+            )
+        return resp, find_mock, task
+
+    @pytest.mark.asyncio
+    async def test_selected_uuids_reach_the_task_deduplicated(self, client):
+        resp, find, task = await self._post(
+            client, {"async": True, "mode": "judge", "query_uuids": ["q-1", "q-2", "q-1"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"task_id": "task-1", "status": "queued"}
+        task.delay.assert_called_once_with("kb-1", "mgr", "judge", False, ["q-1", "q-2"])
+        # Ownership is checked against this KB's queries before enqueueing.
+        find.assert_called_once_with({"knowledge_base_uuid": "kb-1", "uuid": {"$in": ["q-1", "q-2"]}})
+
+    @pytest.mark.asyncio
+    async def test_a_full_run_passes_no_selection(self, client):
+        resp, find, task = await self._post(client, {"async": True})
+        assert resp.status_code == 200
+        task.delay.assert_called_once_with("kb-1", "mgr", "judge", False, None)
+        find.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_or_malformed_selection_is_a_400(self, client):
+        for bad in ([], "q-1", [1], [""]):
+            resp, _find, task = await self._post(client, {"async": True, "query_uuids": bad})
+            assert resp.status_code == 400, bad
+            task.delay.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_selection_owned_by_no_query_of_this_kb_is_a_400(self, client):
+        resp, _find, task = await self._post(
+            client, {"async": True, "query_uuids": ["other-kb-q"]}, owned=0,
+        )
+        assert resp.status_code == 400
+        assert "belong" in resp.json()["detail"]
+        task.delay.assert_not_called()
+
+
 class TestValidationRunExport:
     """GET /{uuid}/validation-runs/{run_uuid}/export — per-query results."""
 

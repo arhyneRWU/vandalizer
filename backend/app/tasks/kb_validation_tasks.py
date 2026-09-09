@@ -29,19 +29,34 @@ def _run_async(coro):
     max_retries=2,
     default_retry_delay=10,
 )
-def validate_kb_task(self, kb_uuid: str, user_id: str, mode: str = "judge", skip_judge: bool = False):
-    """Run a KB validation in the background and persist a ValidationRun."""
-    return _run_async(_validate_kb_async(kb_uuid, user_id, mode, skip_judge))
+def validate_kb_task(
+    self,
+    kb_uuid: str,
+    user_id: str,
+    mode: str = "judge",
+    skip_judge: bool = False,
+    query_uuids: list[str] | None = None,
+):
+    """Run a KB validation in the background and persist a ValidationRun.
+
+    ``query_uuids`` restricts the run to those test queries (a smoke test).
+    """
+    return _run_async(_validate_kb_async(kb_uuid, user_id, mode, skip_judge, query_uuids))
 
 
-async def _validate_kb_async(kb_uuid: str, user_id: str, mode: str, skip_judge: bool):
+async def _validate_kb_async(
+    kb_uuid: str, user_id: str, mode: str, skip_judge: bool,
+    query_uuids: list[str] | None = None,
+):
     from app.config import Settings
     from app.database import init_db
 
     await init_db(Settings())
 
     from app.services.kb_validation_service import run_kb_validation
-    result = await run_kb_validation(kb_uuid, user_id, mode=mode, skip_judge=skip_judge)
+    result = await run_kb_validation(
+        kb_uuid, user_id, mode=mode, skip_judge=skip_judge, query_uuids=query_uuids,
+    )
     # Compact return value — the full result is in the persisted ValidationRun.
     return {
         "kb_uuid": kb_uuid,

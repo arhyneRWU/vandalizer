@@ -34,8 +34,12 @@ export interface QualityHistoryItem {
   judge_variance_meta?: { sigma: number | null; n: number; sampled_query_uuids?: string[] } | null
   /** Optional source tag — when set to ``"optimizer_apply"`` (Phase 4) the
    *  row renders with a sparkles glyph so users can see that this point
-   *  came from an Apply, not a regular validation run. */
+   *  came from an Apply, not a regular validation run. ``"smoke_test"``
+   *  marks a run over hand-picked queries: listed and exportable, but not
+   *  the item's quality score. */
   source?: string | null
+  /** On a smoke-test run: how many queries were chosen out of the set. */
+  query_selection?: { selected: number; total: number } | null
 }
 
 interface Props {
@@ -226,6 +230,12 @@ export function QualityTimeline({
           if (it.mode) titleBits.push(`mode: ${it.mode}`)
           if (it.source === 'optimizer_apply') titleBits.push('source: optimizer apply')
           if (it.source === 'passive_monthly') titleBits.push('source: monthly auto-re-judge')
+          if (it.source === 'smoke_test') {
+            const sel = it.query_selection
+            titleBits.push(
+              `smoke test${sel ? ` over ${sel.selected} of ${sel.total} ${sampleNoun}` : ''} — not the quality score`,
+            )
+          }
           if (sigmaPts > 0) {
             const meta = it.judge_variance_meta
             const provenance = meta?.n ? ` (σ from n=${meta.n})` : ''
@@ -281,6 +291,7 @@ function Row({ item, sampleNoun, onExportRun }: {
   const nq = item.num_queries_judged ?? item.num_test_queries ?? item.num_test_cases ?? item.num_checks
   const isApply = item.source === 'optimizer_apply'
   const isPassive = item.source === 'passive_monthly'
+  const isSmoke = item.source === 'smoke_test'
   // Apply rows record a config change, not a measurement — nothing to export.
   const exportable = !!onExportRun && !!item.uuid && !isApply
   return (
@@ -303,6 +314,14 @@ function Row({ item, sampleNoun, onExportRun }: {
         {isPassive && (
           <span title="Monthly auto-re-judge of the applied tuning — catches quiet regressions after Apply" style={{ marginLeft: 6, color: '#7dd3fc' }}>
             · auto-monthly
+          </span>
+        )}
+        {isSmoke && (
+          <span
+            title={`Run over selected ${sampleNoun} only — a smoke test. Exportable, but not the quality score.`}
+            style={{ marginLeft: 6, color: '#fbbf24' }}
+          >
+            · selected{item.query_selection ? ` ${item.query_selection.selected}/${item.query_selection.total}` : ''}
           </span>
         )}
       </span>

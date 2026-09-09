@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.dependencies import get_current_user
 from app.rate_limit import limiter
 from app.models.user import User
-from app.models.validation_run import ValidationRun
+from app.models.validation_run import SMOKE_TEST_SOURCE, ValidationRun
 from app.models.kb_optimization_run import KBOptimizationRun
 from app.models.library import LibraryItemKind
 from app.models.verification import VerifiedItemMetadata
@@ -228,10 +228,12 @@ async def _latest_runs_by_kb(kb_uuids: list[str]) -> dict[str, _TrustSummary]:
 
     out: dict[str, _TrustSummary] = {}
 
-    # Manual validation runs.
+    # Manual validation runs. A smoke test over a few chosen queries is not
+    # the KB's trust signal.
     vruns = await ValidationRun.find({
         "item_kind": "knowledge_base",
         "item_id": {"$in": kb_uuids},
+        "source": {"$ne": SMOKE_TEST_SOURCE},
     }).sort("-created_at").to_list()
     for r in vruns:
         if r.item_id in out:
@@ -1027,6 +1029,10 @@ async def validate_knowledge_base(
       - mode: "judge" (default) or "judge+baseline" (analysis mode with lift).
       - skip_judge: bool — skip the LLM judge entirely (cheap re-run).
       - async: bool — enqueue a Celery task and return {task_id} instead of running inline.
+      - query_uuids: list[str] — run only these test queries (a smoke test).
+        The run lands in history and exports like any other but is tagged
+        so it never becomes the KB's quality score. 400 when empty or when
+        none belong to this KB.
     """
     user_org_ancestry = await organization_service.get_user_org_ancestry(user)
     kb = await svc.get_knowledge_base(
@@ -1046,14 +1052,27 @@ async def validate_knowledge_base(
     skip_judge = bool(body.get("skip_judge", False))
     async_run = bool(body.get("async", False))
 
+    query_uuids: list[str] | None = None
+    if "query_uuids" in body:
+        raw = body.get("query_uuids")
+        if not isinstance(raw, list) or not raw or not all(isinstance(u, str) and u for u in raw):
+            raise HTTPException(status_code=400, detail="query_uuids must be a non-empty list of test query uuids")
+        query_uuids = list(dict.fromkeys(raw))
+        from app.models.kb_test_query import KBTestQuery
+        owned = await KBTestQuery.find(
+            {"knowledge_base_uuid": kb.uuid, "uuid": {"$in": query_uuids}},
+        ).count()
+        if owned == 0:
+            raise HTTPException(status_code=400, detail="None of the selected test queries belong to this knowledge base")
+
     if async_run:
         from app.tasks.kb_validation_tasks import validate_kb_task
-        task = validate_kb_task.delay(kb.uuid, user.user_id, mode, skip_judge)
+        task = validate_kb_task.delay(kb.uuid, user.user_id, mode, skip_judge, query_uuids)
         return {"task_id": task.id, "status": "queued"}
 
     from app.services import kb_validation_service
     result = await kb_validation_service.run_kb_validation(
-        kb.uuid, user.user_id, mode=mode, skip_judge=skip_judge,
+        kb.uuid, user.user_id, mode=mode, skip_judge=skip_judge, query_uuids=query_uuids,
     )
     return result
 
@@ -1114,6 +1133,11 @@ async def export_kb_validation_run(
     def _has_details(run: ValidationRun) -> bool:
         return bool((run.result_snapshot or {}).get("retrieval_precision"))
 
+    def _is_full_run(run: ValidationRun) -> bool:
+        # "latest" means the latest full run; a smoke test over chosen
+        # queries exports only by its own uuid.
+        return _has_details(run) and getattr(run, "source", None) != SMOKE_TEST_SOURCE
+
     if run_uuid == "latest":
         recent = await (
             ValidationRun.find(
@@ -1125,7 +1149,7 @@ async def export_kb_validation_run(
             .limit(30)
             .to_list()
         )
-        vr = next((r for r in recent if _has_details(r)), None)
+        vr = next((r for r in recent if _is_full_run(r)), None)
         if not vr:
             raise HTTPException(
                 status_code=404,
