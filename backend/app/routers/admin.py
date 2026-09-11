@@ -24,6 +24,7 @@ from app.services.name_conflicts import (
 )
 from app.services.version_service import get_update_status
 from app.utils.encryption import decrypt_value, encrypt_value
+from app.utils import url_validation
 from app.models.team import Team, TeamMembership
 from app.models.user import User
 from app.models.document import SmartDocument
@@ -282,6 +283,7 @@ class ConfigUpdateRequest(BaseModel):
     llm_endpoint: Optional[str] = None
     default_team_id: Optional[str] = None
     support_contacts: Optional[list[dict]] = None
+    outbound_url_allowed_hosts: Optional[list[str]] = None
 
 
 class AdminTeamItem(BaseModel):
@@ -1493,6 +1495,10 @@ async def get_config(
         "support_contacts": cfg.support_contacts,
         "compliance_config": cfg.get_compliance_config(),
         "retention_config": cfg.get_retention_config(),
+        "outbound_url_allowed_hosts": list(getattr(cfg, "outbound_url_allowed_hosts", None) or []),
+        # Read-only: what the operator allowed via env, shown beside the
+        # editable list so an admin can see the whole effective policy.
+        "outbound_url_env_allowed_hosts": sorted(url_validation.env_allowed_hosts()),
     }
 
 
@@ -1551,14 +1557,49 @@ async def update_config(
         cfg.default_team_id = body.default_team_id or None
     if body.support_contacts is not None:
         cfg.support_contacts = body.support_contacts
+    hosts_audit: dict | None = None
+    if body.outbound_url_allowed_hosts is not None:
+        # Each entry is one deliberate exemption from the SSRF block, so a
+        # malformed one is a 400 naming it, not a silent trim: an exemption
+        # that never matches would leave the admin as blocked as before,
+        # with no clue why.
+        try:
+            hosts = _normalize_allowed_hosts(body.outbound_url_allowed_hosts)
+        except url_validation.InvalidAllowedHost as e:
+            raise HTTPException(status_code=400, detail=f"Allowed private hosts: {e}")
+        if hosts != list(cfg.outbound_url_allowed_hosts or []):
+            hosts_audit = {"before": list(cfg.outbound_url_allowed_hosts or []), "after": hosts}
+        cfg.outbound_url_allowed_hosts = hosts
 
     cfg.updated_at = datetime.datetime.now(datetime.timezone.utc)
     cfg.updated_by = user.user_id
     await cfg.save()
     clear_agent_caches()
     await _audit(user, "update_config", "Updated system configuration")
+    if hosts_audit is not None:
+        # Its own entry: this widens what the server will fetch on a
+        # workflow author's behalf, so it must be findable in the audit log
+        # by name rather than buried in a generic config update.
+        await _audit(
+            user, "update_outbound_allowed_hosts",
+            "Changed the private-address hosts outbound requests may reach: "
+            f"{', '.join(hosts_audit['after']) or '(none)'}",
+            hosts_audit,
+        )
 
     return {"status": "ok"}
+
+
+def _normalize_allowed_hosts(entries: list[str]) -> list[str]:
+    """Canonicalise and de-duplicate, preserving the admin's order."""
+    out: list[str] = []
+    for entry in entries:
+        if not (entry or "").strip():
+            continue  # a blank line in the textarea is not an error
+        host = url_validation.normalize_allowed_host(entry)
+        if host not in out:
+            out.append(host)
+    return out
 
 
 # ---------------------------------------------------------------------------
