@@ -758,6 +758,41 @@ class TestPerformSemanticIngestion:
     @patch("app.services.document_manager.DocumentManager")
     @patch("app.config.Settings")
     @patch("app.tasks.document_tasks.get_sync_db")
+    def test_previous_chunks_are_deleted_before_re_adding(
+        self, mock_get_db, MockSettings, MockDM,
+    ):
+        """Chunk ids are deterministic (``<uuid>_chunk_<i>``), so a shorter
+        second extraction would leave the tail of the first one behind and
+        retrieval would keep answering from the old text."""
+        from app.tasks.document_tasks import perform_semantic_ingestion
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = {
+            "uuid": "doc-1", "title": "Report.pdf", "path": "uploads/report.pdf",
+        }
+
+        settings = MagicMock()
+        settings.chromadb_persist_dir = "/data/chroma"
+        MockSettings.return_value = settings
+
+        dm_instance = MagicMock()
+        dm_instance.add_document.return_value = 2
+        MockDM.return_value = dm_instance
+
+        perform_semantic_ingestion(
+            raw_text="re-extracted content", document_uuid="doc-1", user_id="user1",
+        )
+
+        dm_instance.delete_document.assert_called_once_with("user1", "doc-1")
+        # Order matters: deleting after the add would wipe the new chunks too.
+        assert [c[0] for c in dm_instance.mock_calls[:2]] == [
+            "delete_document", "add_document",
+        ]
+
+    @patch("app.services.document_manager.DocumentManager")
+    @patch("app.config.Settings")
+    @patch("app.tasks.document_tasks.get_sync_db")
     def test_sets_task_status_to_readying_then_complete(self, mock_get_db, MockSettings, MockDM):
         from app.tasks.document_tasks import perform_semantic_ingestion
 

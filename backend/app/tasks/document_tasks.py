@@ -1097,6 +1097,9 @@ def perform_semantic_ingestion(self, raw_text: str, document_uuid: str, user_id:
     settings = Settings()
     try:
         dm = DocumentManager(persist_directory=settings.chromadb_persist_dir)
+        # A retry must replace the chunks from the previous extraction, or
+        # retrieval keeps answering from the old text.
+        dm.delete_document(user_id, document_uuid)
         chunk_count = dm.add_document(
             user_id=user_id,
             document_name=doc.get("title", ""),
