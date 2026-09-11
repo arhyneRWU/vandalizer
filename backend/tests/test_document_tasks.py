@@ -84,6 +84,28 @@ class TestPerformExtractionAndUpdate:
 
     @patch("app.tasks.document_tasks.get_sync_db")
     @patch("app.config.Settings")
+    @patch(
+        "app.services.document_readers.extract_text_with_markers",
+        return_value=("Extracted text content", [{"char_offset": 0, "kind": "page", "value": 1}]),
+    )
+    def test_force_ocr_is_passed_to_pdf_reader(self, mock_extract, MockSettings, mock_get_db):
+        from app.tasks.document_tasks import perform_extraction_and_update
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = {"uuid": "doc-1", "path": "test.pdf"}
+
+        settings = MagicMock()
+        settings.upload_dir = "/uploads"
+        MockSettings.return_value = settings
+
+        perform_extraction_and_update(document_uuid="doc-1", extension="pdf", force_ocr=True)
+
+        _, call_kwargs = mock_extract.call_args
+        assert call_kwargs["force_ocr"] is True
+
+    @patch("app.tasks.document_tasks.get_sync_db")
+    @patch("app.config.Settings")
     @patch("app.services.document_readers.convert_to_markdown", return_value="| col1 | col2 |")
     def test_uses_convert_to_markdown_for_xlsx(self, mock_convert, MockSettings, mock_get_db):
         from app.tasks.document_tasks import perform_extraction_and_update
@@ -229,6 +251,44 @@ class TestPerformExtractionAndUpdate:
         assert update_set["task_status"] == "error"
         assert update_set["raw_text"] == ""
         assert update_set["error_message"]  # not None / not empty
+        # No rejection flag: this is the generic "nothing came back" case.
+        assert "fonts don't map to characters" not in update_set["error_message"]
+
+    @patch("app.tasks.document_tasks.get_sync_db")
+    @patch("app.config.Settings")
+    def test_rejected_text_layer_gets_a_message_naming_the_cause(
+        self, MockSettings, mock_get_db,
+    ):
+        """"Retry — it might be a blip" is wrong advice for a PDF whose own
+        text layer was refused: the message has to say what happened so the
+        user knows re-uploading a scanned copy is the fix."""
+        from app.tasks.document_tasks import perform_extraction_and_update
+
+        db = MagicMock()
+        mock_get_db.return_value = db
+        db.smart_document.find_one.return_value = {"uuid": "doc-1", "path": "garbled.pdf"}
+
+        settings = MagicMock()
+        settings.upload_dir = "/uploads"
+        MockSettings.return_value = settings
+
+        def reject(path, extension, report=None, force_ocr=False):
+            report["text_layer_rejected"] = True
+            return "", []
+
+        with patch(
+            "app.services.document_readers.extract_text_with_markers", side_effect=reject,
+        ):
+            result = perform_extraction_and_update(document_uuid="doc-1", extension="pdf")
+
+        assert result == ""
+        update_set = db.smart_document.update_one.call_args_list[-1][0][1]["$set"]
+        assert update_set["task_status"] == "error"
+        assert update_set["error_message"] == (
+            "This PDF's text layer is unreadable (its fonts don't map to "
+            "characters), and OCR could not read the pages. Retry extraction "
+            "once OCR is available, or re-upload a printed or scanned copy."
+        )
 
     @patch("app.tasks.document_tasks.get_sync_db")
     @patch("app.config.Settings")
