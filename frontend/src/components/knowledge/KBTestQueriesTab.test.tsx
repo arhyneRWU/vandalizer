@@ -77,7 +77,7 @@ describe('KBTestQueriesTab run selected', () => {
     expect(onRunSelected).toHaveBeenCalledWith(['q-2', 'q-3'])
   })
 
-  it('is absent when the panel does not offer it, and disabled while a run is in flight', () => {
+  it('is absent when the panel does not offer it', () => {
     renderTab()
     fireEvent.click(screen.getByLabelText('Select test query: Generated question A?'))
     expect(screen.queryByRole('button', { name: /Run selected/ })).toBeNull()

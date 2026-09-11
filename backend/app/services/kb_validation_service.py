@@ -1790,7 +1790,9 @@ async def run_kb_validation(
                     ValidationRun.item_id == kb_uuid,
                     NOT_SMOKE_TEST,
                 )
-                if prior is None:
+                # A smoke test's variance is never used (it is not the KB's
+                # score), so do not spend judge calls sampling it.
+                if prior is None and query_selection is None:
                     by_uuid = {q.uuid: q for q in test_queries}
                     variance_result = await _sample_judge_variance_detailed(
                         kb_uuid, judge_payload["details"], by_uuid, judge_model_used,

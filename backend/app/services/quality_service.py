@@ -562,6 +562,7 @@ async def get_quality_summary() -> dict:
     """Aggregate stats: avg score, total runs, validated vs unvalidated items."""
     # Use aggregation to avoid loading all runs into memory
     pipeline = [
+        {"$match": NOT_SMOKE_TEST},
         {"$group": {
             "_id": {"item_kind": "$item_kind", "item_id": "$item_id"},
             "latest_score": {"$last": "$score"},
@@ -615,7 +616,7 @@ async def get_quality_timeline(
     """Aggregate ValidationRun by date for timeline charts."""
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
 
-    query_filters = [ValidationRun.created_at >= cutoff]
+    query_filters = [ValidationRun.created_at >= cutoff, NOT_SMOKE_TEST]
     if item_kind:
         query_filters.append(ValidationRun.item_kind == item_kind)
     if item_id:
@@ -718,7 +719,7 @@ async def get_quality_by_model(days: int = 90) -> list[dict]:
     models are a visible coverage gap, not something to hide.
     """
     cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=days)
-    runs = await ValidationRun.find(ValidationRun.created_at >= cutoff).to_list()
+    runs = await ValidationRun.find(ValidationRun.created_at >= cutoff, NOT_SMOKE_TEST).to_list()
 
     by_model: dict[Optional[str], dict] = {}
     for r in runs:
@@ -1213,6 +1214,7 @@ async def get_quality_items(
             ValidationRun.find(
                 ValidationRun.item_kind == m.item_kind,
                 ValidationRun.item_id == m.item_id,
+                NOT_SMOKE_TEST,
             )
             .sort("-created_at")
             .limit(2)
@@ -1262,6 +1264,7 @@ async def get_quality_item_detail(item_kind: str, item_id: str) -> dict:
         ValidationRun.find(
             ValidationRun.item_kind == item_kind,
             ValidationRun.item_id == item_id,
+            NOT_SMOKE_TEST,
         )
         .sort("-created_at")
         .to_list()

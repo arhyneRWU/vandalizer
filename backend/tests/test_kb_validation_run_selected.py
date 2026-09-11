@@ -150,6 +150,24 @@ def test_latest_run_reads_leave_smoke_tests_out():
         assert "NOT_SMOKE_TEST" in inspect.getsource(fn), fn.__name__
 
 
+def test_admin_aggregate_reads_leave_smoke_tests_out():
+    """The dashboard's trend arrows, per-model averages, fleet timeline and
+    summary are built from every run they read — a three-query smoke test
+    scoring 100 must not flip a trend or enter an average. (History keeps
+    them: it labels the row "selected n/N".)"""
+    import inspect
+    from app.services import quality_service
+
+    for fn in (
+        quality_service.get_quality_summary,
+        quality_service.get_quality_timeline,
+        quality_service.get_quality_by_model,
+        quality_service.get_quality_items,
+        quality_service.get_quality_item_detail,
+    ):
+        assert "NOT_SMOKE_TEST" in inspect.getsource(fn), fn.__name__
+
+
 # ---------------------------------------------------------------------------
 # The export says what the run covered
 # ---------------------------------------------------------------------------
