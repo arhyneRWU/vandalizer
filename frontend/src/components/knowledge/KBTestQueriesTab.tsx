@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Plus, Sparkles, Trash2, Bot, User, Loader2, Pencil, Upload, Search } from 'lucide-react'
+import { Plus, Sparkles, Trash2, Bot, User, Loader2, Pencil, Upload, Play, Search } from 'lucide-react'
 import {
   createKBTestQuery,
   updateKBTestQuery,
@@ -19,6 +19,12 @@ interface Props {
   canManage: boolean
   queries: KBTestQuery[]
   onChange: () => void
+  /** Run a validation over just the selected queries (a smoke test). The
+   *  panel owns the run, so its result shows on the Run tab and in History
+   *  with only those questions. Absent when running is not offered. */
+  onRunSelected?: (uuids: string[]) => void
+  /** True while any validation run is in flight — disables Run selected. */
+  running?: boolean
 }
 
 export type DraftShape = {
@@ -105,7 +111,9 @@ export function draftToUpdatePayload(draft: DraftShape) {
   }
 }
 
-export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange }: Props) {
+export function KBTestQueriesTab({
+  kbUuid, kbReady, canManage, queries, onChange, onRunSelected, running = false,
+}: Props) {
   const confirm = useConfirm()
   const { toast } = useToast()
   const [showGen, setShowGen] = useState(false)
@@ -223,6 +231,12 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
       return next
     })
     await onChange()
+  }
+
+  const handleRunSelected = () => {
+    const uuids = queries.filter(q => selected.has(q.uuid)).map(q => q.uuid)
+    if (uuids.length === 0 || !onRunSelected) return
+    onRunSelected(uuids)
   }
 
   const handleDeleteSelected = async () => {
@@ -410,6 +424,24 @@ export function KBTestQueriesTab({ kbUuid, kbReady, canManage, queries, onChange
               >
                 Clear
               </button>
+              {onRunSelected && (
+                <button
+                  type="button"
+                  onClick={handleRunSelected}
+                  disabled={!kbReady || running || bulkDeleting}
+                  title={
+                    'Validate only the selected questions (judge mode). The run appears on the Run tab ' +
+                    'and in History, where its export holds just these questions. It is a smoke test and ' +
+                    "does not change the KB's quality score."
+                  }
+                  style={btn(kbReady && !running && !bulkDeleting, '#2563eb')}
+                >
+                  {running
+                    ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} aria-hidden="true" />
+                    : <Play size={12} aria-hidden="true" />}
+                  {running ? 'Running…' : `Run selected (${selectedCount})`}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleDeleteSelected}

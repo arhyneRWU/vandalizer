@@ -186,6 +186,10 @@ def build_kb_validation_results_export(
         "kb_title": kb.title,
         "mode": snap.get("mode"),
         "judge_model": snap.get("judge_model"),
+        # {"selected": n, "total": N} when the run covered hand-picked
+        # queries only ("Run selected" on the Test Queries tab). Such a run
+        # is a smoke test, not the KB's quality score.
+        "query_selection": snap.get("query_selection"),
         # The model that generated the graded answers. Older runs recorded
         # neither; ``answer_model_fallback`` is set when the KB's applied
         # override named a model System Config no longer had, so the user's
