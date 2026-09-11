@@ -115,7 +115,7 @@
       "  **Step 3** — Formatter: Format the analysis into a structured compliance summary report.",
       "Run the workflow against **subaward-agreement.pdf**.",
       "Verify the pipeline chains correctly: extraction → analysis → formatted report.",
-      "Why Extraction first here: the agreement is long and the terms you want are fixed fields. Extraction is optional and task-dependent — a short or context-heavy document can go straight to a Prompt that reads the whole file (the first step receives the document automatically). See Module 3’s lesson on the extract-reason-deliver pattern."
+      "Why Extraction first here: the terms you want are fixed fields the lab checks one by one, and the point of this lab is to chain three steps. Extraction is optional and task-dependent — a short or context-heavy document can go straight to a Prompt that reads the whole file (the first step receives the document automatically). See Module 3’s lesson on the extract-reason-deliver pattern."
     ],
     "expected_fields": [
       "Prime Recipient", "Subrecipient", "Subaward Amount", "Performance Period",
