@@ -355,7 +355,7 @@ async def test_generate_end_to_end_persist_false():
     assert "(quick coverage, model test-model)" in tq.notes
 
 
-def _run_generate(payload: dict, *, sampled, existing_ids, title="Doc KB"):
+def _run_generate(payload: dict, *, sampled, existing_ids, title="Doc KB", persist=False):
     """Drive generate() with a canned LLM payload; returns the constructed rows."""
     fake_kb = MagicMock()
     fake_kb.uuid = "kb-1"
@@ -388,7 +388,7 @@ def _run_generate(payload: dict, *, sampled, existing_ids, title="Doc KB"):
             find_call = MagicMock()
             find_call.to_list = AsyncMock(return_value=sources)
             KBS.find = MagicMock(return_value=find_call)
-            return await KBQuestionGenerator().generate("kb-1", "u1", coverage="quick", persist=False)
+            return await KBQuestionGenerator().generate("kb-1", "u1", coverage="quick", persist=persist)
 
     return run()
 
@@ -411,6 +411,29 @@ async def test_generate_continues_numbering_after_existing_ids_and_keeps_imports
         existing_ids=["SUB-002", "DOC-AUTO-Q001", "DOC-AUTO-Q004"],
     )
     assert [q.external_id for q in created] == ["DOC-AUTO-Q005", "DOC-AUTO-Q006"]
+
+
+@pytest.mark.asyncio
+async def test_generate_persisted_rows_reserve_ids_against_the_kb():
+    """A persisted generation re-checks the KB per ID (a concurrent generation
+    may have taken the number since the read); a preview does not touch it."""
+    from app.services import kb_test_query_ids
+    payload = {"questions": [
+        {"query": "Q1?", "expected_answer": "A1.", "expected_source_labels": ["Doc A"], "source_chunk_ids": ["src-1_chunk_0"]},
+    ]}
+    tq_model = MagicMock()
+    tq_model.find_one = AsyncMock(side_effect=[MagicMock(), None])  # Q001 taken meanwhile, Q002 free
+    with patch("app.models.kb_test_query.KBTestQuery", tq_model):
+        created = await _run_generate(payload, sampled=_TWO_CHUNKS, existing_ids=[], persist=True)
+    assert [q.external_id for q in created] == ["DOC-AUTO-Q002"]
+    created[0].insert.assert_awaited_once()
+
+    tq_model.find_one.reset_mock(side_effect=True)
+    tq_model.find_one.return_value = MagicMock()
+    with patch("app.models.kb_test_query.KBTestQuery", tq_model):
+        preview = await _run_generate(payload, sampled=_TWO_CHUNKS, existing_ids=[])
+    assert [q.external_id for q in preview] == ["DOC-AUTO-Q001"]
+    tq_model.find_one.assert_not_awaited()
 
 
 @pytest.mark.asyncio

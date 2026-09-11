@@ -42,6 +42,9 @@ def kb_id_prefix(title: Optional[str], uuid: str = "") -> str:
     """
     words = re.findall(r"[A-Za-z0-9]+", title) if isinstance(title, str) else []
     significant = [w for w in words if w.lower() not in _PREFIX_STOPWORDS] or words
+    # "2 CFR 200" should read as CFR, not 2C2: numerals only count when the
+    # title has nothing else.
+    significant = [w for w in significant if not w.isdigit()] or significant
     if len(significant) == 1:
         prefix = significant[0][:_MAX_SINGLE_WORD].upper()
     elif significant:
@@ -73,19 +76,39 @@ def next_auto_query_number(existing_ids: Iterable[Optional[str]]) -> int:
 
 
 class AutoQueryIdAllocator:
-    """Hands out consecutive auto IDs that collide with nothing on the KB."""
+    """Hands out consecutive auto IDs continuing past everything on the KB.
+
+    ``allocate`` is pure: it continues from the IDs it was given. ``reserve``
+    re-checks the KB before handing an ID out, so two writers that read the
+    same IDs (a generation racing another generation, a backfill, or an
+    import) do not both mint the same number — there is no unique index on
+    ``external_id`` to catch that after the fact.
+    """
 
     def __init__(self, prefix: str, existing_ids: Iterable[Optional[str]]):
         self.prefix = prefix
-        self._taken = {eid for eid in existing_ids if eid}
-        self._next = next_auto_query_number(self._taken)
+        self._next = next_auto_query_number(existing_ids)
 
     def allocate(self) -> str:
+        candidate = auto_query_id(self.prefix, self._next)
+        self._next += 1
+        return candidate
+
+    async def reserve(self, kb_uuid: str, *, exclude_uuid: Optional[str] = None) -> str:
+        """The next ID no *other* row on the KB holds right now.
+
+        ``exclude_uuid`` is the row about to receive the ID: a backfill that
+        re-runs concurrently assigns the same IDs to the same rows, and its
+        own earlier write must not read as a collision.
+        """
+        from app.models.kb_test_query import KBTestQuery
+
         while True:
-            candidate = auto_query_id(self.prefix, self._next)
-            self._next += 1
-            if candidate not in self._taken:
-                self._taken.add(candidate)
+            candidate = self.allocate()
+            query: dict = {"knowledge_base_uuid": kb_uuid, "external_id": candidate}
+            if exclude_uuid:
+                query["uuid"] = {"$ne": exclude_uuid}
+            if await KBTestQuery.find_one(query) is None:
                 return candidate
 
 
@@ -112,7 +135,8 @@ async def backfill_auto_query_ids(kb) -> int:
     """Give IDs to a KB's auto-generated queries that predate this scheme.
 
     Deterministic — oldest first, continuing from the highest existing
-    number — so two concurrent callers assign the same IDs to the same rows.
+    number — so two concurrent callers assign the same IDs to the same rows;
+    an ID a concurrent generation took in the meantime is skipped.
     Returns how many rows were updated. Imported and hand-written queries
     are left exactly as they are.
     """
@@ -130,6 +154,6 @@ async def backfill_auto_query_ids(kb) -> int:
     )
     missing.sort(key=lambda q: (q.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), q.uuid))
     for q in missing:
-        q.external_id = allocator.allocate()
+        q.external_id = await allocator.reserve(kb.uuid, exclude_uuid=q.uuid)
         await q.save()
     return len(missing)

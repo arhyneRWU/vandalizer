@@ -22,6 +22,11 @@ class TestPrefix:
     def test_single_word_title_keeps_the_word(self):
         assert kb_id_prefix("FCOI", "abc") == "FCOI"
 
+    def test_numerals_yield_to_words_in_a_mixed_title(self):
+        assert kb_id_prefix("2 CFR 200") == "CFR"
+        assert kb_id_prefix("2 CFR 200 Uniform Guidance") == "CUG"
+        assert kb_id_prefix("2024") == "2024"
+
     def test_single_long_word_is_capped(self):
         assert kb_id_prefix("Handbook", "abc") == "HANDBO"
 
@@ -63,14 +68,26 @@ class TestNumbering:
         """A renamed KB changes the prefix; the sequence must not restart."""
         assert next_auto_query_number(["OLD-AUTO-Q004"]) == 5
 
-    def test_allocator_skips_an_imported_id_that_happens_to_collide(self):
+    @pytest.mark.asyncio
+    async def test_reserve_skips_an_id_another_writer_took_since_the_read(self):
+        """Two generations that read the same IDs must not both mint Q003."""
         alloc = AutoQueryIdAllocator("FCOI", ["FCOI-AUTO-Q002"])
-        # Highest is 2, so the next number is 3 — but suppose an import took
-        # 3 under a form the suffix regex does not parse the same way:
-        alloc = AutoQueryIdAllocator("FCOI", ["FCOI-AUTO-Q002", "FCOI-AUTO-Q003 "])
-        first = alloc.allocate()
-        assert first == "FCOI-AUTO-Q003"
-        assert alloc.allocate() == "FCOI-AUTO-Q004"
+        taken = {"FCOI-AUTO-Q003"}
+        tq = MagicMock()
+        tq.find_one = AsyncMock(side_effect=lambda q: MagicMock() if q["external_id"] in taken else None)
+        with patch("app.models.kb_test_query.KBTestQuery", tq):
+            assert await alloc.reserve("kb-1") == "FCOI-AUTO-Q004"
+        assert tq.find_one.call_args_list[0].args[0] == {"knowledge_base_uuid": "kb-1", "external_id": "FCOI-AUTO-Q003"}
+
+    @pytest.mark.asyncio
+    async def test_reserve_ignores_the_row_being_backfilled(self):
+        """A concurrent backfill's own write to the same row is not a collision."""
+        alloc = AutoQueryIdAllocator("FCOI", [])
+        tq = MagicMock()
+        tq.find_one = AsyncMock(return_value=None)
+        with patch("app.models.kb_test_query.KBTestQuery", tq):
+            assert await alloc.reserve("kb-1", exclude_uuid="a1") == "FCOI-AUTO-Q001"
+        assert tq.find_one.call_args.args[0]["uuid"] == {"$ne": "a1"}
 
     def test_allocator_never_repeats_within_a_batch(self):
         alloc = AutoQueryIdAllocator("KB", [])
@@ -106,6 +123,7 @@ def _patched_find(rows):
     find_call.to_list = AsyncMock(return_value=rows)
     tq = MagicMock()
     tq.find = MagicMock(return_value=find_call)
+    tq.find_one = AsyncMock(return_value=None)  # reserve's re-check: nothing raced us
     return tq
 
 

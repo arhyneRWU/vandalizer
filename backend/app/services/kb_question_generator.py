@@ -247,7 +247,9 @@ class KBQuestionGenerator:
                     model_name=model_name,
                     generated_at=generated_at,
                 ),
-                external_id=allocator.allocate(),
+                # A preview never touches the KB; a persisted row re-checks
+                # the KB so a concurrent generation cannot mint the same ID.
+                external_id=(await allocator.reserve(kb_uuid)) if persist else allocator.allocate(),
                 source_chunk_ids=chunk_ids,
                 auto_generated=True,
                 user_id=user_id,
