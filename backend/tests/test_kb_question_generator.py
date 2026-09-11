@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
+
 import pytest
 
 from app.services import kb_question_generator
@@ -289,6 +291,7 @@ async def test_generate_end_to_end_persist_false():
     """Happy path: sample chunks → call LLM (mocked) → parse → return KBTestQuery objects."""
     fake_kb = MagicMock()
     fake_kb.uuid = "kb-1"
+    fake_kb.title = "Export Control Regulations"
     sources = [_make_source("src-1", "Doc A", chunk_count=5)]
 
     sampled = [{
@@ -323,6 +326,7 @@ async def test_generate_end_to_end_persist_false():
     with patch.object(kb_question_generator, "KnowledgeBase") as KB, \
          patch.object(kb_question_generator, "KnowledgeBaseSource") as KBS, \
          patch.object(kb_question_generator, "KBTestQuery", side_effect=make_tq), \
+         patch.object(KBQuestionGenerator, "_existing_external_ids", new=AsyncMock(return_value=[])), \
          patch.object(KBQuestionGenerator, "_sample_chunks", return_value=sampled), \
          patch.object(kb_question_generator, "get_user_model_name", new=AsyncMock(return_value="test-model")), \
          patch.object(kb_question_generator, "get_agent_model", return_value=MagicMock()), \
@@ -343,6 +347,108 @@ async def test_generate_end_to_end_persist_false():
     assert tq.source_chunk_ids == ["src-1_chunk_0"]
     assert tq.category == "factual"
     assert tq.auto_generated is True
+    # Standardized with imported rows: a stable, human-readable ID and a
+    # provenance note in the Notes column.
+    assert tq.external_id == "ECR-AUTO-Q001"
+    assert tq.notes.startswith("Auto-generated ")
+    assert "from Doc A" in tq.notes
+    assert "(quick coverage, model test-model)" in tq.notes
+
+
+def _run_generate(payload: dict, *, sampled, existing_ids, title="Doc KB", persist=False):
+    """Drive generate() with a canned LLM payload; returns the constructed rows."""
+    fake_kb = MagicMock()
+    fake_kb.uuid = "kb-1"
+    fake_kb.title = title
+    sources = [_make_source("src-1", "Doc A", chunk_count=5), _make_source("src-2", "Doc B", chunk_count=5)]
+    fake_run = MagicMock()
+    fake_run.output = json.dumps(payload)
+    fake_agent = MagicMock()
+    fake_agent.run = AsyncMock(return_value=fake_run)
+    constructed = []
+
+    def make_tq(**kwargs):
+        m = MagicMock()
+        for k, v in kwargs.items():
+            setattr(m, k, v)
+        m.insert = AsyncMock()
+        constructed.append(m)
+        return m
+
+    async def run():
+        with patch.object(kb_question_generator, "KnowledgeBase") as KB, \
+             patch.object(kb_question_generator, "KnowledgeBaseSource") as KBS, \
+             patch.object(kb_question_generator, "KBTestQuery", side_effect=make_tq), \
+             patch.object(KBQuestionGenerator, "_existing_external_ids", new=AsyncMock(return_value=existing_ids)), \
+             patch.object(KBQuestionGenerator, "_sample_chunks", return_value=sampled), \
+             patch.object(kb_question_generator, "get_user_model_name", new=AsyncMock(return_value="test-model")), \
+             patch.object(kb_question_generator, "get_agent_model", return_value=MagicMock()), \
+             patch("app.services.kb_question_generator.Agent", return_value=fake_agent):
+            KB.find_one = AsyncMock(return_value=fake_kb)
+            find_call = MagicMock()
+            find_call.to_list = AsyncMock(return_value=sources)
+            KBS.find = MagicMock(return_value=find_call)
+            return await KBQuestionGenerator().generate("kb-1", "u1", coverage="quick", persist=persist)
+
+    return run()
+
+
+_TWO_CHUNKS = [
+    {"chunk_id": "src-1_chunk_0", "source_id": "src-1", "source_name": "Doc A", "content": "x"},
+    {"chunk_id": "src-2_chunk_0", "source_id": "src-2", "source_name": "Doc B", "content": "y"},
+]
+
+
+@pytest.mark.asyncio
+async def test_generate_continues_numbering_after_existing_ids_and_keeps_imports():
+    """A second generation must not reuse Q001, and an imported ID is never reassigned."""
+    payload = {"questions": [
+        {"query": "Q1?", "expected_answer": "A1.", "expected_source_labels": ["Doc A"], "source_chunk_ids": ["src-1_chunk_0"]},
+        {"query": "Q2?", "expected_answer": "A2.", "expected_source_labels": ["Doc B"], "source_chunk_ids": ["src-2_chunk_0"]},
+    ]}
+    created = await _run_generate(
+        payload, sampled=_TWO_CHUNKS,
+        existing_ids=["SUB-002", "DOC-AUTO-Q001", "DOC-AUTO-Q004"],
+    )
+    assert [q.external_id for q in created] == ["DOC-AUTO-Q005", "DOC-AUTO-Q006"]
+
+
+@pytest.mark.asyncio
+async def test_generate_persisted_rows_reserve_ids_against_the_kb():
+    """A persisted generation re-checks the KB per ID (a concurrent generation
+    may have taken the number since the read); a preview does not touch it."""
+    from app.services import kb_test_query_ids
+    payload = {"questions": [
+        {"query": "Q1?", "expected_answer": "A1.", "expected_source_labels": ["Doc A"], "source_chunk_ids": ["src-1_chunk_0"]},
+    ]}
+    tq_model = MagicMock()
+    tq_model.find_one = AsyncMock(side_effect=[MagicMock(), None])  # Q001 taken meanwhile, Q002 free
+    with patch("app.models.kb_test_query.KBTestQuery", tq_model):
+        created = await _run_generate(payload, sampled=_TWO_CHUNKS, existing_ids=[], persist=True)
+    assert [q.external_id for q in created] == ["DOC-AUTO-Q002"]
+    created[0].insert.assert_awaited_once()
+
+    tq_model.find_one.reset_mock(side_effect=True)
+    tq_model.find_one.return_value = MagicMock()
+    with patch("app.models.kb_test_query.KBTestQuery", tq_model):
+        preview = await _run_generate(payload, sampled=_TWO_CHUNKS, existing_ids=[])
+    assert [q.external_id for q in preview] == ["DOC-AUTO-Q001"]
+    tq_model.find_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_fills_source_from_cited_chunks_when_labels_are_invented():
+    """The Source column is never blank for a chunk-grounded question."""
+    payload = {"questions": [
+        {"query": "Q1?", "expected_answer": "A1.", "expected_source_labels": ["Made-up name"],
+         "source_chunk_ids": ["src-2_chunk_0"], "category": "summary"},
+    ]}
+    created = await _run_generate(payload, sampled=_TWO_CHUNKS, existing_ids=[])
+    tq = created[0]
+    assert tq.expected_source_labels == ["Doc B"]
+    assert tq.category == "summary"
+    assert tq.external_id == "DOC-AUTO-Q001"
+    assert "from Doc B" in tq.notes
 
 
 @pytest.mark.asyncio
@@ -350,6 +456,7 @@ async def test_generate_caps_results_to_target_count():
     """Even if the LLM returns more questions than requested, we cap at target."""
     fake_kb = MagicMock()
     fake_kb.uuid = "kb-1"
+    fake_kb.title = "Doc KB"
     sources = [_make_source("src-1", "Doc A", chunk_count=5)]
     sampled = [{"chunk_id": "src-1_chunk_0", "source_id": "src-1", "source_name": "Doc A", "content": "x"}]
 
@@ -374,6 +481,7 @@ async def test_generate_caps_results_to_target_count():
     with patch.object(kb_question_generator, "KnowledgeBase") as KB, \
          patch.object(kb_question_generator, "KnowledgeBaseSource") as KBS, \
          patch.object(kb_question_generator, "KBTestQuery", side_effect=make_tq), \
+         patch.object(KBQuestionGenerator, "_existing_external_ids", new=AsyncMock(return_value=[])), \
          patch.object(KBQuestionGenerator, "_sample_chunks", return_value=sampled), \
          patch.object(kb_question_generator, "get_user_model_name", new=AsyncMock(return_value="test-model")), \
          patch.object(kb_question_generator, "get_agent_model", return_value=MagicMock()), \
@@ -393,6 +501,7 @@ async def test_generate_caps_results_to_target_count():
 async def test_generate_raises_when_no_model_configured():
     fake_kb = MagicMock()
     fake_kb.uuid = "kb-1"
+    fake_kb.title = "Doc KB"
     sources = [_make_source("src-1", "Doc A", chunk_count=5)]
     sampled = [{"chunk_id": "src-1_chunk_0", "source_id": "src-1", "source_name": "Doc A", "content": "x"}]
 
