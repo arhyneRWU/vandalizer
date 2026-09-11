@@ -102,6 +102,12 @@ RESULT_COLUMNS = [
 ]
 
 
+def _answer_model(snap: dict, vr) -> str | None:
+    """The model that generated the run's graded answers, if recorded."""
+    recorded = snap.get("answer_model") or getattr(vr, "model", None)
+    return recorded if isinstance(recorded, str) and recorded else None
+
+
 def build_kb_validation_results_export(
     *,
     kb,
@@ -180,6 +186,12 @@ def build_kb_validation_results_export(
         "kb_title": kb.title,
         "mode": snap.get("mode"),
         "judge_model": snap.get("judge_model"),
+        # The model that generated the graded answers. Older runs recorded
+        # neither; ``answer_model_fallback`` is set when the KB's applied
+        # override named a model System Config no longer had, so the user's
+        # model answered instead of the tuned one.
+        "answer_model": _answer_model(snap, vr),
+        "answer_model_fallback": snap.get("answer_model_fallback"),
         # ``run_score`` is the OVERALL quality score: a weighted composite of
         # answer accuracy, retrieval precision, source health, and chunk
         # coverage (see ``score_formula`` / ``score_components``). It is not

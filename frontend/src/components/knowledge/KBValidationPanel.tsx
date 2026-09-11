@@ -76,6 +76,9 @@ type LatestQualitySummary = {
   breakdown: string | null
   answerAccuracy: number | null
   judgeModel: string | null
+  // The tuned answer model could not be used (removed from System Config);
+  // the score came from ``used`` and must not be read as the tuned config's.
+  answerModelFallback: { configured: string; used: string } | null
   numQueries: number | null
   mode: string | null
   createdAt: string | null
@@ -143,6 +146,7 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
       breakdown: snap ? describeKBScoreWithValues(explainKBScore(snap).components) : null,
       answerAccuracy: snap?.retrieval_precision?.avg_judge_score ?? null,
       judgeModel: last.judge_model ?? null,
+      answerModelFallback: snap?.answer_model_fallback ?? null,
       numQueries: last.num_queries_judged ?? last.num_test_queries ?? null,
       mode: last.mode ?? null,
       createdAt: last.created_at ?? null,
@@ -267,6 +271,12 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
       parts.push(`answer accuracy ${(latestQuality.answerAccuracy * 100).toFixed(0)}%`)
     }
     if (latestQuality.judgeModel) parts.push(`judged by ${latestQuality.judgeModel}`)
+    if (latestQuality.answerModelFallback) {
+      parts.push(
+        `answered by ${latestQuality.answerModelFallback.used}, not the tuned `
+        + `${latestQuality.answerModelFallback.configured} (no longer in System Config)`,
+      )
+    }
     if (latestQuality.numQueries != null) parts.push(`on ${latestQuality.numQueries} queries`)
     if (latestQuality.mode) parts.push(`(${latestQuality.mode})`)
     if (latestQuality.createdAt) {
@@ -343,6 +353,17 @@ export function KBValidationPanel({ kbUuid, kbReady, canManage, kbHasSources = t
             }}
           >
             {provenance}
+          </span>
+        )}
+        {latestQuality?.answerModelFallback && (
+          <span
+            title={`The applied optimization pins ${latestQuality.answerModelFallback.configured}, which is no longer in System Config. This score was answered by ${latestQuality.answerModelFallback.used}. Re-run Autovalidate or revert the optimization to clear this.`}
+            style={{
+              fontSize: 10, color: '#f59e0b',
+              maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            tuned model unavailable · answered by {shortenModel(latestQuality.answerModelFallback.used)}
           </span>
         )}
         {collapsed && running && (

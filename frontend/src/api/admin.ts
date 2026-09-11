@@ -376,13 +376,17 @@ export interface SystemConfigData {
   default_team_id: string
   compliance_config: CompliancePolicyConfig
   retention_config: Record<string, unknown>
+  /** Exact hostnames outbound steps may reach although they resolve to a private address. */
+  outbound_url_allowed_hosts: string[]
+  /** Read-only: the operator's OUTBOUND_URL_ALLOWED_HOSTS, merged with the list above. */
+  outbound_url_env_allowed_hosts?: string[]
 }
 
 export function getSystemConfig() {
   return apiFetch<SystemConfigData>('/api/admin/config')
 }
 
-export function updateSystemConfig(data: { extraction_config?: Record<string, unknown>; quality_config?: Record<string, unknown>; retention_config?: Record<string, unknown>; ocr_endpoint?: string; ocr_api_key?: string; ocr_provider?: OcrProvider; ocr_options?: Record<string, unknown>; ocr_async?: boolean; ocr_timeout_seconds?: number; llm_endpoint?: string; default_team_id?: string; support_contacts?: { user_id: string; email: string; name: string }[] }) {
+export function updateSystemConfig(data: { extraction_config?: Record<string, unknown>; quality_config?: Record<string, unknown>; retention_config?: Record<string, unknown>; ocr_endpoint?: string; ocr_api_key?: string; ocr_provider?: OcrProvider; ocr_options?: Record<string, unknown>; ocr_async?: boolean; ocr_timeout_seconds?: number; llm_endpoint?: string; default_team_id?: string; support_contacts?: { user_id: string; email: string; name: string }[]; outbound_url_allowed_hosts?: string[] }) {
   return apiFetch<{ status: string }>('/api/admin/config', { method: 'PUT', body: JSON.stringify(data) })
 }
 

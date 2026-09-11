@@ -7,6 +7,7 @@ import {
   type KBValidationDetail,
 } from '../../api/knowledge'
 import { explainKBScore } from './kbScoreFormula'
+import { useIsAdmin } from '../../utils/truncationWarning'
 
 interface Props {
   kbReady: boolean
@@ -396,10 +397,14 @@ function DetailRow({
 }
 
 function TruncationNote({ what }: { what: string }) {
+  // Regular users cannot open Admin → System Config, so the remedy that lives
+  // there is shown to admins only; everyone else gets the fix they can make.
+  const isAdmin = useIsAdmin()
   return (
     <div style={{ fontSize: 11, color: '#f59e0b' }} role="note">
       {what} stopped at the model&apos;s output limit, so the judge scored an incomplete answer.
-      Raise “Response reserve (output tokens)” for this model under Admin → System Config → Models.
+      {' '}Shorter or more focused test queries fit within the limit.
+      {isAdmin && ' As an admin, you can also raise “Response reserve (output tokens)” for this model under Admin → System Config → Models.'}
     </div>
   )
 }

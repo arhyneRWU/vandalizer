@@ -247,6 +247,11 @@ export type KBValidationResult = {
   num_sources: number
   mode?: KBValidationMode
   judge_model?: string | null
+  /** The model that generated the graded answers (absent on older runs). */
+  answer_model?: string | null
+  /** Set when the KB's applied override named a model System Config no
+   *  longer has, so the user's model answered instead of the tuned one. */
+  answer_model_fallback?: { configured: string; used: string; reason?: string } | null
   source_health: {
     total: number
     healthy: number
