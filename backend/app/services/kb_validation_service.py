@@ -1747,7 +1747,10 @@ async def run_kb_validation(
                     (kb.rag_config_override or {}).get("model")
                     if isinstance(kb.rag_config_override, dict) else None
                 )
-                if override_model and not model and answer_cfg.model != override_model:
+                if (
+                    override_model and not model
+                    and await _configured_model_name(override_model) is None
+                ):
                     answer_model_fallback = {
                         "configured": override_model,
                         "used": effective_answer_model,

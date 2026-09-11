@@ -1539,3 +1539,22 @@ async def test_run_kb_validation_no_fallback_note_when_override_model_exists():
     assert persisted["model"] == "openai/gpt-oss-120b"
     assert judge.call_args.kwargs["answer_config"].model == "openai/gpt-oss-120b"
     assert "error" not in result["retrieval_precision"]["details"][0]
+
+
+@pytest.mark.asyncio
+async def test_run_kb_validation_no_fallback_note_when_override_is_a_tag_that_resolves():
+    """An override pinned by tag resolves to a different *name*; that is not
+    a fallback, and the run must not say the tuned model was unavailable."""
+    fake_kb = MagicMock()
+    fake_kb.uuid, fake_kb.title = "kb-1", "2 CFR 200"
+    fake_kb.rag_config_override = {"k": 8, "model": "Strong"}
+    judge_payload = {
+        "details": [{"query_uuid": "q1", "judge": {"score": 1.0, "verdict": "PASS"}}],
+        "avg_judge_score": 1.0, "num_queries_judged": 1,
+    }
+
+    result, persisted, judge = await _run_with(fake_kb, judge_payload)
+
+    assert result["answer_model"] == "qwen/qwen3.8-27b"
+    assert result["answer_model_fallback"] is None
+    assert judge.call_args.kwargs["answer_config"].model == "qwen/qwen3.8-27b"
